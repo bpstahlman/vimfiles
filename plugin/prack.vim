@@ -194,9 +194,7 @@ fu! s:get_cfg_idx(opt)
 		endif
     else
 		" Look for name in s:longnames (array of {'name', ..., 're': ..., 'idx': ...})
-        echo "name=" . name
 		for lname in s:longnames
-            echo lname
             if name <# lname.name
                 break
             elseif name ==# lname.name || name =~# lname.re
@@ -324,42 +322,52 @@ fu! s:refresh(opts)
 		call s:restore_state()
 	endtry
 endfu
-fu! s:ack(bang, use_ll, mode, ...)
+fu! s:ack(bang, use_ll, mode, args)
 	call s:save_state()
 	try
-		" Find dir from which to grep.
-		let grepdir = ''
-		if a:mode == 'js'
-			let grepdir = finddir('public', ';public')
-		elseif a:mode == 'php'
-			let grepdir = finddir('private', ';private')
-		elseif a:mode == 'file'
-			let grepdir = expand('%:h')
-		elseif a:mode == 'dir'
-			let grepdir = getcwd()
-		else
-			throw "Invalid grep mode `" . a:mode . "'. Supported values: php|js|file|dir"
-		endif
-		if grepdir == ''
-			throw "Couldn't locate project base."
-		endif
-		exe 'lcd ' . grepdir
-		let args = a:000[:]
-		call map(args, 'shellescape(v:val)')
-
-		let files_from = ' '
-		if (a:mode != 'file' && a:mode != 'dir')
-			if !filereadable(g:prack_listfile)
-				" TODO: Decide whether to abort, or eventually, continue with next list file
-				throw "List file unreadable."
-			endif
-			let files_from = ' --files-from=' . g:prack_listfile . ' '
-		endif
-		" TODO: Check for list file existence.
-		exe (a:use_ll ? 'l' : '') . 'grep' . (a:bang == '!' ? 'add' : '')
-					\. files_from
-					\. join(args, ' ')
-
+        " Break raw command line into parsed prack options, and string
+        " containing everything else (essentially, the ack options).
+		let pcl = s:parse_cmdline(a:args)
+        " Get list of config indices.
+        " Design Decision: Abort on bad option, even if multiple specified.
+        " TODO: Refactor to make this part of command line parsing, since it's used in several places.
+        let sels = []
+		for opt in pcl.opts
+            " Note: In case it's needed for display, convert s:a to -a and l:abc to --abc
+			let [idx, opt] = [s:get_cfg_idx(opt), (opt[0] == 'l' ? '--' : '-') . opt[2:]]
+            if idx == -1
+                echoerr "Invalid subproject option: " . opt
+            else
+                call add(sels, {'idx': idx, 'opt': opt})
+            endif
+		endfor
+        if a:mode != 'file' && a:mode != 'dir'
+            " Process the selected configs.
+            for sel in sels
+                let cfg = s:module_cfg[sel.idx]
+                let rootdir = call('finddir', cfg.root)
+                if rootdir == ''
+                    throw "Couldn't locate project base. Make sure your cwd is within the project."
+                endif
+                exe 'lcd ' . rootdir
+                if !filereadable(s:listfile)
+                    " TODO: Decide whether to abort, or eventually, continue with next list file
+                    echohl WarningMsg|echomsg "Warning: Skipping unreadable listfile `"
+                                \. getcwd() . "/" . s:listfile . "', selected by "
+                                \. sel.opt|echohl None
+                endif
+                " Run [l]grep[add] with appropriate args.
+                exe (a:use_ll ? 'l' : '') . 'grep' . (a:bang == '!' ? 'add' : '')
+                            \. ' --files-from=' . s:listfile
+                            \. ' ' . pcl.rem
+            endfor
+        else
+            " Run [l]grep[add] with appropriate args.
+            exe (a:use_ll ? 'l' : '') . 'grep' . (a:bang == '!' ? 'add' : '')
+                        \. ' ' . pcl.rem
+        endif
+	catch /Vim(echoerr)/
+		echohl ErrorMsg|echomsg v:exception|echohl None
 	finally
 		call s:restore_state()
 	endtry
