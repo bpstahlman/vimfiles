@@ -53,9 +53,17 @@ endfu
 "   Dictionary mapping short (single-char) options to the index of the
 "   corresponding submodule (in config array).
 " s:longnames
-"   Array of Dictionaries of the following form:
-"   { 're': <regex matching name>, 'idx': <submodule index> }
+"   Sorted List of Dictionaries of the following form:
+"   { 'name': <longname>, 're': <regex matching name>, 'idx': <submodule index> }
+"   Note: Array is sorted by longname.
 fu! s:process_cfg()
+    " Determine basename of files used to hold lists of project files.
+    if exists('g:prack_listfile') && g:prack_listfile != ''
+        let s:listfile = g:prack_listfile
+    elseif
+        let s:listfile = 'prack-files.list'
+    endif
+
 	" TEMP DEBUG
 	"so ~/tmp/prack_module_cfg.txt
 	if !len(g:prack_module_cfg)
@@ -72,6 +80,8 @@ fu! s:process_cfg()
 	let lname_to_index = {}
 	let ln = len(g:prack_module_cfg)
 	let i = 0
+    " Note: Index into s:module_cfg (i.e., valid configs only)
+    let cfg_idx = 0
 	while i < ln
 		let cfg = g:prack_module_cfg[i]
 		if !has_key(cfg, 'root')
@@ -91,7 +101,7 @@ fu! s:process_cfg()
 			else
 				if !has_key(lname_to_index, cfg.name)
 					let selectable = 1
-					let lname_to_index[cfg.name] = i
+					let lname_to_index[cfg.name] = cfg_idx
 					call add(longnames, cfg.name)
 				else
 					echohl WarningMsg|echomsg "Warning: Name " . cfg.name . " used multiple times. All but first usage ignored."|echohl None
@@ -105,8 +115,8 @@ fu! s:process_cfg()
 			else
 				if !has_key(s:shortnames, cfg.shortname)
 					let selectable = 1
-					let s:shortnames[cfg.shortname] = i
-				else
+					let s:shortnames[cfg.shortname] = cfg_idx
+                else
 					echohl WarningMsg|echomsg "Warning: Name " . cfg.shortname . " used multiple times. All but first usage ignored."|echohl None
 				endif
 			endif
@@ -118,11 +128,16 @@ fu! s:process_cfg()
 		endif
 		" Current config item not skipped: i.e., valid subproject.
 		call add(s:module_cfg, deepcopy(cfg, 1))
+        " Save original index, in case it's needed for reporting.
+        " TODO: Perhaps save a title string (e.g., `--longname, -shortname')
+        " for reporting purposes...
+        let s:module_cfg[cfg_idx].orig_idx = i
+        let cfg_idx = cfg_idx + 1
 		let i = i + 1
 	endwhile
 	" If no valid subprojects, no point in continuing...
-	if !valid_cnt
-		throw "No valid subprojects."
+	if !len(s:module_cfg)
+		throw "No valid subprojects. :help prack-config"
 	endif
 	" Process the long options to determine the portions required for
 	" uniqueness.
@@ -159,33 +174,44 @@ fu! s:process_cfg()
 			" Append the optional part within \%[...]
 			let re .= '\%[' . longnames[i][len(reqs[i]):] . ']'
 		endif
-		call add(s:longnames, {'re': re, 'idx': lname_to_index[longnames[i]]})
+		call add(s:longnames, {'name': longnames[i], 're': re, 'idx': lname_to_index[longnames[i]]})
 		let i = i + 1
 	endwhile
 endfu
-" Return index into s:module_cfg corresponding to input short/long option name.
+" Return s:module_cfg index corresponding to input short/long option name (or
+" -1 if matching config not found).
 " Input(s):
 "   opt
 "     Short or long option name, prefixed with 's:' or 'l:' to indicate
 "     short/long.
 fu! s:get_cfg_idx(opt)
-	let is_short = a:opt[0:1] === 's:'
-	let name = a:opt[2:]
-	if opt[0:1] === 's:'
+	let [is_short, name] = [a:opt[0] == 's', a:opt[2:]]
+	if is_short
 		if has_key(s:shortnames, name)
 			let idx = s:shortnames[name]
 		elseif
 			return -1
 		endif
-	elseif
-		" Look for name in s:longnames (array of {'re': ..., 'idx': ...})
+    else
+		" Look for name in s:longnames (array of {'name', ..., 're': ..., 'idx': ...})
+        echo "name=" . name
 		for lname in s:longnames
+            echo lname
+            if name <# lname.name
+                break
+            elseif name ==# lname.name || name =~# lname.re
+                return lname.idx
+            endif
 		endfor
+        " Not found!
+        return -1
 	endif
 endfu
 " <<<
 " >>> Functions used during command execution
 " Save any state that needs to be changed to perform the grep.
+" TODO: Perhaps a string of flags indicating which state to save? (Need to add
+" ability to save regex engine to use.)
 fu! s:save_state()
 	let s:cwd_save = getcwd()
 	let s:grepprg_save = &grepprg
@@ -260,7 +286,7 @@ fu! s:parse_cmdline(cmdline)
 	"                                      (---------------------------1---------------------------)  <--------------2-------------->     (-3--)
 	let m = matchlist(a:cmdline, '\%#=1^\s*\(\%(--\?[^-[:space:]]\+\)\%(\s\+--\?[^-[:space:]]\+\)*\)\?\%(\%(^\|\s\+\)--\%(\s\+\|$\)\)\?\s*\(.*\)$')
 	let [optstr, remstr] = m[1:2]
-	return {'opt': s:extract_opts(optstr), 'rem': remstr}
+	return {'opts': s:extract_opts(optstr), 'rem': remstr}
 endfu
 " <<<
 " >>> Functions invoked by commands
@@ -271,36 +297,26 @@ fu! s:refresh(opts)
 		if pcl.rem != ''
 			echoerr "Invalid arguments specified in Refresh command: `" . pcl.rem . "'"
 		endif
-		" Extract list of long and short opts.
-		let opts = s:extract_opts(a:opts)
-
-		for opt in opts
-			let is_short = opt[0] === 's'
-			let cfg_idx = s:lookup_cfg_idx(opt)
-
+        " Get list of config indices.
+        " Design Decision: Abort on bad option, even if multiple specified.
+        let cfg_idxs = []
+		for opt in pcl.opts
+			let cfg_idx = s:get_cfg_idx(opt)
+            if cfg_idx == -1
+                echoerr "Invalid subproject option: " . (opt[0] == 'l' ? '--' : '-') . opt[2:]
+            endif
+            call add(cfg_idxs, cfg_idx)
 		endfor
-		for cfg in s:module_cfg
+        " Process the selected configs.
+		for cfg_idx in cfg_idxs
+            let cfg = s:module_cfg[cfg_idx]
 			let rootdir = call('finddir', cfg.root)
 			if rootdir == ''
-				throw "Couldn't locate project base."
+				throw "Couldn't locate project base. Make sure your cwd is within the project."
 			endif
 			exe 'lcd ' . rootdir
-			" Pattern: Note that the part within prune parens (along with the following -o is optional, contingent upon
-			" existence of items in prunes.
-			" Assumption: Will always be at least 1 -iname predicate.
-			" find ( ( -path EXC_DIR1 -o -path EXC_DIR2 ... ) -prune -false ) -o -iname GLOB1 -o -iname GLOB2 ...
-			let oprn = ' ' . shellescape('(') . ' '
-			let cprn = ' ' . shellescape(')') . ' '
 			" Note: silent avoids the annoying 'Hit enter' prompt.
-			let exestr = 'silent !find '
-			if len(cfg.prunes)
-				call map(cfg.prunes, 'shellescape(v:val)')
-				let exestr .= oprn . oprn . ' -path ' . join(cfg.prunes, ' -o -path ') . cprn . ' -prune -false ' . cprn . ' -o '
-			endif
-			call map(cfg.names, 'shellescape(v:val)')
-			let exestr .= ' -iname ' . join(cfg.names, ' -o -iname ') . ' >' . g:prack_listfile
-			" Run the find...
-			exe exestr
+			exe 'silent !' . cfg.find . ' >' . s:listfile
 		endfor
 	catch /Vim(echoerr)/
 		echohl ErrorMsg|echomsg v:exception|echohl None
