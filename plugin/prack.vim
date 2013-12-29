@@ -63,22 +63,17 @@ fu! s:process_cfg()
 		echoerr "Must define at least one project module within g:prack_module_cfg"
 		return
 	endif
-	" Use snapshot of global config until re-initialization.
-	let s:module_cfg = deepcopy(g:prack_module_cfg, 1)
+	" Build snapshot of global config until re-initialization.
+	let s:module_cfg = []
 	" Short (single-char) names stored in a hash
 	" Long names stored in sorted array of patterns employing \%[...]
 	let s:shortnames = {}
 	let longnames = []
 	let lname_to_index = {}
-	let ln = len(s:module_cfg)
-	" Note: i indexes the subproject config snapshot
+	let ln = len(g:prack_module_cfg)
 	let i = 0
-	" Note: valid_cnt will diverge from i if there are invalid config items.
-	" Ok because the indexes into s:shortnames and s:longnames aren't
-	" significant.
-	let valid_cnt = 0
 	while i < ln
-		let cfg = s:module_cfg[i]
+		let cfg = g:prack_module_cfg[i]
 		if !has_key(cfg, 'root')
 			echohl WarningMsg|echomsg "Warning: Skipping invalid subproject config at index " . i . ": no `root' pattern specified."|echohl None
 			let i = i + 1 | continue
@@ -122,7 +117,7 @@ fu! s:process_cfg()
 			let i = i + 1 | continue
 		endif
 		" Current config item not skipped: i.e., valid subproject.
-		let valid_cnt = valid_cnt + 1
+		call add(s:module_cfg, deepcopy(cfg, 1))
 		let i = i + 1
 	endwhile
 	" If no valid subprojects, no point in continuing...
@@ -167,6 +162,26 @@ fu! s:process_cfg()
 		call add(s:longnames, {'re': re, 'idx': lname_to_index[longnames[i]]})
 		let i = i + 1
 	endwhile
+endfu
+" Return index into s:module_cfg corresponding to input short/long option name.
+" Input(s):
+"   opt
+"     Short or long option name, prefixed with 's:' or 'l:' to indicate
+"     short/long.
+fu! s:get_cfg_idx(opt)
+	let is_short = a:opt[0:1] === 's:'
+	let name = a:opt[2:]
+	if opt[0:1] === 's:'
+		if has_key(s:shortnames, name)
+			let idx = s:shortnames[name]
+		elseif
+			return -1
+		endif
+	elseif
+		" Look for name in s:longnames (array of {'re': ..., 'idx': ...})
+		for lname in s:longnames
+		endfor
+	endif
 endfu
 " <<<
 " >>> Functions used during command execution
@@ -254,13 +269,16 @@ fu! s:refresh(opts)
 	try
 		let pcl = s:parse_cmdline(a:opts)
 		if pcl.rem != ''
-			" TODO: Might need to move inside try if we're going to save/restore regex engine opt.
 			echoerr "Invalid arguments specified in Refresh command: `" . pcl.rem . "'"
-			return
 		endif
 		" Extract list of long and short opts.
 		let opts = s:extract_opts(a:opts)
 
+		for opt in opts
+			let is_short = opt[0] === 's'
+			let cfg_idx = s:lookup_cfg_idx(opt)
+
+		endfor
 		for cfg in s:module_cfg
 			let rootdir = call('finddir', cfg.root)
 			if rootdir == ''
@@ -284,6 +302,8 @@ fu! s:refresh(opts)
 			" Run the find...
 			exe exestr
 		endfor
+	catch /Vim(echoerr)/
+		echohl ErrorMsg|echomsg v:exception|echohl None
 	finally
 		call s:restore_state()
 	endtry
