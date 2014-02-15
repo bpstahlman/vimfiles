@@ -421,7 +421,8 @@ fu! s:Get_linebreak_info(line, col, vcol)
 	" TODO - Decide whether it's a appropriate to permit Appendix A not at
 	" beginning of line...
 	let re =
-		\'^\(\s*\)'
+		\'\%#=1'
+		\.'^\(\s*\)'
 		\.'\('
 			\.'\%('
 				\.'\%('
@@ -438,7 +439,7 @@ fu! s:Get_linebreak_info(line, col, vcol)
 		\.'\|'
 			\.'\%>'.(&tw + 1).'v\s\+'
 		\.'\)'
-		\.'\(.*\%'.(a:vcol).'v\)' " TODO: removed \? due to Vim bug?
+		\.'\(.*\%'.(a:vcol).'v\)\?'
 		\.'\(.*\)'
 let g:dbg_re = re
 	let matches = matchlist(linetext, re)
