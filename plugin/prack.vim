@@ -1,7 +1,7 @@
 " TODO: This is one of the things that would be in the user-provided config.
 " TODO: Eventually, may provide a different way to set all this: e.g., function or
 " global-vars.
-let g:prack_listfile = 'asec-files.list'
+let g:prack_listfile = 'files.list'
 
 " TODO: Remove this comment once I no longer need the big test config in ~/tmp/prack_module_cfg.vim
 let g:prack_module_cfg = [
@@ -23,6 +23,25 @@ let g:prack_module_cfg = [
     \}
 \]
 
+" The structure above will be mirrored by a list, whose indices correspond to
+" s:module_cfg (the static version of g:prack_module_cfg, which contains only
+" valid entries), and whose values are dictionaries containing the following
+" keys:
+" Distinction: s:module_cfg is static, unaffected by calls to Refresh, whereas
+" s:cache_cfg (the structure described here) must be built once at start, and
+" re-cached upon each refresh.
+" TODO: Probably change name module_cfg to static_cfg.
+"
+" rootdir
+"   Root directory in canonical form
+" files
+"   List of file paths in canonicial form
+" Note: This one probably won't be part of the structure.
+" file_filter
+"   Array in which each element is a 2 element array as follows:
+"   0: index into s:files
+"   1: byte offset into indexed path in s:files
+
 " >>> Functions used to start/stop the plugin
 fu! s:start()
     if exists('s:started')
@@ -31,6 +50,7 @@ fu! s:start()
     endif
     try
         call s:process_cfg()
+        " TODO: Do caching here...
         " Only now that we know initialization was successful...
         let s:started = 1
     catch
@@ -57,6 +77,8 @@ endfu
 "   { 'name': <longname>, 're': <regex matching name>, 'idx': <submodule index> }
 "   Note: Array is sorted by longname.
 fu! s:process_cfg()
+    " Clear out any old cache and prepare to rebuild.
+    let s:cache_cfg = []
     " Determine basename of files used to hold lists of project files.
     if exists('g:prack_listfile') && g:prack_listfile != ''
         let s:listfile = g:prack_listfile
@@ -132,6 +154,9 @@ fu! s:process_cfg()
         " TODO: Perhaps save a title string (e.g., `--longname, -shortname')
         " for reporting purposes...
         let s:module_cfg[cfg_idx].orig_idx = i
+        " Build cache, but don't force refresh.
+        call add(s:cache_cfg, {})
+        call s:cache_cfg(s:cache_cfg[-1], 1)
         let cfg_idx = cfg_idx + 1
         let i = i + 1
     endwhile
@@ -328,47 +353,118 @@ endfu
 " Return: The canonicalized list.
 " TODO: Have this done once at Refresh and initial load and saved in a
 " persistent structure.
-fu! Canonicalize_listfile(rootdir, listfile)
-    let fnames = readfile(a:listfile)
-    " Note: We must set 'shellslash' for canonicalization.
-    " TODO: Perhaps do the save/restore only at top level?
+fu! s:cache_listfile(cache_cfg, rootdir, force_refresh)
+    let success = 0
+    " See whether the listfile exists and is readable.
+    let listfile_name = g:prack_listfile
+    let listfile_path = findfile(listfile_name, a:rootdir)
+    call s:save_state()
+    " TODO: Rely upon higher-level try/catch?
+    try
+        if listfile_path == '' || a:force_refresh
+            let v:errmsg = ''
+            exe 'lcd ' . rootdir
+            " Note: silent avoids the annoying 'Hit enter' prompt.
+            exe 'silent !' . cfg.find . ' >' . listfile_name
+            if v:errmsg != ''
+                throw "Couldn't build listfile for `" . listfile . "' for subproject "
+                    \. s:module_cfg[cfg_idx].name . ": " . v:errmsg . ". Disabling subproject."
+            endif
+        endif
+        if !filereadable(listfile_path)
+            throw "Couldn't build listfile for `" . listfile . "' for subproject "
+                \. s:module_cfg[cfg_idx].name . ": " . v:errmsg . ". Disabling subproject."
+        endif
+        let files_raw = readfile(listfile_path)
+        " Note: We must set 'shellslash' for canonicalization.
+        " TODO: Perhaps do the save/restore only at top level?
+        " Build canonicalized list within loop.
+        let files = []
+        for file_raw in files_raw
+            let file_raw = Canonicalize_path(file_raw, rootdir)
+            " Add canonical name to list.
+            call add(files, file_raw)
+        endfor
+        let cache_cfg.files = files
+        let success = 1
+    catch
+        call s:warn(v:exception)
+        let cache_cfg.disabled = 1
+        let cache_cfg.files = []
+    finally
+        call s:restore_state()
+    endtry
+    return success
+endfu
+fu! Get_file_filter(dir)
+endfu
+fu! Get_matching_files(glob, partial)
     call s:save_state()
     try
-        exe 'lcd ' . a:rootdir
-        " Get rootdir (local cwd) in canonical form, relativizing to rootdir
-        " if possible.
-        " Note: Use fnamemodify and expand in 2-step process to canonicalize:
-        " 1. fnamemodify with :p gets full path (but possibly with incorrect
-        "    slashes)
-        " 2. expand canonicalizes the slashes in the path returned by
-        "    fnamemodify.
-        " Note: Could use `:.' modifier to relativize, but this strips the
-        " drive name (when it's default), which I don't want.
-        " Note: fnamemodify ensures a `/' at the end of a directory name, and
-        " expand won't remove it.
-        let rootdir_p = expand(fnamemodify('.', ':p'))
-        " Build canonicalized list within loop.
-        let fnames_c = []
-        for fname in fnames
-            " Start with canonical path.
-            let fname = expand(fnamemodify(fname, ':p'))
-            " Can we make it relative to rootdir?
-            let ei = matchend(fname, '^' . rootdir_p)
-            if ei > 0
-                " Keep only the relative part.
-                let fname = fname[ei :]
-            endif
-            " Add canonical name to list.
-            call add(fnames_c, fname)
-        endfor
+        " Handle leading anchor (if any)
+        " ./ works just like Vim
+        " .// specifies the current working dir
+        " all other paths must match from the beginning
+        if a:glob =~ '^\.//'
+            " Use fnamemodify to ensure trailing slash.
+            let patt = fnamemodify(getcwd(), ':p')
+        elseif a:glob =~ '^\./'
+            " Note: This will default to same as .// if no current file.
+            let patt = fnamemodify(expand('%:h'))
+        endif
+        " Convert **N everywhere in glob
     catch
         " TODO: What error?
         echohl ErrorMsg|echomsg v:exception|echohl None
     finally
         call s:restore_state()
     endtry
-    " Return canonicalized list.
-    return fnames_c
+endfu
+" Canonicalize the input path, attempting to make relative to rootdir (if
+" non-empty).
+fu! Canonicalize_path(path, rootdir)
+    " Note: Use fnamemodify and expand in 2-step process to canonicalize:
+    " 1. fnamemodify with :p gets full path (but possibly with incorrect
+    "    slashes)
+    " 2. expand canonicalizes the slashes in the path returned by fnamemodify.
+    " Note: Could use `:.' modifier to relativize, but this strips the
+    " drive name (when it's default), which I don't want.
+    " Note: fnamemodify ensures a `/' at the end of a directory name, and
+    " expand won't remove it.
+    let path = expand(fnamemodify(path, ':p'))
+    let rootdir = expand(fnamemodify(rootdir, ':p'))
+    " Can we make it relative to rootdir?
+    let ei = matchend(path, '^' . rootdir)
+    if ei > 0
+        " Keep only the relative part.
+        let path = path[ei :]
+    endif
+    return path
+endfu
+" <<<
+" >>> Functions used to read/write internal data structures.
+fu! s:cache_cfg(cache_cfg, force_refresh)
+    " TODO: Change module_cfg to static_cfg
+    let cache_cfg = s:cache_cfg[cfg_idx]
+    let module_cfg = s:module_cfg[cfg_idx]
+    let rootdir = call('finddir', module_cfg.root)
+    if rootdir == ''
+        throw "Couldn't locate project base. Make sure your cwd is within the project."
+    endif
+    let rootdir = Canonicalize_path(rootdir, '')
+    let cfg.rootdir = rootdir
+    call s:cache_listfile(cache_cfg, rootdir, force_refresh)
+endfu
+" <<<
+" >>> Functions for displaying Errors/Warnings
+fu! s:warn(msg)
+    try
+        echohl WarningMsg
+        echomsg "Warning: " . msg
+    catch
+    finally
+        echohl None
+    endtry
 endfu
 " <<<
 " >>> Functions used during command execution
@@ -389,7 +485,7 @@ endfu
 " Convert string containing only long and short options into list in which
 " each element represents a single option in one of the following forms:
 " s:<opt_char>
-" l:<opt_name
+" l:<opt_name>
 " Note: Order of options is preserved. If an option is supplied multiple
 " times, it will be included only once in the returned list.
 " Example:
@@ -482,8 +578,8 @@ fu! s:refresh(opts)
             exe 'lcd ' . rootdir
             " Note: silent avoids the annoying 'Hit enter' prompt.
             exe 'silent !' . cfg.find . ' >' . s:listfile
-            " Canonicalize
-            call s:canonicalize_listfile(s:listfile)
+            " TODO: Params? Assume in root dir? Etc...
+            call s:cache_cfg(cfg_idx)
         endfor
     catch /Vim(echoerr)/
         echohl ErrorMsg|echomsg v:exception|echohl None
