@@ -228,15 +228,27 @@ endfu
 " Design Decision: Don't complicate algorithm to allow for escaped slashes in
 " glob. Anyone who does such a thing can expect indeterminate behavior, even
 " if I were to go to great lengths here to handle it.
+" Design Decision: Don't complicate pattern to allow for backslash-escaped
+" `*': Vim doesn't even support this in a glob (at least not in Windows).
 " Design Decision: (sign number) is optional but a sign without a number is
 " invalid (i.e., the starstar won't be recognized).
+" Algorithm Note: A fully general approach to performing both sets of
+" replacements (* and **) would involve either 1) processing both in parallel
+" (i.e., in single loop with prioritization/ordering logic), or 2) processing
+" in separate loops, calculating the replacements but deferring the actual
+" substitutions until all calculations have been stored into some sort of
+" sorted structure, which facilitates building the new string.
+" However... There's a much simpler approach, which relies upon the fact that
+" the replacement for `*' can never result in a spurious **.
+" Rationale: Lookbehind/lookahead ensure no adjacent `*', and the replacement
+" contains only 1.
+" Approach: Replace all occurrences of * first, then ** in separate loop.
 fu! Convert_stars(glob)
-    let re_star = '\%(\\.\|[^*]\)*\z 
-
-    " Vim_Bug: NFA engine may have issues with this...
-    " !!!!!!!!!!!!!!UNDER CONSTRUCTION!!!!!!!!!!!!!!!!
-    echo substitute('ab\*cd', '\%#=1\%(\(\\.\)\@>\|\([^*]\)\)\*', '|\1:\2|', '')
-    echo substitute('ab\zcd', '\%#=1\%(\%(\%(\\.\)\@>\|[^z]\)*\)\@>\zsz\ze\%([^z]\|$\)', '{{foo}}', 'g')
+    let re_star = '\%(^\|[^*]\)\@<=\*\%([^*]\|$\)\@='
+    let star = '[^/]*'
+    " Process *
+    let glob = substitute(a:glob, re_star, star, 'g')
+    " Process **
     let re_starstar = '\%(^\|/\)\@<=\%(\*\*\)\%(\([-+]\)\?\(0\|[1-9][0-9]*\)\)\?\(/\|$\)'
     " Vim_Bug: Both \f and [^\f] match `:'
     " Design Decision: Defer grouping of dir_seg to avoid redundant grouping.
@@ -244,14 +256,14 @@ fu! Convert_stars(glob)
     let patt = ''
     let [si, sio] = [0, 0]
     while si >= 0
-        let si = match(a:glob, re_starstar, sio)
+        let si = match(glob, re_starstar, sio)
         " Accumulate up to (but not including) match or to end of string.
-        let patt .= a:glob[sio : si >= 0 ? si - 1 : -1]
+        let patt .= glob[sio : si >= 0 ? si - 1 : -1]
         if si >= 0
             " Assumption: matchlist guaranteed to succeed.
             " Note: matchlist seems to return a minimum of 10 elements, even
             " when fewer submatches...
-            let [match, sign, number, slash; rest] = matchlist(a:glob, re_starstar, si)
+            let [match, sign, number, slash; rest] = matchlist(glob, re_starstar, si)
             if number == ''
                 let number = 100
             elseif sign == '-'
@@ -314,6 +326,8 @@ endfu
 " expand will attempt to expand, so it's best to ensure pathnames don't have
 " `*', `**', $ENV, etc...
 " Return: The canonicalized list.
+" TODO: Have this done once at Refresh and initial load and saved in a
+" persistent structure.
 fu! Canonicalize_listfile(rootdir, listfile)
     let fnames = readfile(a:listfile)
     " Note: We must set 'shellslash' for canonicalization.
