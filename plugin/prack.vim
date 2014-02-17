@@ -158,6 +158,7 @@ fu! s:process_cfg()
             let cache_cfg.disabled = 1
             let i = i + 1 | continue
         endif
+        " TODO: Need to ensure cwd saved/restore properly...
         let cache_cfg.rootdir = s:canonicalize_path(rootdir, '')
         " Build cache, but don't force refresh.
         call s:cache_listfile(cache_cfg, 0)
@@ -278,7 +279,10 @@ fu! s:cache_listfile(cache_cfg, force_refresh)
         " Build canonicalized list within loop.
         let files = []
         for file_raw in files_raw
+            echo "Before: " file_raw
             let file_raw = s:canonicalize_path(file_raw, a:cache_cfg.rootdir)
+            echo "After: " file_raw
+            echo "rootdir: " a:cache_cfg.rootdir
             " Add canonical name to list.
             call add(files, file_raw)
         endfor
@@ -345,8 +349,13 @@ fu! s:glob_to_patt(glob)
     let [si, sio] = [0, 0]
     while si >= 0
         let si = match(glob, re_starstar, sio)
-        " Accumulate up to (but not including) match or to end of string.
-        let patt .= glob[sio : si >= 0 ? si - 1 : -1]
+        if si > 0
+            " Accumulate part before the match.
+            let patt .= glob[sio : si - 1]
+        elseif si < 0
+            " No more matches: accumulate remainder of string
+            let patt .= glob[sio : -1]
+        endif
         if si >= 0
             " Assumption: matchlist guaranteed to succeed.
             " Note: matchlist seems to return a minimum of 10 elements, even
@@ -372,6 +381,7 @@ fu! s:glob_to_patt(glob)
                 " pointless, but valid.
                 let patt .= '\%(' . dir_seg . '\%(/' . dir_seg . '\)\{,' . (number - 1) . '}' . slash . '\)\?'
             endif
+            " Advance past match
             let sio = si + strlen(match)
         endif
     endwhile
@@ -404,7 +414,7 @@ fu! s:get_filtered_files(cfg, dir)
     endfor
 endfu
 " TODO: Figure out how to get cfg here...
-fu! Get_matching_files(cfg, glob, partial)
+fu! s:get_matching_files(cfg, glob, partial)
     let matches = []
     call s:save_state()
     try
@@ -425,26 +435,26 @@ fu! Get_matching_files(cfg, glob, partial)
         endif
         " Convert **N everywhere in glob
         let patt = s:glob_to_patt(glob)
-        for file in a:cfg.files
-            let f = ''
+        for file_raw in a:cfg.files
+            let file = ''
             if anchor_dir != ''
-                let idx = stridx(file, anchor_dir)
+                let idx = stridx(file_raw, anchor_dir)
                 if idx == 0
                     let idx = strlen(anchor_dir)
-                    let f = file[idx :]
+                    let file = file_raw[idx :]
                 endif
             else
-                let f = file
+                let file = file_raw
             endif
             " Do we have something to match against?
             " TODO: Sort files and short-circuit when possible.
-            if f == ''
+            if file == ''
                 continue
             endif
             " TODO: Should let user's fileignorecase or wildignorecase setting
             " determine =~ or =~?.
-            if f =~ patt
-                let 
+            if file =~ patt
+                call add(matches, file_raw)
             endif
         endfor
     catch
@@ -453,7 +463,15 @@ fu! Get_matching_files(cfg, glob, partial)
     finally
         call s:restore_state()
     endtry
+    return matches
 endfu
+fu! Test_get_matching_files(cfg_idx, glob, partial)
+    let matches = s:get_matching_files(s:cache_cfg[a:cfg_idx], a:glob, a:partial)
+    for m in matches
+        echo m
+    endfor
+endfu
+
 " Canonicalize the input path, attempting to make relative to rootdir (if
 " non-empty).
 fu! s:canonicalize_path(path, rootdir)
@@ -485,6 +503,7 @@ fu! Show_statics()
 endfu
 " <<<
 " >>> Functions for displaying Errors/Warnings
+" TODO: Make warn vs. error configurable.
 fu! s:warn(msg)
     try
         echohl WarningMsg
@@ -501,6 +520,8 @@ endfu
 " ability to save regex engine to use.)
 " Caveat: save/restore calls MUST occur in matched pairs; all but outermost
 " calls are do-nothing.
+" TODO!!!!!!!!!!!!!! Change this mechanism completely: use dict functions and
+" stack frame instances...
 fu! s:save_state()
     if !exists('s:save_level')
         let s:save_level = 0
