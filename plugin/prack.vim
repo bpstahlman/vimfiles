@@ -423,6 +423,14 @@ fu! s:get_matching_files(cfg, glob, partial)
         " ./ works just like Vim
         " .// specifies the current working dir
         " all other paths must match from the beginning
+        " TODO - UNDER CONSTRUCTION!!!!!!!!
+        " To speed things up, extract all fixed strings (non-*, non-**) within
+        " the glob, and skip the pattern match if any isn't found in the
+        " target file string.
+        " Note: Treat fixed strings at the head specially: i.e., can be used
+        " to find starting point for search more quickly (eg, in bracketed
+        " search) and to short-circuit when we've passed last possible match
+        " in sorted list.
         let glob = a:glob
         if glob =~ '^\.//'
             " Use fnamemodify to ensure trailing slash.
@@ -513,6 +521,62 @@ fu! s:warn(msg)
         echohl None
     endtry
 endfu
+" <<<
+" >>> Functions used to implement stack frames
+fu! s:sf_create()
+    " Create dictionary to encapsulate the stack frame.
+    let sf = {'opts': {}, 'dirs': {}}
+    fu! sf.destroy() dict
+        " Restore all modified settings to their saved values.
+        for [name, val] in items(self.opts)
+            " Note: No need to complicate data structures by keeping up with
+            " whether option is boolean (since let-& can handle it
+            " transparently.)
+            " Note: :exe can access containing scope.
+            exe 'let &l:' . name . ' = l:val'
+        endfor
+    endfu
+    " Inputs:
+    " name - option name
+    " val  - desired option value
+    " ...  - optional extra args in a single dict.
+    "        op      - assignment operator to use: e.g., +=, -=, etc...
+    "                  (default =)
+    "        boolean - true if the option to be set is a boolean option.
+    "                  For boolean options, value determines whether set is of
+    "                  form...  `set {opt-name}' or `set no{opt-name}'
+    fu! sf.setopt(name, val, ...) dict
+        if !has_key(self.opts, a:name)
+            " Save only the value to be restored at stack frame destruction:
+            " i.e., the first set after creation.
+            " Note: No need to specify `&l:', since &opt gives it to us
+            " automatically when global and local settings differ.
+            exe 'let self.opts[a:name] = &' . a:name
+        endif
+        " Initialize defaults for the optional extra args
+        let [op, boolean] = ['=', 0]
+        if a:0
+            " Caller supplied extra options. Process...
+            let opt = a:1
+            if has_key(opt, 'op') | let op = opt.op | endif
+            if has_key(opt, 'boolean') | let boolean = !!opt.boolean | endif
+        endif
+        " Set the option
+        " Note: Use set[l] in lieu of let-&.
+        " Rationale: Supports more assignment operators: e.g., += doesn't work
+        " for string-list options with let-&.
+        exe 'setl '
+            \. (boolean ? (!!a:val ? '' : 'no') : '')
+            \. a:name
+            \. (boolean ? '' : op . escape(a:val, ' \'))
+    endfu
+    " Change cwd, pushing the old onto a stack.
+    fu! sf.pushdir(dir) dict
+    endfu
+    " Return the stack frame
+    return sf
+endfu
+
 " <<<
 " >>> Functions used during command execution
 " Save any state that needs to be changed to perform the grep.
