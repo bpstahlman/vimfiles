@@ -525,7 +525,7 @@ endfu
 " >>> Functions used to implement stack frames
 fu! s:sf_create()
     " Create dictionary to encapsulate the stack frame.
-    let sf = {'opts': {}, 'dirs': {}}
+    let sf = {'opts': {}, 'dirs': []}
     fu! sf.destroy() dict
         " Restore all modified settings to their saved values.
         for [name, val] in items(self.opts)
@@ -535,6 +535,18 @@ fu! s:sf_create()
             " Note: :exe can access containing scope.
             exe 'let &l:' . name . ' = l:val'
         endfor
+        if len(self.dirs)
+            " Restore what was cwd at stack frame creation.
+            exe 'lcd ' . self.dirs[0]
+        endif
+        " Design Decision: Ideally, destruction would happen automatically
+        " when the object goes out of scope, but this is not how Vim script
+        " works. Since caller may keep a reference to self beyond the destroy
+        " call, safest course is to make it look as it did at creation.
+        " Rationale: Subsequent attempts to use this stack frame (thought not
+        " in keeping with its intent) should not be harmful.
+        let self.opts = {}
+        let self.dirs = []
     endfu
     " Inputs:
     " name - option name
@@ -571,7 +583,19 @@ fu! s:sf_create()
             \. (boolean ? '' : op . escape(a:val, ' \'))
     endfu
     " Change cwd, pushing the old onto a stack.
-    fu! sf.pushdir(dir) dict
+    fu! sf.pushd(dir) dict
+        call add(self.dirs, getcwd())
+        " Note: As mentioned in Vim doc (:help :filename), commands expecting
+        " single filename don't require escaping.
+        exe 'lcd ' . a:dir
+    endfu
+    fu! sf.popd() dict
+        " Question: Should I add logic to handle underflow (which is
+        " essentially an internal error)?
+        if len(self.dirs)
+            " lcd to popped dir.
+            exe 'lcd ' . remove(self.dirs, -1)
+        endif
     endfu
     " Return the stack frame
     return sf
