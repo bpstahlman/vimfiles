@@ -83,8 +83,6 @@ fu! s:process_cfg()
         let s:listfile = 'prack-files.list'
     endif
 
-    " TEMP DEBUG
-    "so ~/tmp/prack_module_cfg.txt
     if !len(g:prack_module_cfg)
         " TODO: Consider throwing exception here.
         echoerr "Must define at least one project module within g:prack_module_cfg"
@@ -254,12 +252,14 @@ fu! s:cache_listfile(cache_cfg, force_refresh)
     let listfile_path = a:cache_cfg.rootdir . s:listfile
     let listfile_path_found = findfile(s:listfile, a:cache_cfg.rootdir)
     " TODO: Rely upon higher-level try/catch?
-    call s:save_state()
+    "call s:save_state()
+    let sf = s:sf_create()
     try
         " Do we need to create/update the listfile?
         if listfile_path_found == '' || a:force_refresh
             let v:errmsg = ''
-            exe 'lcd ' . a:cache_cfg.rootdir
+            "exe 'lcd ' . a:cache_cfg.rootdir
+            call sf.pushd(a:cache_cfg.rootdir)
             " Note: silent avoids the annoying 'Hit enter' prompt.
             exe 'silent !' . a:cache_cfg.find . ' >' . s:listfile
             if v:errmsg != ''
@@ -274,26 +274,28 @@ fu! s:cache_listfile(cache_cfg, force_refresh)
         endif
         let files_raw = readfile(listfile_path)
         " Note: We must set 'shellslash' for canonicalization.
-        set shellslash
-        " TODO: Perhaps do the save/restore only at top level?
+        call sf.setopt('shellslash', 1, {'boolean': 1})
         " Build canonicalized list within loop.
         let files = []
         for file_raw in files_raw
-            echo "Before: " file_raw
+            "echo "Before: " file_raw
             let file_raw = s:canonicalize_path(file_raw, a:cache_cfg.rootdir)
-            echo "After: " file_raw
-            echo "rootdir: " a:cache_cfg.rootdir
+            "echo "After: " file_raw
+            "echo "rootdir: " a:cache_cfg.rootdir
             " Add canonical name to list.
             call add(files, file_raw)
         endfor
         let a:cache_cfg.files = files
+        echo s:cache_cfg
+        "echo a:cache_cfg
         let success = 1
     catch
         call s:warn(v:exception)
         let a:cache_cfg.disabled = 1
         let a:cache_cfg.files = []
     finally
-        call s:restore_state()
+        "call s:restore_state()
+        call sf.destroy()
     endtry
     return success
 endfu
@@ -416,7 +418,8 @@ endfu
 " TODO: Figure out how to get cfg here...
 fu! s:get_matching_files(cfg, glob, partial)
     let matches = []
-    call s:save_state()
+    "call s:save_state()
+    let sf = s:sf_create()
     try
         let anchor_dir = ''
         " Handle leading anchor (if any)
@@ -443,7 +446,9 @@ fu! s:get_matching_files(cfg, glob, partial)
         endif
         " Convert **N everywhere in glob
         let patt = s:glob_to_patt(glob)
+        echo "patt: " . patt
         for file_raw in a:cfg.files
+            "echo file_raw
             let file = ''
             if anchor_dir != ''
                 let idx = stridx(file_raw, anchor_dir)
@@ -461,7 +466,9 @@ fu! s:get_matching_files(cfg, glob, partial)
             endif
             " TODO: Should let user's fileignorecase or wildignorecase setting
             " determine =~ or =~?.
-            if file =~ patt
+            "echo "Matching " . file . " against " . patt
+            " TODO: Perhaps move the anchor into pattern generation.
+            if file =~ '^' . patt
                 call add(matches, file_raw)
             endif
         endfor
@@ -469,7 +476,8 @@ fu! s:get_matching_files(cfg, glob, partial)
         " TODO: What error?
         echohl ErrorMsg|echomsg v:exception|echohl None
     finally
-        call s:restore_state()
+        "call s:restore_state()
+        call sf.destroy()
     endtry
     return matches
 endfu
@@ -515,7 +523,7 @@ endfu
 fu! s:warn(msg)
     try
         echohl WarningMsg
-        echomsg "Warning: " . msg
+        echomsg "Warning: " . a:msg
     catch
     finally
         echohl None
@@ -702,7 +710,8 @@ endfu
 " <<<
 " >>> Functions invoked by commands
 fu! s:refresh(opts)
-    call s:save_state()
+    "call s:save_state()
+    let sf = s:sf_create()
     try
         let pcl = s:parse_cmdline(a:opts)
         if pcl.rem != ''
@@ -720,25 +729,27 @@ fu! s:refresh(opts)
         endfor
         " Process the selected configs.
         for cfg_idx in cfg_idxs
-            let cfg = s:cache_cfg[cfg_idx]
-            let rootdir = call('finddir', cfg.root)
+            let cache_cfg = s:cache_cfg[cfg_idx]
+            let rootdir = call('finddir', cache_cfg.root)
             if rootdir == ''
                 throw "Couldn't locate project base. Make sure your cwd is within the project."
             endif
-            exe 'lcd ' . rootdir
-            " Note: silent avoids the annoying 'Hit enter' prompt.
-            exe 'silent !' . cfg.find . ' >' . s:listfile
-            " TODO: Params? Assume in root dir? Etc...
-            call s:cache_cfg(cfg_idx)
+            let rootdir = s:canonicalize_path(rootdir, '')
+            "exe 'lcd ' . rootdir
+            call sf.pushd(rootdir)
+            let cache_cfg.rootdir = rootdir
+            call s:cache_listfile(cache_cfg, 1)
         endfor
     catch /Vim(echoerr)/
         echohl ErrorMsg|echomsg v:exception|echohl None
     finally
-        call s:restore_state()
+        "call s:restore_state()
+        call sf.destroy()
     endtry
 endfu
 fu! s:ack(bang, use_ll, mode, args)
-    call s:save_state()
+    "call s:save_state()
+    let sf = s:sf_create()
     try
         " Break raw command line into parsed prack options, and string
         " containing everything else (essentially, the ack options).
@@ -764,7 +775,8 @@ fu! s:ack(bang, use_ll, mode, args)
                 if rootdir == ''
                     throw "Couldn't locate project base. Make sure your cwd is within the project."
                 endif
-                exe 'lcd ' . rootdir
+                "exe 'lcd ' . rootdir
+                call sf.pushd(rootdir)
                 if !filereadable(s:listfile)
                     " TODO: Decide whether to abort, or eventually, continue with next list file
                     echohl WarningMsg|echomsg "Warning: Skipping unreadable listfile `"
@@ -784,7 +796,8 @@ fu! s:ack(bang, use_ll, mode, args)
     catch /Vim(echoerr)/
         echohl ErrorMsg|echomsg v:exception|echohl None
     finally
-        call s:restore_state()
+        "call s:restore_state()
+        call sf.destroy()
     endtry
 endfu
 " <<<
