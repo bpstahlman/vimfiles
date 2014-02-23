@@ -302,8 +302,14 @@ endfu
 " <<<
 " >>> Functions pertaining to file processing
 " Convert occurrences of * and **[[SIGN]NUMBER] in input glob to corresponding
-" pattern, using the the rules specified in Vim help on 'file-searching': in a
-" nutshell...
+" pattern; also, build array of constraints representing the content and
+" location of fixed strings within the glob (which can be used to prevent
+" costly regex matches when a simple string match is sufficient to disqualify
+" the candidate match target).
+" Note: 'partial' argument determines whether the generated pattern will be
+" anchored at end.
+" Note: The * and ** constructs are treated in a manner nearly identical to
+" what is described in Vim help on 'file-searching': in a nutshell...
 " * matches any number of non-slash characters.
 " ** matches 0 .. NUMBER directories, with the following pre-processing on
 " NUMBER:
@@ -337,13 +343,42 @@ endfu
 " Rationale: Lookbehind/lookahead ensure no adjacent `*', and the replacement
 " contains only 1.
 " Approach: Replace all occurrences of * first, then ** in separate loop.
-fu! s:glob_to_patt(glob)
+" Returns: dict with the following keys:
+"   'patt'
+"     the regex pattern
+"   'constraints'
+"     array of constraint definitions, each of which is a dict with the
+"     following keys:
+"     'anchor'
+"       enumerated value indicating anchor point: one of the following:
+"         's' = start
+"         'e' = end
+"         'm' = middle (no anchor)
+"     'string'
+"       the exact string that must match at a location determined by 'anchor'
+fu! s:glob_to_patt(glob, partial)
     let re_star = '\%(^\|[^*]\)\@<=\*\%([^*]\|$\)\@='
     let star = '[^/]*'
+    let re_starstar = '\%(^\|/\)\@<=\%(\*\*\)\%(\([-+]\)\?\(0\|[1-9][0-9]*\)\)\?\(/\|$\)'
+    " Extract the fixed string constraints.
+    " TODO: Consider integrating this into the * and ** processing (as part of
+    " refactoring that combines their processing).
+    " Note: Deferring putting the constraint generation into separate function
+    " because of refactoring possibility.
+    " Note: Positive lookahead assertion used to ensure that a trailing slash
+    " on ** is treated as part of the fixed string.
+    let fixeds = split(a:glob, re_star . '\|' . re_starstar . '\@=', 1)
+    let constraints = []
+    let [i, ln] = [0, len(fixeds)]
+    while i < ln
+        if fixeds[i] != ''
+            call add(constraints, {'string': fixeds[i], 'anchor': i == 0 ? 's' : i == ln - 1 ? 'e' : 'm'})
+        endif
+        let i = i + 1
+    endwhile
     " Process *
     let glob = substitute(a:glob, re_star, star, 'g')
     " Process **
-    let re_starstar = '\%(^\|/\)\@<=\%(\*\*\)\%(\([-+]\)\?\(0\|[1-9][0-9]*\)\)\?\(/\|$\)'
     " Vim_Bug: Both \f and [^\f] match `:'
     " Design Decision: Defer grouping of dir_seg to avoid redundant grouping.
     let dir_seg = '\%(\\[^\f]\|[^/]\)\+'
@@ -387,7 +422,10 @@ fu! s:glob_to_patt(glob)
             let sio = si + strlen(match)
         endif
     endwhile
-    return patt
+    if !a:partial
+        let patt += '$'
+    endif
+    return {'patt': patt, 'constraints': constraints}
 endfu
 fu! Test_Convert_stars(glob)
     let files = readfile("C:/Users/stahlmanb/tmp/files.lst")
@@ -402,6 +440,7 @@ endfu
 
 " Return a filtered version of cfg.files comprising only the files located
 " hierarchically within specified dir.
+" TODO: Remove if not needed... Work in progress...
 fu! s:get_filtered_files(cfg, dir)
     let files = a:cfg.files
     let files_filter = []
@@ -413,6 +452,78 @@ fu! s:get_filtered_files(cfg, dir)
             " Is 
         endif
         let idx = idx + 1
+    endfor
+endfu
+fu! s:create_bracketer(min, max)
+    let state = {
+        \'min': -1, 'max': -1,
+        \'si1': a:min, 'si2': a:max,
+        \'ei1': -1, 'ei2': -1}
+    fu! state.step(cmp) dict
+    endfu
+    return state
+endfu
+" Find region within input files array, for which constraints do not preclude
+" a match.
+" Returns: a range of the form [start_index, end_index], else -1 (if no such
+" range exists)
+fu! s:get_matching_files_bracket(constraints, files)
+    let ln = len(files)
+    if len(constraints) == 0 || constraints[0].anchor != 's'
+        " No start anchor means we'll be searching the entire list.
+        return [0, ln - 1]
+    endif
+    " If here, we have a constraint that anchors at start.
+    let fixed = constraints[0].string
+
+    let [si1, si2] = [0, ln - 1]
+    let si = ln / 2
+    let ei = -1
+    let [ei1, ei2] = [-1, -1]
+    " Find start
+    while 1
+        let file = files[si]
+        let cmp = s:strcmp(file, fixed)
+        if cmp < 0
+            " Before start of range
+            let si1 = si
+            let si = si1 + (si2 - si1) / 2
+        elseif cmp > 0
+            " After end of range
+            let si
+            let ei = si
+        else
+            " In range
+        endif
+    endwhile
+endfu
+" Helper routine for get_matching_files
+fu! s:get_matching_files_match(patt, constraints, files)
+    let matches = []
+    for file_raw in a:files
+        let file = ''
+        if anchor_dir != ''
+            " Anchor exists; skip a file that doesn't match.
+            let idx = stridx(file_raw, anchor_dir)
+            if idx == 0
+                let idx = strlen(anchor_dir)
+                let file = file_raw[idx :]
+            endif
+        else
+            let file = file_raw
+        endif
+        " Do we have something to match against?
+        " TODO: Sort files and short-circuit when possible.
+        if file == ''
+            continue
+        endif
+        " TODO: Should let user's fileignorecase or wildignorecase setting
+        " determine =~ or =~?.
+        "echo "Matching " . file . " against " . patt
+        " TODO: Perhaps move the anchor into pattern generation.
+        if file =~ '^' . patt
+            call add(matches, file_raw)
+        endif
     endfor
 endfu
 " TODO: Figure out how to get cfg here...
@@ -445,33 +556,13 @@ fu! s:get_matching_files(cfg, glob, partial)
             let glob = glob[2:] " strip ./
         endif
         " Convert **N everywhere in glob
-        let patt = s:glob_to_patt(glob)
+        "let patt = s:glob_to_patt(glob)
+        let patt_info = s:glob_to_patt(glob, a:partial)
+        let patt = patt_info.patt
+        let constraints = patt_info.constraints
         echo "patt: " . patt
-        for file_raw in a:cfg.files
-            "echo file_raw
-            let file = ''
-            if anchor_dir != ''
-                let idx = stridx(file_raw, anchor_dir)
-                if idx == 0
-                    let idx = strlen(anchor_dir)
-                    let file = file_raw[idx :]
-                endif
-            else
-                let file = file_raw
-            endif
-            " Do we have something to match against?
-            " TODO: Sort files and short-circuit when possible.
-            if file == ''
-                continue
-            endif
-            " TODO: Should let user's fileignorecase or wildignorecase setting
-            " determine =~ or =~?.
-            "echo "Matching " . file . " against " . patt
-            " TODO: Perhaps move the anchor into pattern generation.
-            if file =~ '^' . patt
-                call add(matches, file_raw)
-            endif
-        endfor
+        echo constraints
+        let matches = s:get_matching_files_match(patt, constraints, files)
     catch
         " TODO: What error?
         echohl ErrorMsg|echomsg v:exception|echohl None
@@ -801,6 +892,14 @@ fu! s:ack(bang, use_ll, mode, args)
     endtry
 endfu
 " <<<
+" >>> Functions for general utility
+" TODO: Decide how to incorporate case-sensitivity - probably at higher level
+" with appropriate setting of 'ignorecase' based fileignorecase or some such,
+" as calls to this may be nested deeply.
+fu! s:strcmp(a, b)
+    return a < b ? -1 : a > b ? 1 : 0
+endfu
+" <<<
 " >>> Commands
 " -- Notes --
 " Refresh builds list file(s) specified by command line options
@@ -818,5 +917,167 @@ com! -bang -nargs=* LGr  call <SID>ack(<q-bang>, 1, '', <q-args>)
 com! -bang -nargs=* LGrf call <SID>ack(<q-bang>, 1, 'file', <q-args>)
 com! -bang -nargs=* LGrd call <SID>ack(<q-bang>, 1, 'dir', <q-args>)
 " <<<
+" >>> Works in progress...
+fu! S_create_bracketer(min, max)
+    " modes: fs (find start), fe (find end), done
+    let state = {
+        \'i': (a:max - a:min) / 2, 'i1': a:min, 'i2': a:max, 'cmp1': '', 'cmp2': '',
+        \'ei1': -1, 'ei2': -1, 'ecmp1': '', 'ecmp2': '',
+        \'mode': 'fs'}
+    fu! state.init() dict
+        return self.i
+    endfu
+    fu! state.next(cmp) dict
+        let imove = ''
+        if self.mode == 'fs'
+            if a:cmp < 0
+                " Too small
+                let dist = self.i2 - self.i
+                if dist < 4
+                    if dist == 0
+                        " Last point in list is too small; hence, no bracket.
+                        let self.mode = 'done'
+                        let iret = -1
+                        let self.start_idx = -1
+                    elseif dist == 1
+                        if self.cmp2 != ''
+                            " We have sufficient information.
+                            echo "--1--"
+                            let self.mode = 'done'
+                            let iret = -1
+                            if self.cmp2 == 0
+                                let self.start_idx = self.i2
+                            else
+                                " Assumption: cmp2 had to have been > 0, else
+                                " we wouldn't have moved leftward. In any
+                                " case, point 1 to right was too big, and this
+                                " point is too small; hence, can't bracket.
+                                let self.start_idx = -1
+                            endif
+                        else
+                            " Still need to try endpoint.
+                            let iret = self.i2
+                            let imove = '1'
+                        endif
+                    else
+                        " Single-step rightward
+                        " Note: i1 and cmp1 won't be used anymore
+                        let iret = self.i + 1
+                        let imove = '1'
+                    endif
+                else
+                    " Still in jumping mode.
+                    let iret = self.i + dist / 2
+                    let imove = '1'
+                endif
+            elseif a:cmp == 0
+                " In range
+                if self.ei1 < 0
+                    " Search for end starts here.
+                    let self.ei1 = self.i
+                    let self.ecmp1 = a:cmp
+                endif
+                let dist = self.i - self.i1
+                if dist < 4
+                    if dist == 0
+                        " First point in list is in range: start of bracket by
+                        " definition.
+                        let self.mode = 'done'
+                        let iret = -1
+                        let self.start_idx = 0
+                    elseif dist == 1
+                        if self.cmp1 != ''
+                            " Wouldn't have gotten here if point 1 to left
+                            " were in range.
+                            echo "--2--"
+                            let self.mode = 'done'
+                            let iret = -1
+                            let self.start_idx = self.i
+                        else
+                            " Still need to try startpoint.
+                            let iret = self.i1
+                            let imove = '2'
+                        endif
+                    else
+                        " Single-step leftward
+                        " Note: i2 and cmp2 won't be used anymore
+                        let iret = self.i - 1
+                        let imove = '2'
+                    endif
+                else
+                    " Still in jumping mode.
+                    let iret = self.i - dist / 2
+                    let imove = '2'
+                endif
+            else
+                " Too large
+                " Search for end goes no further right than this.
+                let self.ei2 = self.i
+                let self.ecmp2 = a:cmp
+                let dist = self.i - self.i1
+                if dist < 4
+                    if dist == 0
+                        " First point in list is too large; hence, no bracket.
+                        let self.mode = 'done'
+                        let iret = -1
+                        let self.start_idx = -1
+                    elseif dist == 1
+                        if self.cmp1 != ''
+                            " Point 1 to left was too small (else we wouldn't
+                            " have moved right), and this point is too big;
+                            " thus, no bracket.
+                            echo "--3--"
+                            let self.mode = 'done'
+                            let iret = -1
+                            let self.start_idx = -1
+                        else
+                            " Still need to try startpoint.
+                            let iret = self.i1
+                            let imove = '2'
+                        endif
+                    else
+                        " Single-step leftward
+                        " Note: i2 and cmp2 won't be used anymore
+                        let iret = self.i - 1
+                        let imove = '2'
+                    endif
+                else
+                    " Still in jumping mode.
+                    let iret = self.i - dist / 2
+                    let imove = '2'
+                endif
+            endif
+        elseif self.mode == 'fe'
+            return -1
+        elseif self.mode == 'done'
+            return -1
+        endif
+        echo iret . ": i=" . self.i . "  a:cmp=" . a:cmp . "  i1=" . self.i1 . "  cmp1=" . self.cmp1 . "  i2=" . self.i2 . "  cmp2=" . self.cmp2
+        if imove != ''
+            let self['i' . imove] = self.i
+            let self['cmp' . imove] = a:cmp
+        endif
+        if iret >= 0
+            let self.i = iret
+        endif
+        return iret
+    endfu
+    fu! state.get_bracket() dict
+        return {'start': self.start_idx, 'end': self.start_idx == -1 ? -1 : self.end_idx}
+    endfu
+    fu! state.get_self() dict
+        return self
+    endfu
+    return state
+endfu
 
+fu! s:strcmp(a, b)
+    return a:a < a:b ? -1 : a:a > a:b ? 1 : 0
+endfu
+fu! s:compare_file(file, fixed)
+    " Does the constraint match at start?
+    let filepart = strpart(a:file, 0, strlen(a:fixed))
+    return s:strcmp(filepart, a:fixed)
+endfu
+" <<<
 " vim:ts=4:sw=4:et:fdm=marker:fmr=>>>,<<<
