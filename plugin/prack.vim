@@ -918,157 +918,136 @@ com! -bang -nargs=* LGrf call <SID>ack(<q-bang>, 1, 'file', <q-args>)
 com! -bang -nargs=* LGrd call <SID>ack(<q-bang>, 1, 'dir', <q-args>)
 " <<<
 " >>> Works in progress...
-fu! S_create_bracketer(min, max)
+
+fu! S_bracket(files, fixed, fn)
     " modes: fs (find start), fe (find end), done
-    let state = {
-        \'i': (a:max - a:min) / 2, 'i1': a:min, 'i2': a:max, 'cmp1': '', 'cmp2': '',
-        \'ei1': -1, 'ei2': -1, 'ecmp1': '', 'ecmp2': '',
-        \'mode': 'fs'}
-    fu! state.init() dict
-        return self.i
-    endfu
-    fu! state.next(cmp) dict
-        let imove = ''
-        if self.mode == 'fs'
-            if a:cmp < 0
-                " Too small
-                let dist = self.i2 - self.i
-                if dist < 4
-                    if dist == 0
-                        " Last point in list is too small; hence, no bracket.
-                        let self.mode = 'done'
-                        let iret = -1
-                        let self.start_idx = -1
-                    elseif dist == 1
-                        if self.cmp2 != ''
-                            " We have sufficient information.
-                            echo "--1--"
-                            let self.mode = 'done'
-                            let iret = -1
-                            if self.cmp2 == 0
-                                let self.start_idx = self.i2
-                            else
-                                " Assumption: cmp2 had to have been > 0, else
-                                " we wouldn't have moved leftward. In any
-                                " case, point 1 to right was too big, and this
-                                " point is too small; hence, can't bracket.
-                                let self.start_idx = -1
-                            endif
-                        else
-                            " Still need to try endpoint.
-                            let iret = self.i2
-                            let imove = '1'
+    let [sgn, off] = [1, 0]
+    let ln = len(a:files)
+    let is = [0, ln - 1]
+    let cmps = ['', '']
+    let eis = [-1, -1]
+    let ecmps = ['', '']
+    let i = ln / 2
+    let ret = [-1, -1]
+    if ln == 0
+        return ret
+    endif
+    " If here, there's at least 1 point to try.
+    while i >= 0
+        let cmp = sgn * a:fn(a:files[i], a:fixed)
+        let [i1, i2] = off == 0 ? [0, 1] : [1, 0]
+        let imove = -1
+        if cmp < 0
+            " Outside sought endpoint
+            let dist = sgn * (is[1] - i)
+            if dist < 4
+                if dist == 0
+                    " Can't move any further; no bracket.
+                    return ret
+                elseif dist == 1
+                    if cmps[1] != ''
+                        " We have sufficient information.
+                        let inext = -1
+                        if cmps[1] == 0
+                            let ret[off] = is[1]
                         endif
                     else
-                        " Single-step rightward
-                        " Note: i1 and cmp1 won't be used anymore
-                        let iret = self.i + 1
-                        let imove = '1'
+                        " Haven't tried adjacent point.
+                        let inext = is[1]
+                        let imove = 0
                     endif
                 else
-                    " Still in jumping mode.
-                    let iret = self.i + dist / 2
-                    let imove = '1'
-                endif
-            elseif a:cmp == 0
-                " In range
-                if self.ei1 < 0
-                    " Search for end starts here.
-                    let self.ei1 = self.i
-                    let self.ecmp1 = a:cmp
-                endif
-                let dist = self.i - self.i1
-                if dist < 4
-                    if dist == 0
-                        " First point in list is in range: start of bracket by
-                        " definition.
-                        let self.mode = 'done'
-                        let iret = -1
-                        let self.start_idx = 0
-                    elseif dist == 1
-                        if self.cmp1 != ''
-                            " Wouldn't have gotten here if point 1 to left
-                            " were in range.
-                            echo "--2--"
-                            let self.mode = 'done'
-                            let iret = -1
-                            let self.start_idx = self.i
-                        else
-                            " Still need to try startpoint.
-                            let iret = self.i1
-                            let imove = '2'
-                        endif
-                    else
-                        " Single-step leftward
-                        " Note: i2 and cmp2 won't be used anymore
-                        let iret = self.i - 1
-                        let imove = '2'
-                    endif
-                else
-                    " Still in jumping mode.
-                    let iret = self.i - dist / 2
-                    let imove = '2'
+                    " Single-step.
+                    let inext = i + sgn
+                    let imove = 0
                 endif
             else
-                " Too large
-                " Search for end goes no further right than this.
-                let self.ei2 = self.i
-                let self.ecmp2 = a:cmp
-                let dist = self.i - self.i1
-                if dist < 4
-                    if dist == 0
-                        " First point in list is too large; hence, no bracket.
-                        let self.mode = 'done'
-                        let iret = -1
-                        let self.start_idx = -1
-                    elseif dist == 1
-                        if self.cmp1 != ''
-                            " Point 1 to left was too small (else we wouldn't
-                            " have moved right), and this point is too big;
-                            " thus, no bracket.
-                            echo "--3--"
-                            let self.mode = 'done'
-                            let iret = -1
-                            let self.start_idx = -1
-                        else
-                            " Still need to try startpoint.
-                            let iret = self.i1
-                            let imove = '2'
-                        endif
+                " Still in jumping mode.
+                let inext = i + sgn * dist / 2
+                let imove = 0
+            endif
+        elseif a:cmp == 0
+            " In range
+            if off == 0 && eis[1] < 0
+                " Search for end starts here.
+                let eis[1] = i
+                let ecmps[1] = cmp
+            endif
+            let dist = sgn * (i - is[0])
+            if dist < 4
+                if dist == 0
+                    " This point matches and there are no more to try; hence,
+                    " start of bracket.
+                    let inext = -1
+                    let ret[off] = i
+                elseif dist == 1
+                    if cmps[0] != ''
+                        " Wouldn't have gotten here if adjacent point were in
+                        " range.
+                        let inext = -1
+                        let ret[off] = i
                     else
-                        " Single-step leftward
-                        " Note: i2 and cmp2 won't be used anymore
-                        let iret = self.i - 1
-                        let imove = '2'
+                        " Potential match, but need to try adjacent point.
+                        let inext = is[0]
+                        let imove = 1
                     endif
                 else
-                    " Still in jumping mode.
-                    let iret = self.i - dist / 2
-                    let imove = '2'
+                    " Single-step toward sought edge.
+                    let inext = i - sgn
+                    let imove = 1
                 endif
+            else
+                " Still in jumping mode.
+                let inext = i - sgn * dist / 2
+                let imove = 1
             endif
-        elseif self.mode == 'fe'
-            return -1
-        elseif self.mode == 'done'
-            return -1
+        else
+            " Too large
+            if off == 0
+                " Search for end goes no further right than this.
+                let eis[0] = i
+                let ecmp[0] = cmp
+            endif
+            let dist = i - is[0]
+            if dist < 4
+                if dist == 0
+                    " First point in list is too large; hence, no bracket.
+                    let inext = -1
+                elseif dist == 1
+                    if cmps[0] != ''
+                        " Point 1 to left was too small (else we wouldn't
+                        " have moved right), and this point is too big;
+                        " thus, no bracket.
+                        let inext = -1
+                    else
+                        " Adjacent point is our last hope.
+                        let inext = is[0]
+                        let imove = 1
+                    endif
+                else
+                    " Single-step toward region.
+                    let inext = i - sgn
+                    let imove = 1
+                endif
+            else
+                " Still in jumping mode.
+                let inext = i - sgn * dist / 2
+                let imove = 1
+            endif
         endif
-        echo iret . ": i=" . self.i . "  a:cmp=" . a:cmp . "  i1=" . self.i1 . "  cmp1=" . self.cmp1 . "  i2=" . self.i2 . "  cmp2=" . self.cmp2
-        if imove != ''
-            let self['i' . imove] = self.i
-            let self['cmp' . imove] = a:cmp
+        if inext != -1 && imove != -1
+            let is[imove] = i
+            let cmps[imove] = cmp
         endif
-        if iret >= 0
-            let self.i = iret
+        if inext == -1
+            " Either we're done, or we need to transition to looking for end.
+
+        else
+            " TODO: Possibly refactor this up...
+            let i = inext
         endif
-        return iret
-    endfu
-    fu! state.get_bracket() dict
-        return {'start': self.start_idx, 'end': self.start_idx == -1 ? -1 : self.end_idx}
-    endfu
-    fu! state.get_self() dict
-        return self
-    endfu
-    return state
+    endwhile
+    return ret
 endfu
 
 fu! s:strcmp(a, b)
@@ -1079,5 +1058,10 @@ fu! s:compare_file(file, fixed)
     let filepart = strpart(a:file, 0, strlen(a:fixed))
     return s:strcmp(filepart, a:fixed)
 endfu
+let s:compare = function('s:compare_file')
+
+let fixed = 'dcs'
+let files = ['a', 'aa', 'abc', 'accd', 'bb', 'bda', 'ca', 'cb', 'cc', 'ccc', 'dab', 'dbbb', 'dcs', 'dcsa', 'dcsab/foo', 'efg', 'fad', 'foo', 'goob', 'hoo']
+echo S_bracket(files, fixed)
 " <<<
 " vim:ts=4:sw=4:et:fdm=marker:fmr=>>>,<<<
