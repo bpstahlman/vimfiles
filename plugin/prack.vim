@@ -920,114 +920,124 @@ com! -bang -nargs=* LGrd call <SID>ack(<q-bang>, 1, 'dir', <q-args>)
 " >>> Works in progress...
 
 fu! S_bracket(files, fixed, fn)
-    " modes: fs (find start), fe (find end), done
     let [sgn, off] = [1, 0]
     let ln = len(a:files)
     let is = [0, ln - 1]
+    let eis = [ln - 1, 0]
     let cmps = ['', '']
-    let eis = [-1, -1]
     let ecmps = ['', '']
     let i = ln / 2
     let ret = [-1, -1]
     if ln == 0
+        " Empty range: no bracket.
         return ret
     endif
     " If here, there's at least 1 point to try.
     while i >= 0
+        " Compare candidate bracket edge value to constraint value using
+        " provided comparison function, reversing sense of comparison for
+        " offset == 1
+        " TODO: Get "file" out of names...
         let cmp = sgn * a:fn(a:files[i], a:fixed)
-        let [i1, i2] = off == 0 ? [0, 1] : [1, 0]
         let imove = -1
         if cmp < 0
-            " Outside sought endpoint
+            " Out of range on near side.
             let dist = sgn * (is[1] - i)
             if dist < 4
                 if dist == 0
-                    " Can't move any further; no bracket.
-                    return ret
+                    " Can't move any further: no bracket.
+                    let inext = -1
                 elseif dist == 1
                     if cmps[1] != ''
-                        " We have sufficient information.
-                        let inext = -1
+                        " Adjacent point already tried.
                         if cmps[1] == 0
                             let ret[off] = is[1]
                         endif
+                        let inext = -1
                     else
-                        " Haven't tried adjacent point.
-                        let inext = is[1]
+                        " Adjacent point is our last hope.
                         let imove = 0
+                        let inext = is[1]
                     endif
                 else
-                    " Single-step.
-                    let inext = i + sgn
+                    " Single-step toward region.
                     let imove = 0
+                    let inext = i + sgn
                 endif
             else
                 " Still in jumping mode.
-                let inext = i + sgn * dist / 2
                 let imove = 0
+                let inext = i + sgn * dist / 2
             endif
-        elseif a:cmp == 0
+        elseif cmp == 0
             " In range
-            if off == 0 && eis[1] < 0
-                " Search for end starts here.
+            if off == 0 && i > eis[1]
+                " Set left edge of region to be searched for bracket right
+                " edge.
+                " Note: This will always be set before bracket left edge is
+                " found, and it will never move once set.
                 let eis[1] = i
                 let ecmps[1] = cmp
             endif
             let dist = sgn * (i - is[0])
             if dist < 4
                 if dist == 0
-                    " This point matches and there are no more to try; hence,
-                    " start of bracket.
-                    let inext = -1
+                    " This point matches and there are no more to try: found
+                    " bracket edge.
                     let ret[off] = i
+                    let inext = -1
                 elseif dist == 1
                     if cmps[0] != ''
-                        " Wouldn't have gotten here if adjacent point were in
-                        " range.
+                        " Adjacent point already tried.
                         let inext = -1
                         let ret[off] = i
                     else
                         " Potential match, but need to try adjacent point.
-                        let inext = is[0]
+                        " TODO: Refactor to combine this case with one below
+                        " (by combining the dist == 1 and cmps[0] != ''
+                        " cases).
                         let imove = 1
+                        let inext = i - sgn
                     endif
                 else
                     " Single-step toward sought edge.
-                    let inext = i - sgn
                     let imove = 1
+                    let inext = i - sgn
                 endif
             else
                 " Still in jumping mode.
-                let inext = i - sgn * dist / 2
                 let imove = 1
+                let inext = i - sgn * dist / 2
             endif
         else
-            " Too large
+            " Out of range on far side
             if off == 0
-                " Search for end goes no further right than this.
+                " Set right edge of region to be searched for bracket right
+                " edge.
+                " Note: This may move leftward on subsequent iterations.
                 let eis[0] = i
-                let ecmp[0] = cmp
+                let ecmps[0] = cmp
             endif
-            let dist = i - is[0]
+            let dist = sgn * (i - is[0])
             if dist < 4
                 if dist == 0
-                    " First point in list is too large; hence, no bracket.
+                    " List endpoint is too large: no bracket.
                     let inext = -1
                 elseif dist == 1
                     if cmps[0] != ''
-                        " Point 1 to left was too small (else we wouldn't
-                        " have moved right), and this point is too big;
-                        " thus, no bracket.
+                        " Adjacent point already tried: no bracket.
                         let inext = -1
                     else
                         " Adjacent point is our last hope.
-                        let inext = is[0]
+                        " TODO: This else could be refactored with subsequent,
+                        " outer one. See earlier note.
                         let imove = 1
+                        let inext = i - sgn
                     endif
                 else
                     " Single-step toward region.
-                    let inext = i - sgn
                     let imove = 1
+                    let inext = i - sgn
                 endif
             else
                 " Still in jumping mode.
@@ -1035,15 +1045,32 @@ fu! S_bracket(files, fixed, fn)
                 let imove = 1
             endif
         endif
-        if inext != -1 && imove != -1
-            let is[imove] = i
-            let cmps[imove] = cmp
-        endif
+        " Update for next iteration (or return).
         if inext == -1
             " Either we're done, or we need to transition to looking for end.
-
+            if is[off] == -1
+                " Failed to find sought endpoint.
+                return ret
+            elseif off == 0
+                " Found left edge of bracket; transition to looking for right
+                " edge.
+                " Question: Should I copy or just assign reference?
+                let is = eis
+                let cmps = ecmps
+                " Note: The following accounts for the sign switch naturally. 
+                let i = is[0] + (is[1] - is[0]) / 2
+                let off += 1
+            else
+                " Success!
+                return ret
+            endif
         else
-            " TODO: Possibly refactor this up...
+            " Not done with current endpoint search.
+            if imove != -1
+                " Move one of the search endpoints.
+                let is[imove] = i
+                let cmps[imove] = cmp
+            endif
             let i = inext
         endif
     endwhile
@@ -1062,6 +1089,6 @@ let s:compare = function('s:compare_file')
 
 let fixed = 'dcs'
 let files = ['a', 'aa', 'abc', 'accd', 'bb', 'bda', 'ca', 'cb', 'cc', 'ccc', 'dab', 'dbbb', 'dcs', 'dcsa', 'dcsab/foo', 'efg', 'fad', 'foo', 'goob', 'hoo']
-echo S_bracket(files, fixed)
+"echo S_bracket(files, fixed, s:compare)
 " <<<
 " vim:ts=4:sw=4:et:fdm=marker:fmr=>>>,<<<
