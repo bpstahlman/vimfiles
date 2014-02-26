@@ -1091,7 +1091,6 @@ let s:compare = function('s:compare_file')
 
 let fixed = 'd'
 let files = ['a', 'aa', 'abc', 'accd', 'bb', 'bda', 'ca', 'cb', 'cc', 'ccc', 'dab', 'dbbb', 'dcs', 'dcsa', 'dcsab/foo', 'efg', 'fad', 'foo', 'goob', 'hoo']
-echo S_bracket(files, fixed, s:compare)
 "echo S_bracket(files, fixed, s:compare)
 " <<<
 " vim:ts=4:sw=4:et:fdm=marker:fmr=>>>,<<<
