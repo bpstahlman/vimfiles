@@ -934,6 +934,7 @@ fu! S_bracket(files, fixed, fn)
     endif
     " If here, there's at least 1 point to try.
     while i >= 0
+        echo "i=" . i
         " Compare candidate bracket edge value to constraint value using
         " provided comparison function, reversing sense of comparison for
         " offset == 1
@@ -948,7 +949,7 @@ fu! S_bracket(files, fixed, fn)
                     " Can't move any further: no bracket.
                     let inext = -1
                 elseif dist == 1
-                    if cmps[1] != ''
+                    if cmps[1] isnot ''
                         " Adjacent point already tried.
                         if cmps[1] == 0
                             let ret[off] = is[1]
@@ -987,14 +988,14 @@ fu! S_bracket(files, fixed, fn)
                     let ret[off] = i
                     let inext = -1
                 elseif dist == 1
-                    if cmps[0] != ''
+                    if cmps[0] isnot ''
                         " Adjacent point already tried.
                         let inext = -1
                         let ret[off] = i
                     else
                         " Potential match, but need to try adjacent point.
                         " TODO: Refactor to combine this case with one below
-                        " (by combining the dist == 1 and cmps[0] != ''
+                        " (by combining the dist == 1 and cmps[0] isnot ''
                         " cases).
                         let imove = 1
                         let inext = i - sgn
@@ -1024,7 +1025,7 @@ fu! S_bracket(files, fixed, fn)
                     " List endpoint is too large: no bracket.
                     let inext = -1
                 elseif dist == 1
-                    if cmps[0] != ''
+                    if cmps[0] isnot ''
                         " Adjacent point already tried: no bracket.
                         let inext = -1
                     else
@@ -1052,6 +1053,7 @@ fu! S_bracket(files, fixed, fn)
                 " Failed to find sought endpoint.
                 return ret
             elseif off == 0
+                echo "Switching..."
                 " Found left edge of bracket; transition to looking for right
                 " edge.
                 " Question: Should I copy or just assign reference?
@@ -1059,7 +1061,7 @@ fu! S_bracket(files, fixed, fn)
                 let cmps = ecmps
                 " Note: The following accounts for the sign switch naturally. 
                 let i = is[0] + (is[1] - is[0]) / 2
-                let off += 1
+                let [sgn, off] = [-1, 1]
             else
                 " Success!
                 return ret
@@ -1087,8 +1089,9 @@ fu! s:compare_file(file, fixed)
 endfu
 let s:compare = function('s:compare_file')
 
-let fixed = 'dcs'
+let fixed = 'd'
 let files = ['a', 'aa', 'abc', 'accd', 'bb', 'bda', 'ca', 'cb', 'cc', 'ccc', 'dab', 'dbbb', 'dcs', 'dcsa', 'dcsab/foo', 'efg', 'fad', 'foo', 'goob', 'hoo']
+echo S_bracket(files, fixed, s:compare)
 "echo S_bracket(files, fixed, s:compare)
 " <<<
 " vim:ts=4:sw=4:et:fdm=marker:fmr=>>>,<<<
