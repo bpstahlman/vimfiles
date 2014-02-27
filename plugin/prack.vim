@@ -346,16 +346,13 @@ endfu
 " Returns: dict with the following keys:
 "   'patt'
 "     the regex pattern
+"   'anchored_at_start'
+"     1 iff the first constraint is anchored at start.
+"   'anchored_at_end'
+"     1 iff the last constraint is anchored at end.
 "   'constraints'
-"     array of constraint definitions, each of which is a dict with the
-"     following keys:
-"     'anchor'
-"       enumerated value indicating anchor point: one of the following:
-"         's' = start
-"         'e' = end
-"         'm' = middle (no anchor)
-"     'string'
-"       the exact string that must match at a location determined by 'anchor'
+"     List of constraint strings, which must match exactly at locations
+"     determined by anchored_at_start/anchored_at_end.
 fu! s:glob_to_patt(glob, partial)
     let re_star = '\%(^\|[^*]\)\@<=\*\%([^*]\|$\)\@='
     let star = '[^/]*'
@@ -369,10 +366,16 @@ fu! s:glob_to_patt(glob, partial)
     " on ** is treated as part of the fixed string.
     let fixeds = split(a:glob, re_star . '\|' . re_starstar . '\@=', 1)
     let constraints = []
+    let [anchored_at_start, anchored_at_end] = [0, 0]
     let [i, ln] = [0, len(fixeds)]
+    " Assumption: Because keepempty was set in call to split, non-empty
+    " leading/trailing strings imply start/end anchoring.
     while i < ln
         if fixeds[i] != ''
-            call add(constraints, {'string': fixeds[i], 'anchor': i == 0 ? 's' : i == ln - 1 ? 'e' : 'm'})
+            call add(constraints, fixeds[i])
+            " Note: Single string could be both start and end.
+            if i == 0 | let anchored_at_start = 1 | endif
+            if i == (ln - 1) | let anchored_at_end = 1 | endif
         endif
         let i = i + 1
     endwhile
@@ -425,7 +428,10 @@ fu! s:glob_to_patt(glob, partial)
     if !a:partial
         let patt += '$'
     endif
-    return {'patt': patt, 'constraints': constraints}
+    return {'patt': patt,
+        \'anchored_at_start': anchored_at_start,
+        \'anchored_at_end': anchored_at_end,
+        \'constraints': constraints}
 endfu
 fu! Test_Convert_stars(glob)
     let files = readfile("C:/Users/stahlmanb/tmp/files.lst")
@@ -498,15 +504,24 @@ fu! s:get_matching_files_bracket(constraints, files)
     endwhile
 endfu
 " Helper routine for get_matching_files
-fu! s:get_matching_files_match(patt, constraints, files)
+fu! s:get_matching_files_match(patt_info, anchor_dir, files)
+    " First, bracket a region to search.
+    if a:patt_info.anchored_at_start
+        let [si, ei] = s:bracket(a:files, a:patt_info.constraints[0], s:compare_file_fn)
+    else
+        let [si, ei] = [0, len(a:files)]
+    endif
+    " TODO: Consider returning List of indices instead of actual files.
+    " !!!!!! UNDER CONSTRUCTION !!!!!!!! (27Feb2014)
     let matches = []
-    for file_raw in a:files
+    let i = si
+    while i <= ei
         let file = ''
-        if anchor_dir != ''
+        if a:anchor_dir != ''
             " Anchor exists; skip a file that doesn't match.
-            let idx = stridx(file_raw, anchor_dir)
+            let idx = stridx(file_raw, a:anchor_dir)
             if idx == 0
-                let idx = strlen(anchor_dir)
+                let idx = strlen(a:anchor_dir)
                 let file = file_raw[idx :]
             endif
         else
@@ -524,7 +539,8 @@ fu! s:get_matching_files_match(patt, constraints, files)
         if file =~ '^' . patt
             call add(matches, file_raw)
         endif
-    endfor
+        let i += 1
+    endwhile
 endfu
 " TODO: Figure out how to get cfg here...
 fu! s:get_matching_files(cfg, glob, partial)
@@ -539,7 +555,7 @@ fu! s:get_matching_files(cfg, glob, partial)
         " all other paths must match from the beginning
         " TODO - UNDER CONSTRUCTION!!!!!!!!
         " To speed things up, extract all fixed strings (non-*, non-**) within
-        " the glob, and skip the pattern match if any isn't found in the
+        " the glob, and skip the pattern match if any aren't found in the
         " target file string.
         " Note: Treat fixed strings at the head specially: i.e., can be used
         " to find starting point for search more quickly (eg, in bracketed
@@ -556,13 +572,8 @@ fu! s:get_matching_files(cfg, glob, partial)
             let glob = glob[2:] " strip ./
         endif
         " Convert **N everywhere in glob
-        "let patt = s:glob_to_patt(glob)
         let patt_info = s:glob_to_patt(glob, a:partial)
-        let patt = patt_info.patt
-        let constraints = patt_info.constraints
-        echo "patt: " . patt
-        echo constraints
-        let matches = s:get_matching_files_match(patt, constraints, files)
+        let matches = s:get_matching_files_match(patt_info, anchor_dir, files)
     catch
         " TODO: What error?
         echohl ErrorMsg|echomsg v:exception|echohl None
@@ -899,29 +910,20 @@ endfu
 fu! s:strcmp(a, b)
     return a < b ? -1 : a > b ? 1 : 0
 endfu
-" <<<
-" >>> Commands
-" -- Notes --
-" Refresh builds list file(s) specified by command line options
-" [L]Grf and [LGrd] ignore listfiles, anchoring their search from the
-" current file's dir and the cwd, respectively.
-"
-com! PrackStart call <SID>start()
-com! PrackStop call <SID>stop()
-com! -nargs=? Refresh call <SID>refresh(<q-args>)
-com! -bang -nargs=* Gr  call <SID>ack(<q-bang>, 0, '', <q-args>)
-com! -bang -nargs=* Grf call <SID>ack(<q-bang>, 0, 'file', <q-args>)
-com! -bang -nargs=* Grd call <SID>ack(<q-bang>, 0, 'dir', <q-args>)
 
-com! -bang -nargs=* LGr  call <SID>ack(<q-bang>, 1, '', <q-args>)
-com! -bang -nargs=* LGrf call <SID>ack(<q-bang>, 1, 'file', <q-args>)
-com! -bang -nargs=* LGrd call <SID>ack(<q-bang>, 1, 'dir', <q-args>)
-" <<<
-" >>> Works in progress...
-
-fu! S_bracket(files, fixed, fn)
+" Calculate and return the bracket (defined as [start_index, end_index]) of
+" the region containing only those values in the input list, which are within
+" the region delineated by the input constraint. The input comparison may be
+" used to test a value like so:
+"   fn(value, fixed) =>
+"       -1  value before region 
+"       0   value in region
+"       1   value after region 
+" Note: Performance is important, as values is expected to contain thousands,
+" if not tens of thousands, of files: hence, the binary search algorithm.
+fu! s:bracket(values, constraint, fn)
     let [sgn, off] = [1, 0]
-    let ln = len(a:files)
+    let ln = len(a:values)
     let is = [0, ln - 1]
     let eis = [ln - 1, 0]
     let cmps = ['', '']
@@ -938,8 +940,7 @@ fu! S_bracket(files, fixed, fn)
         " Compare candidate bracket edge value to constraint value using
         " provided comparison function, reversing sense of comparison for
         " offset == 1
-        " TODO: Get "file" out of names...
-        let cmp = sgn * a:fn(a:files[i], a:fixed)
+        let cmp = sgn * a:fn(a:values[i], a:constraint)
         let imove = -1
         if cmp < 0
             " Out of range on near side.
@@ -1087,10 +1088,30 @@ fu! s:compare_file(file, fixed)
     let filepart = strpart(a:file, 0, strlen(a:fixed))
     return s:strcmp(filepart, a:fixed)
 endfu
-let s:compare = function('s:compare_file')
+let s:compare_file_fn = function('s:compare_file')
 
 let fixed = 'd'
 let files = ['a', 'aa', 'abc', 'accd', 'bb', 'bda', 'ca', 'cb', 'cc', 'ccc', 'dab', 'dbbb', 'dcs', 'dcsa', 'dcsab/foo', 'efg', 'fad', 'foo', 'goob', 'hoo']
 "echo S_bracket(files, fixed, s:compare)
+" <<<
+" >>> Commands
+" -- Notes --
+" Refresh builds list file(s) specified by command line options
+" [L]Grf and [LGrd] ignore listfiles, anchoring their search from the
+" current file's dir and the cwd, respectively.
+"
+com! PrackStart call <SID>start()
+com! PrackStop call <SID>stop()
+com! -nargs=? Refresh call <SID>refresh(<q-args>)
+com! -bang -nargs=* Gr  call <SID>ack(<q-bang>, 0, '', <q-args>)
+com! -bang -nargs=* Grf call <SID>ack(<q-bang>, 0, 'file', <q-args>)
+com! -bang -nargs=* Grd call <SID>ack(<q-bang>, 0, 'dir', <q-args>)
+
+com! -bang -nargs=* LGr  call <SID>ack(<q-bang>, 1, '', <q-args>)
+com! -bang -nargs=* LGrf call <SID>ack(<q-bang>, 1, 'file', <q-args>)
+com! -bang -nargs=* LGrd call <SID>ack(<q-bang>, 1, 'dir', <q-args>)
+" <<<
+" >>> Works in progress...
+
 " <<<
 " vim:ts=4:sw=4:et:fdm=marker:fmr=>>>,<<<
