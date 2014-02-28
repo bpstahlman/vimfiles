@@ -504,7 +504,12 @@ fu! s:get_matching_files_bracket(constraints, files)
     endwhile
 endfu
 " Helper routine for get_matching_files
-fu! s:get_matching_files_match(patt_info, anchor_dir, files)
+fu! s:get_matching_files_match(patt_info, files)
+    " Cache some vars for efficiency in loop.
+    let [aas, aae] = [a:patt_info.anchored_at_start, a:patt_info.anchored_at_end]
+    let [ncs, cs] = [len(a:patt_info.constraints), a:patt_info.constraints]
+    let cs = a:patt_info.constraints
+    let has_anchor = aas || aae
     " First, bracket a region to search.
     if a:patt_info.anchored_at_start
         let [si, ei] = s:bracket(a:files, a:patt_info.constraints[0], s:compare_file_fn)
@@ -516,8 +521,33 @@ fu! s:get_matching_files_match(patt_info, anchor_dir, files)
     let matches = []
     let i = si
     while i <= ei
-        let file = ''
-        if a:anchor_dir != ''
+        let file = files[i]
+        if ncs > 0
+            " Loop through the constraints, short-circuiting on
+            " disqualification.
+            let fail = 0
+            for c in cs
+                let clen = len(c)
+                if aas && file[0 : clen - 1] != c
+                    let fail = 1
+                    break
+                elseif aae && file[-clen : ] != c
+                    let fail = 1
+                    break
+                else
+                    " Un-anchored constraint: can match anywhere except within
+                    " a start/end anchor.
+                    " TODO: Search only non-anchored portion of string.
+                    if stridx(file, c) == -1
+                        let fail = 1
+                        break
+                    endif
+                endif
+            endfor
+            if fail
+                " Skip to next file.
+                continue
+            endif
             " Anchor exists; skip a file that doesn't match.
             let idx = stridx(file_raw, a:anchor_dir)
             if idx == 0
@@ -565,15 +595,16 @@ fu! s:get_matching_files(cfg, glob, partial)
         if glob =~ '^\.//'
             " Use fnamemodify to ensure trailing slash.
             let anchor_dir = s:canonicalize_path(getcwd(), a:cfg.rootdir)
-            let glob = glob[3:] " strip .//
+            let glob = anchor_dir . glob[3:] " strip .//
         elseif a:glob =~ '^\./'
             " Note: This will default to same as .// if no current file.
             let anchor_dir = s:canonicalize_path(expand('%:h'), a:cfg.rootdir)
-            let glob = glob[2:] " strip ./
+            let glob = anchor_dir . glob[2:] " strip ./
         endif
-        " Convert **N everywhere in glob
+        " Convert * and ** in glob, and extract fixed string constraints into
+        " a special structure to be used for optimization.
         let patt_info = s:glob_to_patt(glob, a:partial)
-        let matches = s:get_matching_files_match(patt_info, anchor_dir, files)
+        let matches = s:get_matching_files_match(patt_info, files)
     catch
         " TODO: What error?
         echohl ErrorMsg|echomsg v:exception|echohl None
