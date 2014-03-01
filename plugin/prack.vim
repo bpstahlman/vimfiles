@@ -60,6 +60,7 @@ fu! s:start()
         call s:stop()
     endtry
 endfu
+
 fu! s:stop()
     unlet! s:started
     " TODO: General cleanup. E.g., delete commands.
@@ -206,6 +207,7 @@ fu! s:process_cfg()
         let i = i + 1
     endwhile
 endfu
+
 " Return s:cache_cfg index corresponding to input short/long option name (or
 " -1 if matching config not found).
 " Input(s):
@@ -233,6 +235,7 @@ fu! s:get_cfg_idx(opt)
         return -1
     endif
 endfu
+
 " Canonicalize the filenames in listfile, converting to be relative to rootdir
 " if possible.
 " Format: Canonical form uses `/', and has no `.' or `..' components, leading
@@ -252,7 +255,6 @@ fu! s:cache_listfile(cache_cfg, force_refresh)
     let listfile_path = a:cache_cfg.rootdir . s:listfile
     let listfile_path_found = findfile(s:listfile, a:cache_cfg.rootdir)
     " TODO: Rely upon higher-level try/catch?
-    "call s:save_state()
     let sf = s:sf_create()
     try
         " Do we need to create/update the listfile?
@@ -286,7 +288,7 @@ fu! s:cache_listfile(cache_cfg, force_refresh)
             call add(files, file_raw)
         endfor
         let a:cache_cfg.files = files
-        echo s:cache_cfg
+        "echo s:cache_cfg
         "echo a:cache_cfg
         let success = 1
     catch
@@ -294,7 +296,6 @@ fu! s:cache_listfile(cache_cfg, force_refresh)
         let a:cache_cfg.disabled = 1
         let a:cache_cfg.files = []
     finally
-        "call s:restore_state()
         call sf.destroy()
     endtry
     return success
@@ -303,9 +304,9 @@ endfu
 " >>> Functions pertaining to file processing
 " Convert occurrences of * and **[[SIGN]NUMBER] in input glob to corresponding
 " pattern; also, build array of constraints representing the content and
-" location of fixed strings within the glob (which can be used to prevent
-" costly regex matches when a simple string match is sufficient to disqualify
-" the candidate match target).
+" relative location of fixed strings within the glob (which can be used to
+" prevent costly regex matches when a simple string match is sufficient to
+" disqualify a candidate match target).
 " Note: 'partial' argument determines whether the generated pattern will be
 " anchored at end.
 " Note: The * and ** constructs are treated in a manner nearly identical to
@@ -327,7 +328,7 @@ endfu
 " trailing `/' as part of the match.
 " Design Decision: Don't complicate algorithm to allow for escaped slashes in
 " glob. Anyone who does such a thing can expect indeterminate behavior, even
-" if I were to go to great lengths here to handle it.
+" if I were to go to great lengths to handle it here.
 " Design Decision: Don't complicate pattern to allow for backslash-escaped
 " `*': Vim doesn't even support this in a glob (at least not in Windows).
 " Design Decision: (sign number) is optional but a sign without a number is
@@ -345,14 +346,17 @@ endfu
 " Approach: Replace all occurrences of * first, then ** in separate loop.
 " Returns: dict with the following keys:
 "   'patt'
-"     the regex pattern
-"   'anchored_at_start'
-"     1 iff the first constraint is anchored at start.
-"   'anchored_at_end'
-"     1 iff the last constraint is anchored at end.
+"     the regex pattern corresponding to the input glob
+"     Note: If input glob contained leading/trailing fixed strings, they will
+"     not be represented in patt, but in start_anchor/end_anchor,
+"     respectively.
+"   'start_anchor'
+"     If non-empty, string that must match at start of canonical path.
+"   'end_anchor'
+"     If non-empty, string that must match at end of canonical path.
 "   'constraints'
-"     List of constraint strings, which must match exactly at locations
-"     determined by anchored_at_start/anchored_at_end.
+"     List of constraint strings, which must match exactly somewhere within
+"     region that excludes any start/end anchors.
 fu! s:glob_to_patt(glob, partial)
     let re_star = '\%(^\|[^*]\)\@<=\*\%([^*]\|$\)\@='
     let star = '[^/]*'
@@ -362,29 +366,30 @@ fu! s:glob_to_patt(glob, partial)
     " refactoring that combines their processing).
     " Note: Deferring putting the constraint generation into separate function
     " because of refactoring possibility.
-    " Note: Positive lookahead assertion used to ensure that a trailing slash
-    " on ** is treated as part of the fixed string.
-    let fixeds = split(a:glob, re_star . '\|' . re_starstar . '\@=', 1)
+    let fixeds = split(a:glob, re_star . '\|' . re_starstar, 1)
     let constraints = []
-    let [anchored_at_start, anchored_at_end] = [0, 0]
-    let [i, ln] = [0, len(fixeds)]
     " Assumption: Because keepempty was set in call to split, non-empty
     " leading/trailing strings imply start/end anchoring.
+    let [start_anchor, end_anchor] = [fixeds[0], fixeds[-1]]
+    " Loop over interior (non-leading/trailing) fixeds.
+    let [i, ln] = [1, len(fixeds) - 1]
     while i < ln
         if fixeds[i] != ''
             call add(constraints, fixeds[i])
-            " Note: Single string could be both start and end.
-            if i == 0 | let anchored_at_start = 1 | endif
-            if i == (ln - 1) | let anchored_at_end = 1 | endif
         endif
-        let i = i + 1
+        let i += 1
     endwhile
+    " Design Decision: Returned pattern excludes any fixed strings at
+    " start/end, which are represented by start_anchor/end_anchor.
+    let glob = a:glob[len(start_anchor) : -len(end_anchor) - 1]
     " Process *
-    let glob = substitute(a:glob, re_star, star, 'g')
+    let glob = substitute(glob, re_star, star, 'g')
     " Process **
-    " Vim_Bug: Both \f and [^\f] match `:'
     " Design Decision: Defer grouping of dir_seg to avoid redundant grouping.
-    let dir_seg = '\%(\\[^\f]\|[^/]\)\+'
+    " TODO: Is there any point in supporting backslash-escaping of
+    " non-filename chars? Possibly not, as they might not be handled correctly
+    " elsewhere...
+    let dir_seg = '\%(\\\%(\f\)\@!.\|[^/]\)\+'
     let patt = ''
     let [si, sio] = [0, 0]
     while si >= 0
@@ -425,14 +430,19 @@ fu! s:glob_to_patt(glob, partial)
             let sio = si + strlen(match)
         endif
     endwhile
+    " Assumption: There can be no alternation in the top-level of pattern
+    " (hence, no need for grouping parens).
+    " Rationale: Globs don't support alternation.
+    let patt = '^' . patt
     if !a:partial
-        let patt += '$'
+        let patt .= '$'
     endif
     return {'patt': patt,
-        \'anchored_at_start': anchored_at_start,
-        \'anchored_at_end': anchored_at_end,
+        \'start_anchor': start_anchor,
+        \'end_anchor': end_anchor,
         \'constraints': constraints}
 endfu
+
 fu! Test_Convert_stars(glob)
     let files = readfile("C:/Users/stahlmanb/tmp/files.lst")
     let patt = s:glob_to_patt(a:glob)
@@ -460,15 +470,7 @@ fu! s:get_filtered_files(cfg, dir)
         let idx = idx + 1
     endfor
 endfu
-fu! s:create_bracketer(min, max)
-    let state = {
-        \'min': -1, 'max': -1,
-        \'si1': a:min, 'si2': a:max,
-        \'ei1': -1, 'ei2': -1}
-    fu! state.step(cmp) dict
-    endfu
-    return state
-endfu
+
 " Find region within input files array, for which constraints do not preclude
 " a match.
 " Returns: a range of the form [start_index, end_index], else -1 (if no such
@@ -503,105 +505,92 @@ fu! s:get_matching_files_bracket(constraints, files)
         endif
     endwhile
 endfu
+
 " Helper routine for get_matching_files
 fu! s:get_matching_files_match(patt_info, files)
     " Cache some vars for efficiency.
-    let cs = a:patt_info.constraints
-    let ncs = len(cs)
-    let fs = a:files
-    let [aas, aae] = [a:patt_info.anchored_at_start, a:patt_info.anchored_at_end]
-    " If possible, bracket a region to search.
+    let c_lst = a:patt_info.constraints
+    let patt = a:patt_info.patt
+    let c_len = len(c_lst)
+    let f_lst = a:files
+    "echo "constraints:"
+    "echo c_lst
+    "echo "patt: " . patt
+    " Note: We don't apply patt to portions of filename covered by anchors.
+    let [sanch, eanch] = [a:patt_info.start_anchor, a:patt_info.end_anchor]
+    let [c_sanch_len, c_eanch_len] = [len(sanch), len(eanch)]
+    " If possible, narrow the region of file list to be searched.
     " Rationale: No point in checking constraints where the start anchor has
     " already precluded a match.
-    if a:patt_info.anchored_at_start
-        let [fsi, fei] = s:bracket(fs, cs[0], s:compare_file_fn)
+    if sanch != ''
+        let [f_s_i, f_e_i] = s:bracket(f_lst, sanch, s:compare_file_fn)
     else
-        let [fsi, fei] = [0, len(fs)]
+        let [f_s_i, f_e_i] = [0, len(f_lst) - 1]
     endif
+    "echo "sanch: " . sanch
+    "echo "eanch: " . eanch
     " TODO: Consider returning List of indices instead of actual files.
     " !!!!!! UNDER CONSTRUCTION !!!!!!!! (27Feb2014)
     let matches = []
-    let fi = fsi
-    while fi <= fei
-        let f = fs[fi]
-        let flen = len(f)
-        if ncs > 0
-            " Region constraining search for unanchored constraints. Will be
-            " adjusted as search progresses.
-            let [csi, csi_end] = [0, len(f) - 1]
-            " Start/end anchor checks are quickest, and may obviate need to do
-            " the others.
-            if aas
-                let clen = len(cs[0])
-                if f[0 : clen - 1] != cs[0]
-                    break
-                else
-                    " First non-start match anchor can't overlap start.
-                    let csi = clen
-                endif
-            endif
-            if aae
-                let clen = len(cs[-1])
-                if f[-clen : ] != cs[-1]
-                    break
-                else
-                    " A non-end anchor match can't overlap the end anchor.
-                    let csi_end = flen - clen - 1
-                endif
-            endif
+    let f_i = f_s_i
+    while f_i <= f_e_i
+        let f_raw = f_lst[f_i]
+        " Set skip flag if a single constraint fails.
+        let skip_file = 0
+        " Start/end anchor checks are quickest to check, and may permit
+        " short-circuiting.
+        if sanch != '' && f_raw[0 : c_sanch_len - 1] != sanch ||
+            \eanch != '' && f_raw[-c_eanch_len : ] != eanch
+            " Skip to next file.
+            "echo "Skipping due to start/end anchor fail"
+            let skip_file = 1
+        endif
+        if !skip_file && c_len > 0
+            " Need to check unanchored constraints.
+            let f = f_raw[c_sanch_len : -1 - (c_eanch_len ? c_eanch_len : 0)]
+            let f_slen = len(f)
             " Loop through the unanchored constraints, short-circuiting on
             " disqualification.
-            let fail = 0
-            let ci = aas ? 1 : 0
-            let ci_end = ncs - (aae ? 2 : 1)
-            while ci <= ci_end
-                let c = cs[ci]
-                let clen = len(c)
-                " Unanchored constraint: although we don't know exactly
-                " where it might start, we do know that it can't start
-                " before the earliest possible match of the preceding
-                " unanchored constraint.
-                let ii = stridx(f, c, csi) == -1
-                if ii == -1
-                    let fail = 1
+            " Keep up with earliest point at which constraint could match.
+            " Rationale: Unanchored constraint match can't start before end of
+            " earliest possible match of preceding unanchored constraint.
+            let ms_ci = 0
+            for c in c_lst
+                let c_slen = len(c)
+                let i = stridx(f, c, ms_ci)
+                if i == -1
+                    "echo "Skipping due to floating anchor "
+                    "echo "f: " . f . "  c: " . c . "  ms_ci: " . ms_ci
+                    let skip_file = 1
                     break
                 else
-                    let csi = 
+                    " Don't search the matched portion (or anything prior) again.
+                    let ms_ci = i + c_slen
                 endif
-                " Don't search the matched portion (or anything prior) again.
-                let ci = ii + clen
             endfor
-            if fail
-                " Skip to next file.
-                continue
-            endif
-            " Anchor exists; skip a file that doesn't match.
-            let idx = stridx(f_raw, a:anchor_dir)
-            if idx == 0
-                let idx = strlen(a:anchor_dir)
-                let f = f_raw[idx : ]
-            endif
         else
             let f = f_raw
         endif
-        " Do we have something to match against?
-        if f == ''
-            continue
+        if !skip_file
+            " If here, match can't be precluded; time to try regex pattern match.
+            " Note: Match target is the portion of file excluding any
+            " start/end anchor. The patt must match at start of this portion;
+            " whether it must match at end is determined by patt itself.
+            " TODO: Should let user's fileignorecase or wildignorecase setting
+            " determine =~ or =~?.
+            "echo "Matching " . f . " against " . patt
+            if f =~ patt
+                "echo "Success!"
+                call add(matches, f_raw)
+            endif
         endif
-        " TODO: Should let user's fileignorecase or wildignorecase setting
-        " determine =~ or =~?.
-        "echo "Matching " . file . " against " . patt
-        " TODO: Perhaps move the anchor into pattern generation.
-        if f =~ '^' . patt
-            call add(matches, f_raw)
-        endif
-        let fi += 1
+        let f_i += 1 " Advance to next file.
     endwhile
+    return matches
 endfu
 " TODO: Figure out how to get cfg here...
 fu! s:get_matching_files(cfg, glob, partial)
     let matches = []
-    "call s:save_state()
     let sf = s:sf_create()
     try
         let anchor_dir = ''
@@ -613,10 +602,6 @@ fu! s:get_matching_files(cfg, glob, partial)
         " To speed things up, extract all fixed strings (non-*, non-**) within
         " the glob, and skip the pattern match if any aren't found in the
         " target file string.
-        " Note: Treat fixed strings at the head specially: i.e., can be used
-        " to find starting point for search more quickly (eg, in bracketed
-        " search) and to short-circuit when we've passed last possible match
-        " in sorted list.
         let glob = a:glob
         if glob =~ '^\.//'
             " Use fnamemodify to ensure trailing slash.
@@ -629,17 +614,21 @@ fu! s:get_matching_files(cfg, glob, partial)
         endif
         " Convert * and ** in glob, and extract fixed string constraints into
         " a special structure to be used for optimization.
+        " Rationale: A fixed string at head allows us to delineate (using
+        " adaptive search) a region within file list, outside of which matches
+        " cannot exist. Limiting search to this region can speed things up
+        " considerably.
         let patt_info = s:glob_to_patt(glob, a:partial)
-        let matches = s:get_matching_files_match(patt_info, files)
+        let matches = s:get_matching_files_match(patt_info, a:cfg.files)
     catch
         " TODO: What error?
         echohl ErrorMsg|echomsg v:exception|echohl None
     finally
-        "call s:restore_state()
         call sf.destroy()
     endtry
     return matches
 endfu
+
 fu! Test_get_matching_files(cfg_idx, glob, partial)
     let matches = s:get_matching_files(s:cache_cfg[a:cfg_idx], a:glob, a:partial)
     for m in matches
@@ -777,6 +766,7 @@ endfu
 " calls are do-nothing.
 " TODO!!!!!!!!!!!!!! Change this mechanism completely: use dict functions and
 " stack frame instances...
+" TODO: Remove this after replacing completely...
 fu! s:save_state()
     if !exists('s:save_level')
         let s:save_level = 0
@@ -869,7 +859,6 @@ endfu
 " <<<
 " >>> Functions invoked by commands
 fu! s:refresh(opts)
-    "call s:save_state()
     let sf = s:sf_create()
     try
         let pcl = s:parse_cmdline(a:opts)
@@ -902,12 +891,10 @@ fu! s:refresh(opts)
     catch /Vim(echoerr)/
         echohl ErrorMsg|echomsg v:exception|echohl None
     finally
-        "call s:restore_state()
         call sf.destroy()
     endtry
 endfu
 fu! s:ack(bang, use_ll, mode, args)
-    "call s:save_state()
     let sf = s:sf_create()
     try
         " Break raw command line into parsed prack options, and string
@@ -955,19 +942,11 @@ fu! s:ack(bang, use_ll, mode, args)
     catch /Vim(echoerr)/
         echohl ErrorMsg|echomsg v:exception|echohl None
     finally
-        "call s:restore_state()
         call sf.destroy()
     endtry
 endfu
 " <<<
 " >>> Functions for general utility
-" TODO: Decide how to incorporate case-sensitivity - probably at higher level
-" with appropriate setting of 'ignorecase' based fileignorecase or some such,
-" as calls to this may be nested deeply.
-fu! s:strcmp(a, b)
-    return a < b ? -1 : a > b ? 1 : 0
-endfu
-
 " Calculate and return the bracket (defined as [start_index, end_index]) of
 " the region containing only those values in the input list, which are within
 " the region delineated by the input constraint. The input comparison may be
@@ -993,7 +972,6 @@ fu! s:bracket(values, constraint, fn)
     endif
     " If here, there's at least 1 point to try.
     while i >= 0
-        echo "i=" . i
         " Compare candidate bracket edge value to constraint value using
         " provided comparison function, reversing sense of comparison for
         " offset == 1
@@ -1111,7 +1089,6 @@ fu! s:bracket(values, constraint, fn)
                 " Failed to find sought endpoint.
                 return ret
             elseif off == 0
-                echo "Switching..."
                 " Found left edge of bracket; transition to looking for right
                 " edge.
                 " Question: Should I copy or just assign reference?
@@ -1136,7 +1113,9 @@ fu! s:bracket(values, constraint, fn)
     endwhile
     return ret
 endfu
-
+" TODO: Decide how to incorporate case-sensitivity - probably at higher level
+" with appropriate setting of 'ignorecase' based fileignorecase or some such,
+" as calls to this may be nested deeply.
 fu! s:strcmp(a, b)
     return a:a < a:b ? -1 : a:a > a:b ? 1 : 0
 endfu
@@ -1147,9 +1126,12 @@ fu! s:compare_file(file, fixed)
 endfu
 let s:compare_file_fn = function('s:compare_file')
 
-let fixed = 'd'
-let files = ['a', 'aa', 'abc', 'accd', 'bb', 'bda', 'ca', 'cb', 'cc', 'ccc', 'dab', 'dbbb', 'dcs', 'dcsa', 'dcsab/foo', 'efg', 'fad', 'foo', 'goob', 'hoo']
-"echo S_bracket(files, fixed, s:compare)
+fu! Test_bracket()
+    let fixed = 'd'
+    let files = ['a', 'aa', 'abc', 'accd', 'bb', 'bda', 'ca', 'cb', 'cc', 'ccc', 'dab', 'dbbb', 'dcs', 'dcsa', 'dcsab/foo', 'efg', 'fad', 'foo', 'goob', 'hoo']
+    echo s:bracket(files, fixed, s:compare)
+endfu
+
 " <<<
 " >>> Commands
 " -- Notes --
