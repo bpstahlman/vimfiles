@@ -505,71 +505,97 @@ fu! s:get_matching_files_bracket(constraints, files)
 endfu
 " Helper routine for get_matching_files
 fu! s:get_matching_files_match(patt_info, files)
-    " Cache some vars for efficiency in loop.
-    let [aas, aae] = [a:patt_info.anchored_at_start, a:patt_info.anchored_at_end]
-    let [ncs, cs] = [len(a:patt_info.constraints), a:patt_info.constraints]
+    " Cache some vars for efficiency.
     let cs = a:patt_info.constraints
-    let has_anchor = aas || aae
-    " First, bracket a region to search.
+    let ncs = len(cs)
+    let fs = a:files
+    let [aas, aae] = [a:patt_info.anchored_at_start, a:patt_info.anchored_at_end]
+    " If possible, bracket a region to search.
+    " Rationale: No point in checking constraints where the start anchor has
+    " already precluded a match.
     if a:patt_info.anchored_at_start
-        let [si, ei] = s:bracket(a:files, a:patt_info.constraints[0], s:compare_file_fn)
+        let [fsi, fei] = s:bracket(fs, cs[0], s:compare_file_fn)
     else
-        let [si, ei] = [0, len(a:files)]
+        let [fsi, fei] = [0, len(fs)]
     endif
     " TODO: Consider returning List of indices instead of actual files.
     " !!!!!! UNDER CONSTRUCTION !!!!!!!! (27Feb2014)
     let matches = []
-    let i = si
-    while i <= ei
-        let file = files[i]
+    let fi = fsi
+    while fi <= fei
+        let f = fs[fi]
+        let flen = len(f)
         if ncs > 0
-            " Loop through the constraints, short-circuiting on
+            " Region constraining search for unanchored constraints. Will be
+            " adjusted as search progresses.
+            let [csi, csi_end] = [0, len(f) - 1]
+            " Start/end anchor checks are quickest, and may obviate need to do
+            " the others.
+            if aas
+                let clen = len(cs[0])
+                if f[0 : clen - 1] != cs[0]
+                    break
+                else
+                    " First non-start match anchor can't overlap start.
+                    let csi = clen
+                endif
+            endif
+            if aae
+                let clen = len(cs[-1])
+                if f[-clen : ] != cs[-1]
+                    break
+                else
+                    " A non-end anchor match can't overlap the end anchor.
+                    let csi_end = flen - clen - 1
+                endif
+            endif
+            " Loop through the unanchored constraints, short-circuiting on
             " disqualification.
             let fail = 0
-            for c in cs
+            let ci = aas ? 1 : 0
+            let ci_end = ncs - (aae ? 2 : 1)
+            while ci <= ci_end
+                let c = cs[ci]
                 let clen = len(c)
-                if aas && file[0 : clen - 1] != c
-                    let fail = 1
-                    break
-                elseif aae && file[-clen : ] != c
+                " Unanchored constraint: although we don't know exactly
+                " where it might start, we do know that it can't start
+                " before the earliest possible match of the preceding
+                " unanchored constraint.
+                let ii = stridx(f, c, csi) == -1
+                if ii == -1
                     let fail = 1
                     break
                 else
-                    " Un-anchored constraint: can match anywhere except within
-                    " a start/end anchor.
-                    " TODO: Search only non-anchored portion of string.
-                    if stridx(file, c) == -1
-                        let fail = 1
-                        break
-                    endif
+                    let csi = 
                 endif
+                " Don't search the matched portion (or anything prior) again.
+                let ci = ii + clen
             endfor
             if fail
                 " Skip to next file.
                 continue
             endif
             " Anchor exists; skip a file that doesn't match.
-            let idx = stridx(file_raw, a:anchor_dir)
+            let idx = stridx(f_raw, a:anchor_dir)
             if idx == 0
                 let idx = strlen(a:anchor_dir)
-                let file = file_raw[idx :]
+                let f = f_raw[idx : ]
             endif
         else
-            let file = file_raw
+            let f = f_raw
         endif
         " Do we have something to match against?
-        " TODO: Sort files and short-circuit when possible.
-        if file == ''
+        if f == ''
             continue
         endif
         " TODO: Should let user's fileignorecase or wildignorecase setting
         " determine =~ or =~?.
         "echo "Matching " . file . " against " . patt
         " TODO: Perhaps move the anchor into pattern generation.
-        if file =~ '^' . patt
-            call add(matches, file_raw)
+        if f =~ '^' . patt
+            call add(matches, f_raw)
         endif
-        let i += 1
+        let fi += 1
     endwhile
 endfu
 " TODO: Figure out how to get cfg here...
