@@ -100,6 +100,7 @@ fu! s:process_cfg()
     let i = 0
     " Note: Index into s:cache_cfg (i.e., valid configs only)
     let cfg_idx = 0
+    let sf = s:sf_create()
     while i < ln
         let cfg = g:prack_module_cfg[i]
         if !has_key(cfg, 'root')
@@ -157,13 +158,14 @@ fu! s:process_cfg()
             let cache_cfg.disabled = 1
             let i = i + 1 | continue
         endif
-        " TODO: Need to ensure cwd saved/restore properly...
+        " Save full path of rootdir.
         let cache_cfg.rootdir = s:canonicalize_path(rootdir, '')
         " Build cache, but don't force refresh.
         call s:cache_listfile(cache_cfg, 0)
         let cfg_idx = cfg_idx + 1
         let i = i + 1
     endwhile
+    call sf.destroy()
     " If no valid subprojects, no point in continuing...
     if !len(s:cache_cfg)
         throw "No valid subprojects. :help prack-config"
@@ -206,6 +208,13 @@ fu! s:process_cfg()
         call add(s:longnames, {'name': longnames[i], 're': re, 'idx': lname_to_index[longnames[i]]})
         let i = i + 1
     endwhile
+    "echo "Config:"
+    "echo s:cache_cfg
+    "echo "longnames:"
+    "echo s:longnames
+    "echo "shortnames:"
+    "echo s:shortnames
+
 endfu
 
 " Return s:cache_cfg index corresponding to input short/long option name (or
@@ -257,11 +266,12 @@ fu! s:cache_listfile(cache_cfg, force_refresh)
     " TODO: Rely upon higher-level try/catch?
     let sf = s:sf_create()
     try
+        " Both listfile generation and file canonicalization require us to be
+        " in root dir.
+        call sf.pushd(a:cache_cfg.rootdir)
         " Do we need to create/update the listfile?
         if listfile_path_found == '' || a:force_refresh
             let v:errmsg = ''
-            "exe 'lcd ' . a:cache_cfg.rootdir
-            call sf.pushd(a:cache_cfg.rootdir)
             " Note: silent avoids the annoying 'Hit enter' prompt.
             exe 'silent !' . a:cache_cfg.find . ' >' . s:listfile
             if v:errmsg != ''
@@ -287,6 +297,9 @@ fu! s:cache_listfile(cache_cfg, force_refresh)
             " Add canonical name to list.
             call add(files, file_raw)
         endfor
+        " TODO: Make this optional so we can skip if user's find or whatever
+        " ensures sorted.
+        call sort(files)
         let a:cache_cfg.files = files
         "echo s:cache_cfg
         "echo a:cache_cfg
@@ -447,10 +460,10 @@ fu! Test_Convert_stars(glob)
     let files = readfile("C:/Users/stahlmanb/tmp/files.lst")
     let patt = s:glob_to_patt(a:glob)
     for f in files
-        echo "Path:  " . f
-        echo "Patt:  " . patt
+        "echo "Path:  " . f
+        "echo "Patt:  " . patt
         let m = matchstr(f, '^' . patt)
-        echo "Match: " . m
+        "echo "Match: " . m
     endfor
 endfu
 
@@ -647,9 +660,12 @@ fu! s:canonicalize_path(path, rootdir)
     " drive name (when it's default), which I don't want.
     " Note: fnamemodify ensures a `/' at the end of a directory name, and
     " expand won't remove it.
+    "echo "Input path: " . a:path . " -- cwd: " . getcwd()
     let path = expand(fnamemodify(a:path, ':p'))
+    "echo "path: " . path
     if (a:rootdir != '')
         let rootdir = expand(fnamemodify(a:rootdir, ':p'))
+        "echo "rootdir: " . rootdir
         " Can we make it relative to rootdir?
         let ei = matchend(path, '^' . rootdir)
         if ei > 0
