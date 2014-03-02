@@ -601,7 +601,7 @@ fu! s:get_matching_files_match(patt_info, files)
     endwhile
     return matches
 endfu
-" TODO: Figure out how to get cfg here...
+
 fu! s:get_matching_files(cfg, glob, partial)
     let matches = []
     let sf = s:sf_create()
@@ -871,6 +871,30 @@ fu! s:parse_cmdline(cmdline)
     let m = matchlist(a:cmdline, '\%#=1^\s*\(\%(--\?[^-[:space:]]\+\)\%(\s\+--\?[^-[:space:]]\+\)*\)\?\%(\%(^\|\s\+\)--\%(\s\+\|$\)\)\?\s*\(.*\)$')
     let [optstr, remstr] = m[1:2]
     return {'opts': s:extract_opts(optstr), 'rem': remstr}
+endfu
+" <<<
+" >>> Functions used for completion
+" Return list of filenames, filtered by the glob before the cursor, whose
+" format is identical to the one accepted by s:get_matching_files.
+" Important Note: Because the completion is used for commands that open files,
+" the filenames we return must be relative to the current directory; however,
+" the globs are relative to a subproject: e.g.,
+" --php:**/foo/file1.php
+" --js:./file2.js
+" --cpp:.//**/file3.cpp
+fu! s:complete_filenames(arg_lead, cmd_line, cursor_pos)
+    let ms = matchlist(a:arg_lead, '\([^:]*\):\(.*\)')
+    if empty(ms)
+        return []
+    endif
+    let [_, opt, glob] = ms
+    let opts = s:extract_opts(opt)
+    let cfg_idx = s:get_cfg_idx(opts[0])
+    let files = s:get_matching_files(s:cache_cfg[cfg_idx], glob, 1)
+    " TODO: UNDER CONSTRUCTION!!!!!!!
+    return files
+    "return ["one", "two", "three"]
+
 endfu
 " <<<
 " >>> Functions invoked by commands
@@ -1165,6 +1189,8 @@ com! -bang -nargs=* Grd call <SID>ack(<q-bang>, 0, 'dir', <q-args>)
 com! -bang -nargs=* LGr  call <SID>ack(<q-bang>, 1, '', <q-args>)
 com! -bang -nargs=* LGrf call <SID>ack(<q-bang>, 1, 'file', <q-args>)
 com! -bang -nargs=* LGrd call <SID>ack(<q-bang>, 1, 'dir', <q-args>)
+
+com! -nargs=1 -complete=customlist,<SID>complete_filenames Sp echo "foo"
 " <<<
 " >>> Works in progress...
 
