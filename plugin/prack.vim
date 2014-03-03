@@ -28,7 +28,7 @@ let g:prack_module_cfg = [
 " containing all of the original keys, plus the following:
 " TODO: Consider making it mirror the above exactly: complexity engendered by
 " culling invalid entries isn't worth much, especially now that we have
-" concept of "disabled"...
+" concept of 'disabled'...
 "
 " rootdir
 "   Root directory in canonical form
@@ -1191,6 +1191,26 @@ com! -bang -nargs=* LGrf call <SID>ack(<q-bang>, 1, 'file', <q-args>)
 com! -bang -nargs=* LGrd call <SID>ack(<q-bang>, 1, 'dir', <q-args>)
 
 com! -nargs=1 -complete=customlist,<SID>complete_filenames Sp echo "foo"
+" Quoted args play...
+com! -nargs=* QA FA <q-args>
+com! -nargs=* FA call FA(<f-args>)
+fu! FA(...)
+    for s in a:000
+        echon "|" . s . "|"
+    endfor
+endfu
+" Completion play...
+let ls = ["/usr/var/somefile.txt", "/usr/src/chicken-scheme/foo.c", "/usr/bin/someutil", "somedir/someotherdir/somefile.scm"]
+fu! Complete_customlist(A, L, P)
+    echomsg "Completing customlist`" . a:A . "', Leading part is `" . a:L . "'"
+    return g:ls
+endfu
+fu! Complete_custom(A, L, P)
+    echomsg "Completing custom `" . a:A . "', Leading part is `" . a:L . "'"
+    return join(g:ls, "\n")
+endfu
+com! -nargs=1 -complete=customlist,Complete_customlist CL echo "foo"
+com! -nargs=1 -complete=custom,Complete_custom C echo "foo"
 " <<<
 " >>> Works in progress...
 
