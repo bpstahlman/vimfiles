@@ -950,7 +950,7 @@ fu! s:parse_opt(opt, throw)
 endfu
 " Convert input spec to corresponding list of files.
 " TODO: More complete docs... E.g., document format somewhere.
-fu! s:get_files_for_spec(spec, throw)
+fu! s:get_files_for_spec(spec, partial, prepend_sp_name, throw)
     let opt = s:parse_opt(a:spec, a:throw)
     if type(opt) != 4 " Dict
         echoerr "Bad spec: " . a:spec
@@ -964,8 +964,17 @@ fu! s:get_files_for_spec(spec, throw)
     endif
     let files = []
     for sp_idx in sp_idxs
+        let fs = s:get_matching_files(s:cache_cfg[sp_idx], opt.glob, a:partial)
+        if a:prepend_sp_name
+            " TODO: Is 'name' mandatory? I think I've assumed it will be...
+            let sp_name = s:cache_cfg[sp_idx].name
+            " Prepend something that will indicate the subproject when it's
+            " time to open the file.
+            call map(fs, 'l:sp_name . "://" . v:val')
+        endif
+
         " TODO: Think about partial arg here...
-        call extend(files, s:get_matching_files(s:cache_cfg[sp_idx], opt.glob, 1))
+        call extend(files, fs)
     endfor
     return files
 endfu
@@ -980,7 +989,11 @@ fu! s:parse_cmdline(cmd, partial, ...)
         elseif arg[0] != '-' && arg[0] != ':'
             break
         else
-            call extend(files, s:get_files_for_spec(arg, partial))
+            " TODO: I'm thinking that for this, we don't want to prepend
+            " suproject indicator (as we do for completion); instead, we can
+            " simply send multiple lists for subsequent parsing (1 per
+            " subproject).
+            call extend(files, s:get_files_for_spec(arg, partial, 1, 1))
         endif
         let argidx += 1
     endfor
@@ -993,17 +1006,19 @@ endfu
 " Return list of filenames, filtered by the glob before the cursor, whose
 " format is described by... TODO
 " Important Note: Because the completion is used for commands that open files,
-" the filenames we return must be relative to the current directory; however,
-" the globs are relative to a subproject: e.g.,
+" the filenames we return must be relative to a known location: e.g., cwd or
+" subproject root.
+" Issue: When command is actually executed, we won't be able to tell from the
+" subproject-relative filename alone which subproject it was in (though we
+" could probably figure it out).
+" Solution: Since we'll be processing the command line before executing the
+" command, go ahead and prepend something that indicates which subproject the
+" file was found in: e.g., php://some/file.php
 " --php:**/foo/file1.php
 " --js:./file2.js
 " --cpp:.//**/file3.cpp
-fu! s:complete_filenames2(arg_lead, cmd_line, cursor_pos)
-    " TODO: Relativize filenames in list.
-    let cwd = getcwd()
-    let files = s:get_files_for_spec(a:arg_lead, 1)
-    " TODO: Need a way to relativize... canonicalize_path won't work, as it
-    " won't add ../../...
+fu! s:complete_filenames(arg_lead, cmd_line, cursor_pos)
+    let files = s:get_files_for_spec(a:arg_lead, 1, 1, 1)
     return files
 endfu
 " <<<
@@ -1300,7 +1315,7 @@ com! -bang -nargs=* LGr  call <SID>ack(<q-bang>, 1, '', <q-args>)
 com! -bang -nargs=* LGrf call <SID>ack(<q-bang>, 1, 'file', <q-args>)
 com! -bang -nargs=* LGrd call <SID>ack(<q-bang>, 1, 'dir', <q-args>)
 
-com! -nargs=* -complete=customlist,<SID>complete_filenames2 Spf call s:parse_cmdline('Spf', 0, <f-args>)
+com! -nargs=* -complete=customlist,<SID>complete_filenames Sp call s:parse_cmdline('Sp', 0, <f-args>)
 com! -nargs=* -complete=customlist,<SID>complete_filenames Spq call FA(<q-args>)
 " Quoted args play...
 com! -nargs=* QA FA <q-args>
