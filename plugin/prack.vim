@@ -322,6 +322,8 @@ endfu
 " disqualify a candidate match target).
 " Note: 'partial' argument determines whether the generated pattern will be
 " anchored at end.
+" CAVEAT: partial and end_anchor are mutually exclusive (since we don't know
+" where to apply end anchor if we're not anchoring at end).
 " Note: The * and ** constructs are treated in a manner nearly identical to
 " what is described in Vim help on 'file-searching': in a nutshell...
 " * matches any number of non-slash characters.
@@ -382,10 +384,16 @@ fu! s:glob_to_patt(glob, partial)
     let fixeds = split(a:glob, re_star . '\|' . re_starstar, 1)
     let constraints = []
     " Assumption: Because keepempty was set in call to split, non-empty
-    " leading/trailing strings imply start/end anchoring.
-    let [start_anchor, end_anchor] = [fixeds[0], fixeds[-1]]
-    " Loop over interior (non-leading/trailing) fixeds.
-    let [i, ln] = [1, len(fixeds) - 1]
+    " leading/trailing strings imply start/end anchors (subject to caveat
+    " below).
+    " Caveat: If partial matching, end_anchor will be treated as normal fixed
+    " constraint.
+    let nf = len(fixeds)
+    let start_anchor = nf > 0 ? fixeds[0] : ''
+    let end_anchor = !a:partial && nf > 1 ? fixeds[-1] : ''
+    " Loop over interior fixeds: skip leading (and trailing if not partial).
+    " Note: Loop won't be entered if there are 0 or 1 fixeds.
+    let [i, ln] = [1, nf - (empty(end_anchor) ? 0 : 1)]
     while i < ln
         if fixeds[i] != ''
             call add(constraints, fixeds[i])
@@ -394,6 +402,7 @@ fu! s:glob_to_patt(glob, partial)
     endwhile
     " Design Decision: Returned pattern excludes any fixed strings at
     " start/end, which are represented by start_anchor/end_anchor.
+    " Note: end_anchor will be empty string here if unused.
     let glob = a:glob[len(start_anchor) : -len(end_anchor) - 1]
     " Process *
     let glob = substitute(glob, re_star, star, 'g')
@@ -437,6 +446,7 @@ fu! s:glob_to_patt(glob, partial)
                 " Number between 1 and 100 inclusive
                 " Note: In the number==1 case, brace quantifier will be {,0}:
                 " pointless, but valid.
+                " Note: ** syntax never requires match of any directories.
                 let patt .= '\%(' . dir_seg . '\%(/' . dir_seg . '\)\{,' . (number - 1) . '}' . slash . '\)\?'
             endif
             " Advance past match
@@ -548,20 +558,31 @@ fu! s:get_matching_files_match(patt_info, files)
     let f_i = f_s_i
     while f_i <= f_e_i
         let f_raw = f_lst[f_i]
-        " Set skip flag if a single constraint fails.
-        let skip_file = 0
+        let f_raw_len = len(f_raw)
         " Start/end anchor checks are quickest to check, and may permit
         " short-circuiting.
+        if c_sanch_len + c_eanch_len > f_raw_len
+            " Filename too short.
+            let f_i += 1 | continue
+        endif
         if sanch != '' && f_raw[0 : c_sanch_len - 1] != sanch ||
             \eanch != '' && f_raw[-c_eanch_len : ] != eanch
             " Skip to next file.
             "echo "Skipping due to start/end anchor fail"
-            let skip_file = 1
+            let f_i += 1 | continue
         endif
-        if !skip_file && c_len > 0
-            " Need to check unanchored constraints.
-            let f = f_raw[c_sanch_len : -1 - (c_eanch_len ? c_eanch_len : 0)]
-            let f_slen = len(f)
+        if f_raw_len == c_sanch_len + c_eanch_len
+            " Anchored constraints were sufficient to determine match.
+            " Note: Couldn't be any floating constraints or glob.
+            " Note: In theory, we could get here because of empty pattern, but
+            " we should probably check that before calling this method.
+            call add(matches, f_raw)
+            let f_i += 1 | continue
+        endif
+        " Couldn't confirm or deny match using only anchored constraints.
+        " Discard any anchored portions before subsequent processing.
+        let f = f_raw[c_sanch_len : -1 - c_eanch_len]
+        if c_len > 0
             " Loop through the unanchored constraints, short-circuiting on
             " disqualification.
             " Keep up with earliest point at which constraint could match.
@@ -574,28 +595,28 @@ fu! s:get_matching_files_match(patt_info, files)
                 if i == -1
                     "echo "Skipping due to floating anchor "
                     "echo "f: " . f . "  c: " . c . "  ms_ci: " . ms_ci
-                    let skip_file = 1
                     break
                 else
                     " Don't search the matched portion (or anything prior) again.
                     let ms_ci = i + c_slen
                 endif
             endfor
-        else
-            let f = f_raw
-        endif
-        if !skip_file
-            " If here, match can't be precluded; time to try regex pattern match.
-            " Note: Match target is the portion of file excluding any
-            " start/end anchor. The patt must match at start of this portion;
-            " whether it must match at end is determined by patt itself.
-            " TODO: Should let user's fileignorecase or wildignorecase setting
-            " determine =~ or =~?.
-            "echo "Matching " . f . " against " . patt
-            if f =~ patt
-                "echo "Success!"
-                call add(matches, f_raw)
+            " Since VimL has no labeled continues...
+            if i < 0
+                " At least one floating constraint failed.
+                let f_i += 1 | continue
             endif
+        endif
+        " If here, match can't be precluded; time to try regex pattern match.
+        " Note: Match target is the portion of file excluding any
+        " start/end anchor. The patt must match at start of this portion;
+        " whether it must match at end is determined by patt itself.
+        " TODO: Should let user's fileignorecase or wildignorecase setting
+        " determine =~ or =~?.
+        "echo "Matching " . f . " against " . patt
+        if f =~ patt
+            "echo "Success!"
+            call add(matches, f_raw)
         endif
         let f_i += 1 " Advance to next file.
     endwhile
@@ -632,6 +653,8 @@ fu! s:get_matching_files(cfg, glob, partial)
         " cannot exist. Limiting search to this region can speed things up
         " considerably.
         let patt_info = s:glob_to_patt(glob, a:partial)
+        echo "patt_info: "
+        echo patt_info
         let matches = s:get_matching_files_match(patt_info, a:cfg.files)
     catch
         " TODO: What error?
@@ -852,7 +875,7 @@ endfu
 "     represented as 'l:loptname', and short options as 's:soptname'.
 "   rem
 "     command line remaining after prack option removal
-fu! s:parse_cmdline(cmdline)
+fu! s:parse_cmdline_old(cmdline)
     " Example valid forms: (Note that Cmd will already have been stripped.)
     "   Cmd --
     "   Cmd --abcd -efg
@@ -872,29 +895,116 @@ fu! s:parse_cmdline(cmdline)
     let [optstr, remstr] = m[1:2]
     return {'opts': s:extract_opts(optstr), 'rem': remstr}
 endfu
+
+" [-<sopts>][--<lopt>[,<lopt>]...]:<glob>
+fu! s:parse_opt(opt, throw)
+    let oc = '[a-zA-Z0-9_]' " chars that can appear in option
+    "                  <sopts>              <lopts>                         <glob>
+    let re_opt = '^\%(-\('.oc.'\+\)\)\?\%(--\('.oc.'\+\%(,'.oc.'\+\)*\)\)\?:\(.*\)'
+    let ms = matchlist(a:opt, re_opt)
+    if empty(ms)
+        if a:throw
+            throw "parse_opt: Bad option: " . a:opt
+        else
+            return -1
+        endif
+    endif
+    let g:dbgms = ms
+    " We have a valid spec.
+    let [all, soptstr, loptstr, glob; rest] = ms
+    " Extract the various short and long options.
+    if empty(soptstr) && empty(loptstr)
+        " Special case: Nothing before the `:' means no subproject
+        " constraints.
+        let sels = -1
+    else
+        let sels = []
+        let sopts = split(soptstr, '\zs') "split chars
+        let lopts = split(loptstr, ',')
+        " Create a single array for looping, but remember dividing point.
+        let num_short_opts = len(sopts)
+        let opts = sopts + lopts
+        let i = 0
+        " Get list of config indices.
+        " Design Decision: Abort on bad option, even if multiple specified.
+        " TODO: Refactor to make this part of command line parsing, since it's used in several places.
+        for opt in opts
+            let is_short = i < num_short_opts
+            let cfg_idx = s:get_cfg_idx((is_short ? 's:' : 'l:') . opt)
+            " TODO: How to handle invalid specs? For now, just skipping, but
+            " perhaps, in accordance with Design Decision above, we should
+            " abort...
+            if cfg_idx < 0
+                call s:warn("Invalid subproject spec: " . (is_short ? '-' : '--') . opt)
+                continue
+            endif
+            " Add index to list if not already added.
+            if (-1 == index(sels, cfg_idx))
+                call add(sels, cfg_idx)
+            endif
+            let i += 1
+        endfor
+    endif
+    " Note: sels will be either a list of cfg_idx's or -1 for unconstrained.
+    return {'idxs': sels, 'glob': glob}
+endfu
+" Convert input spec to corresponding list of files.
+" TODO: More complete docs... E.g., document format somewhere.
+fu! s:get_files_for_spec(spec, throw)
+    let opt = s:parse_opt(a:spec, a:throw)
+    if type(opt) != 4 " Dict
+        echoerr "Bad spec: " . a:spec
+        return []
+    endif
+    if type(opt.idxs) == 3 " List
+        let sp_idxs = opt.idxs
+    else
+        " No subproject constraints
+        let sp_idxs = range(len(s:cache_cfg))
+    endif
+    let files = []
+    for sp_idx in sp_idxs
+        " TODO: Think about partial arg here...
+        call extend(files, s:get_matching_files(s:cache_cfg[sp_idx], opt.glob, 1))
+    endfor
+    return files
+endfu
+fu! s:parse_cmdline(cmd, partial, ...)
+    echo "cmd: " . a:cmd
+    let argidx = 0 " Points to first non-plugin arg at loop termination
+    let files = [] " Accumulates selected files
+    for arg in a:000
+        if arg == '--'
+            let argidx += 1
+            break
+        elseif arg[0] != '-' && arg[0] != ':'
+            break
+        else
+            call extend(files, s:get_files_for_spec(arg, partial))
+        endif
+        let argidx += 1
+    endfor
+    echo "Files:"
+    echo files
+
+endfu
 " <<<
 " >>> Functions used for completion
 " Return list of filenames, filtered by the glob before the cursor, whose
-" format is identical to the one accepted by s:get_matching_files.
+" format is described by... TODO
 " Important Note: Because the completion is used for commands that open files,
 " the filenames we return must be relative to the current directory; however,
 " the globs are relative to a subproject: e.g.,
 " --php:**/foo/file1.php
 " --js:./file2.js
 " --cpp:.//**/file3.cpp
-fu! s:complete_filenames(arg_lead, cmd_line, cursor_pos)
-    let ms = matchlist(a:arg_lead, '\([^:]*\):\(.*\)')
-    if empty(ms)
-        return []
-    endif
-    let [_, opt, glob] = ms
-    let opts = s:extract_opts(opt)
-    let cfg_idx = s:get_cfg_idx(opts[0])
-    let files = s:get_matching_files(s:cache_cfg[cfg_idx], glob, 1)
-    " TODO: UNDER CONSTRUCTION!!!!!!!
+fu! s:complete_filenames2(arg_lead, cmd_line, cursor_pos)
+    " TODO: Relativize filenames in list.
+    let cwd = getcwd()
+    let files = s:get_files_for_spec(a:arg_lead, 1)
+    " TODO: Need a way to relativize... canonicalize_path won't work, as it
+    " won't add ../../...
     return files
-    "return ["one", "two", "three"]
-
 endfu
 " <<<
 " >>> Functions invoked by commands
@@ -1190,7 +1300,8 @@ com! -bang -nargs=* LGr  call <SID>ack(<q-bang>, 1, '', <q-args>)
 com! -bang -nargs=* LGrf call <SID>ack(<q-bang>, 1, 'file', <q-args>)
 com! -bang -nargs=* LGrd call <SID>ack(<q-bang>, 1, 'dir', <q-args>)
 
-com! -nargs=1 -complete=customlist,<SID>complete_filenames Sp echo "foo"
+com! -nargs=* -complete=customlist,<SID>complete_filenames2 Spf call s:parse_cmdline('Spf', 0, <f-args>)
+com! -nargs=* -complete=customlist,<SID>complete_filenames Spq call FA(<q-args>)
 " Quoted args play...
 com! -nargs=* QA FA <q-args>
 com! -nargs=* FA call FA(<f-args>)

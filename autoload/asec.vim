@@ -101,6 +101,9 @@ fu! asec#ack(bang, use_ll, mode, ...)
             let files_from = ' --files-from=' . s:listfile . ' '
         endif
         " TODO: Check for list file existence.
+        echo (a:use_ll ? 'l' : '') . 'grep' . (a:bang == '!' ? 'add' : '')
+                    \. files_from
+                    \. join(args, ' ')
         exe (a:use_ll ? 'l' : '') . 'grep' . (a:bang == '!' ? 'add' : '')
                     \. files_from
                     \. join(args, ' ')
