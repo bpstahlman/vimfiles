@@ -970,7 +970,7 @@ fu! s:get_files_for_spec(spec, partial, prepend_sp_name, throw)
             let sp_name = s:cache_cfg[sp_idx].name
             " Prepend something that will indicate the subproject when it's
             " time to open the file.
-            call map(fs, 'l:sp_name . "://" . v:val')
+            call map(fs, '"--" . l:sp_name . ":" . v:val')
         endif
 
         " TODO: Think about partial arg here...
@@ -993,13 +993,28 @@ fu! s:parse_cmdline(cmd, partial, ...)
             " suproject indicator (as we do for completion); instead, we can
             " simply send multiple lists for subsequent parsing (1 per
             " subproject).
-            call extend(files, s:get_files_for_spec(arg, partial, 1, 1))
+            " TODO: Actually, I'm thinking it may no longer make sense to use
+            " the same top-level routine for the Grep commands and the Edit
+            " commands.
+            " Note: Because of nargs constraints, we don't need to worry about
+            " the -- having been used for Split, Edit et al., so perhaps it's
+            " ok.
+            call extend(files, s:get_files_for_spec(arg, partial, 0, 1))
         endif
         let argidx += 1
     endfor
+    " TODO: Need to pass filenames on to command-specific function: e.g.,
+    " s:refresh()
     echo "Files:"
     echo files
 
+endfu
+" This one is only for :Edit, :Split, et al.
+fu! s:parse_edit_cmdline(cmd, filespec)
+    " UNDER CONSTRUCTION!!!!!
+    " TODO: I'm thinking we need to have get_files_for_spec return a more
+    " complex structure, which has subproject index broken out...
+    let files = s:get_files_for_spec(arg, partial, 0, 1)
 endfu
 " <<<
 " >>> Functions used for completion
@@ -1315,7 +1330,7 @@ com! -bang -nargs=* LGr  call <SID>ack(<q-bang>, 1, '', <q-args>)
 com! -bang -nargs=* LGrf call <SID>ack(<q-bang>, 1, 'file', <q-args>)
 com! -bang -nargs=* LGrd call <SID>ack(<q-bang>, 1, 'dir', <q-args>)
 
-com! -nargs=* -complete=customlist,<SID>complete_filenames Sp call s:parse_cmdline('Sp', 0, <f-args>)
+com! -nargs=1 -complete=customlist,<SID>complete_filenames Sp call s:parse_cmdline('Sp', 0, <f-args>)
 com! -nargs=* -complete=customlist,<SID>complete_filenames Spq call FA(<q-args>)
 " Quoted args play...
 com! -nargs=* QA FA <q-args>
