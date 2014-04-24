@@ -654,8 +654,8 @@ fu! s:get_matching_files(cfg, glob, partial)
         " cannot exist. Limiting search to this region can speed things up
         " considerably.
         let patt_info = s:glob_to_patt(glob, a:partial)
-        echo "patt_info: "
-        echo patt_info
+        "echo "patt_info: "
+        "echo patt_info
         let matches = s:get_matching_files_match(patt_info, a:cfg.files)
     catch
         " TODO: What error?
@@ -974,7 +974,7 @@ fu! s:get_files_for_spec(spec, partial, prepend_sp_name, throw)
     return ret
 endfu
 fu! s:parse_cmdline(cmd, partial, ...)
-    echo "cmd: " . a:cmd
+    "echo "cmd: " . a:cmd
     let argidx = 0 " Points to first non-plugin arg at loop termination
     let files = [] " Accumulates selected files
     for arg in a:000
@@ -1000,16 +1000,49 @@ fu! s:parse_cmdline(cmd, partial, ...)
     endfor
     " TODO: Need to pass filenames on to command-specific function: e.g.,
     " s:refresh()
-    echo "Files:"
-    echo files
+    "echo "Files:"
+    "echo files
 
 endfu
 " This one is only for :Edit, :Split, et al.
 fu! s:parse_edit_cmdline(cmd, filespec)
-    " UNDER CONSTRUCTION!!!!!
-    " TODO: I'm thinking we need to have get_files_for_spec return a more
-    " complex structure, which has subproject index broken out...
-    let files = s:get_files_for_spec(arg, partial, 0, 1)
+    let sf = s:sf_create()
+    try
+        " UNDER CONSTRUCTION!!!!!
+        " TODO: I'm thinking we need to have get_files_for_spec return a more
+        " complex structure, which has subproject index broken out...
+        let sps = s:get_files_for_spec(a:filespec, 1, 1, 1)
+        " 3 cases: 0 files, 1 file, multiple files
+        let num_sps = len(sps)
+        if num_sps > 1
+            " Note: Don't bother looping over sps to determine exact number; all
+            " that matters is it's more than 1.
+            let cnt = 2
+        elseif num_sps == 1
+            " How many files in one and only matching sp?
+            let cnt = len(sps[0].files)
+        else
+            let cnt = 0
+        endif
+        if cnt == 0
+            echoerr "Can't find file matching " . a:filespec
+        elseif cnt > 1
+            echoerr "Too many files matching " . a:filespec
+        endif
+        " If error not raised by now, we have a single file to open; move to
+        " its subproject to execute the applicable open command, then restore
+        " cwd.
+        let sp_cfg = s:cache_cfg[sps[0].idx]
+        call sf.pushd(sp_cfg.rootdir)
+        " Note: For each of the plugin editing commands, there's a Vim
+        " equivalent whose name is identical except for capitalization.
+        exe tolower(a:cmd) . ' ' . fnameescape(sp_cfg.files[0])
+
+    catch /Vim(echoerr)/
+        echohl ErrorMsg|echomsg v:exception|echohl None
+    finally
+        call sf.destroy()
+    endtry
 endfu
 " <<<
 " >>> Functions used for completion
@@ -1333,7 +1366,10 @@ com! -bang -nargs=* LGr  call <SID>ack(<q-bang>, 1, '', <q-args>)
 com! -bang -nargs=* LGrf call <SID>ack(<q-bang>, 1, 'file', <q-args>)
 com! -bang -nargs=* LGrd call <SID>ack(<q-bang>, 1, 'dir', <q-args>)
 
-com! -nargs=1 -complete=customlist,<SID>complete_filenames Sp call s:parse_cmdline('Sp', 0, <f-args>)
+" TODO: Add support for bang and such...
+com! -nargs=1 -complete=customlist,<SID>complete_filenames Split call s:parse_edit_cmdline('Split', <f-args>)
+com! -nargs=1 -complete=customlist,<SID>complete_filenames Edit call s:parse_edit_cmdline('Edit', <f-args>)
+
 com! -nargs=* -complete=customlist,<SID>complete_filenames Spq call FA(<q-args>)
 " Quoted args play...
 com! -nargs=* QA FA <q-args>
