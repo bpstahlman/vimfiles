@@ -214,6 +214,7 @@ fu! s:process_cfg()
     "echo s:longnames
     "echo "shortnames:"
     "echo s:shortnames
+    let g:shortnames = s:shortnames
 
 endfu
 
@@ -227,7 +228,7 @@ fu! s:get_cfg_idx(opt)
     let [is_short, name] = [a:opt[0] == 's', a:opt[2:]]
     if is_short
         if has_key(s:shortnames, name)
-            let idx = s:shortnames[name]
+            return s:shortnames[name]
         elseif
             return -1
         endif
@@ -950,7 +951,9 @@ fu! s:parse_opt(opt, throw)
 endfu
 " Convert input spec to corresponding list of files.
 " TODO: More complete docs... E.g., document format somewhere.
+" [{sp_idx: <idx>, files: [<path>, ...]}, ...]
 fu! s:get_files_for_spec(spec, partial, prepend_sp_name, throw)
+    let ret = []
     let opt = s:parse_opt(a:spec, a:throw)
     if type(opt) != 4 " Dict
         echoerr "Bad spec: " . a:spec
@@ -965,18 +968,10 @@ fu! s:get_files_for_spec(spec, partial, prepend_sp_name, throw)
     let files = []
     for sp_idx in sp_idxs
         let fs = s:get_matching_files(s:cache_cfg[sp_idx], opt.glob, a:partial)
-        if a:prepend_sp_name
-            " TODO: Is 'name' mandatory? I think I've assumed it will be...
-            let sp_name = s:cache_cfg[sp_idx].name
-            " Prepend something that will indicate the subproject when it's
-            " time to open the file.
-            call map(fs, '"--" . l:sp_name . ":" . v:val')
-        endif
-
-        " TODO: Think about partial arg here...
-        call extend(files, fs)
+        " Accumulate subproject-specific object.
+        call add(ret, {'idx': sp_idx, 'files': fs})
     endfor
-    return files
+    return ret
 endfu
 fu! s:parse_cmdline(cmd, partial, ...)
     echo "cmd: " . a:cmd
@@ -1033,7 +1028,15 @@ endfu
 " --js:./file2.js
 " --cpp:.//**/file3.cpp
 fu! s:complete_filenames(arg_lead, cmd_line, cursor_pos)
-    let files = s:get_files_for_spec(a:arg_lead, 1, 1, 1)
+    let sps = s:get_files_for_spec(a:arg_lead, 1, 1, 1)
+    let files = []
+    for sp in sps
+        let sp_idx = sp.idx
+        let sp_name = s:cache_cfg[sp_idx].name
+        let sp_files = sp.files
+        call map(sp_files, '"--" . l:sp_name . ":" . v:val')
+        call extend(files, sp_files)
+    endfor
     return files
 endfu
 " <<<
