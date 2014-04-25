@@ -1005,7 +1005,7 @@ fu! s:parse_cmdline(cmd, partial, ...)
 
 endfu
 " This one is only for :Edit, :Split, et al.
-fu! s:parse_edit_cmdline(cmd, filespec)
+fu! s:parse_edit_cmdline(cmd, bang, filespec)
     let sf = s:sf_create()
     try
         " UNDER CONSTRUCTION!!!!!
@@ -1031,12 +1031,12 @@ fu! s:parse_edit_cmdline(cmd, filespec)
         endif
         " If error not raised by now, we have a single file to open; move to
         " its subproject to execute the applicable open command, then restore
-        " cwd.
+        " cwd (by destroying stack frame).
         let sp_cfg = s:cache_cfg[sps[0].idx]
         call sf.pushd(sp_cfg.rootdir)
         " Note: For each of the plugin editing commands, there's a Vim
         " equivalent whose name is identical except for capitalization.
-        exe tolower(a:cmd) . ' ' . fnameescape(sp_cfg.files[0])
+        exe tolower(a:cmd) . a:bang . ' ' . fnameescape(sp_cfg.files[0])
 
     catch /Vim(echoerr)/
         echohl ErrorMsg|echomsg v:exception|echohl None
@@ -1367,8 +1367,8 @@ com! -bang -nargs=* LGrf call <SID>ack(<q-bang>, 1, 'file', <q-args>)
 com! -bang -nargs=* LGrd call <SID>ack(<q-bang>, 1, 'dir', <q-args>)
 
 " TODO: Add support for bang and such...
-com! -nargs=1 -complete=customlist,<SID>complete_filenames Split call s:parse_edit_cmdline('Split', <f-args>)
-com! -nargs=1 -complete=customlist,<SID>complete_filenames Edit call s:parse_edit_cmdline('Edit', <f-args>)
+com! -bang -nargs=1 -complete=customlist,<SID>complete_filenames Split call s:parse_edit_cmdline('Split', "<bang>", <f-args>)
+com! -bang -nargs=1 -complete=customlist,<SID>complete_filenames Edit call s:parse_edit_cmdline('Edit', "<bang>", <f-args>)
 
 com! -nargs=* -complete=customlist,<SID>complete_filenames Spq call FA(<q-args>)
 " Quoted args play...
