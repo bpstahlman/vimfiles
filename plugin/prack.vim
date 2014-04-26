@@ -876,7 +876,7 @@ endfu
 "     represented as 'l:loptname', and short options as 's:soptname'.
 "   rem
 "     command line remaining after prack option removal
-fu! s:parse_cmdline_old(cmdline)
+fu! s:parse_refresh_cmdline(cmdline)
     " Example valid forms: (Note that Cmd will already have been stripped.)
     "   Cmd --
     "   Cmd --abcd -efg
@@ -898,14 +898,14 @@ fu! s:parse_cmdline_old(cmdline)
 endfu
 
 " [-<sopts>][--<lopt>[,<lopt>]...]:<glob>
-fu! s:parse_opt(opt, throw)
+fu! s:parse_spec(opt, throw)
     let oc = '[a-zA-Z0-9_]' " chars that can appear in option
     "                  <sopts>              <lopts>                         <glob>
     let re_opt = '^\%(-\('.oc.'\+\)\)\?\%(--\('.oc.'\+\%(,'.oc.'\+\)*\)\)\?:\(.*\)'
     let ms = matchlist(a:opt, re_opt)
     if empty(ms)
         if a:throw
-            throw "parse_opt: Bad option: " . a:opt
+            throw "parse_spec: Bad option: " . a:opt
         else
             return -1
         endif
@@ -952,9 +952,9 @@ endfu
 " Convert input spec to corresponding list of files.
 " TODO: More complete docs... E.g., document format somewhere.
 " [{sp_idx: <idx>, files: [<path>, ...]}, ...]
-fu! s:get_files_for_spec(spec, partial, prepend_sp_name, throw)
+fu! s:get_files_for_spec(spec, partial, throw)
     let ret = []
-    let opt = s:parse_opt(a:spec, a:throw)
+    let opt = s:parse_spec(a:spec, a:throw)
     if type(opt) != 4 " Dict
         echoerr "Bad spec: " . a:spec
         return []
@@ -973,10 +973,14 @@ fu! s:get_files_for_spec(spec, partial, prepend_sp_name, throw)
     endfor
     return ret
 endfu
-fu! s:parse_cmdline(cmd, partial, ...)
-    "echo "cmd: " . a:cmd
+" TODO: Could probably combine with parse_refresh_cmdline with a bit of
+" refactoring.
+fu! s:parse_grep_cmdline(cmd, bang, ...)
     let argidx = 0 " Points to first non-plugin arg at loop termination
-    let files = [] " Accumulates selected files
+    " Command line can contain multiple specs; simply concatenate the arrays
+    " returned by each call to get_files_for_spec, each of which corresponds
+    " to a different spec, each of which could involve multiple subprojects.
+    let sps = []
     for arg in a:000
         if arg == '--'
             let argidx += 1
@@ -984,34 +988,25 @@ fu! s:parse_cmdline(cmd, partial, ...)
         elseif arg[0] != '-' && arg[0] != ':'
             break
         else
-            " TODO: I'm thinking that for this, we don't want to prepend
-            " suproject indicator (as we do for completion); instead, we can
-            " simply send multiple lists for subsequent parsing (1 per
-            " subproject).
-            " TODO: Actually, I'm thinking it may no longer make sense to use
-            " the same top-level routine for the Grep commands and the Edit
-            " commands.
-            " Note: Because of nargs constraints, we don't need to worry about
-            " the -- having been used for Split, Edit et al., so perhaps it's
-            " ok.
-            call extend(files, s:get_files_for_spec(arg, partial, 0, 1))
+            call extend(sps, s:get_files_for_spec(a:filespec, a:partial, 1))
         endif
         let argidx += 1
     endfor
-    " TODO: Need to pass filenames on to command-specific function: e.g.,
-    " s:refresh()
-    "echo "Files:"
-    "echo files
-
+    " Return a dict containing array of parsed specs and array of non-plugin
+    " args.
+    "return {'pspecs' => sps, 'args' => a:000[argidx:]}
+    return [sps, a:000[argidx:]]
 endfu
 " This one is only for :Edit, :Split, et al.
+" It's fundamentally different from parse_grep_cmdline and
+" parse_refresh_cmdline in that the option format is more rigid.
 fu! s:parse_edit_cmdline(cmd, bang, filespec)
     let sf = s:sf_create()
     try
         " UNDER CONSTRUCTION!!!!!
         " TODO: I'm thinking we need to have get_files_for_spec return a more
         " complex structure, which has subproject index broken out...
-        let sps = s:get_files_for_spec(a:filespec, 1, 1, 1)
+        let sps = s:get_files_for_spec(a:filespec, 1, 1)
         " 3 cases: 0 files, 1 file, multiple files
         let num_sps = len(sps)
         if num_sps > 1
@@ -1061,7 +1056,7 @@ endfu
 " --js:./file2.js
 " --cpp:.//**/file3.cpp
 fu! s:complete_filenames(arg_lead, cmd_line, cursor_pos)
-    let sps = s:get_files_for_spec(a:arg_lead, 1, 1, 1)
+    let sps = s:get_files_for_spec(a:arg_lead, 1, 1)
     let files = []
     for sp in sps
         let sp_idx = sp.idx
@@ -1077,7 +1072,7 @@ endfu
 fu! s:refresh(opts)
     let sf = s:sf_create()
     try
-        let pcl = s:parse_cmdline(a:opts)
+        let pcl = s:parse_refresh_cmdline(a:opts)
         if pcl.rem != ''
             echoerr "Invalid arguments specified in Refresh command: `" . pcl.rem . "'"
         endif
@@ -1110,12 +1105,16 @@ fu! s:refresh(opts)
         call sf.destroy()
     endtry
 endfu
-fu! s:ack(bang, use_ll, mode, args)
+fu! s:ack(cmd, bang, ...)
     let sf = s:sf_create()
     try
         " Break raw command line into parsed prack options, and string
         " containing everything else (essentially, the ack options).
-        let pcl = s:parse_cmdline(a:args)
+        " TODO: UNDER CONSTRUCTION!!!!!!!!!!!!!!!
+        let [pspecs, args] = s:parse_grep_cmdline(a:000)
+        echo pspecs
+        echo args
+        return
         " Get list of config indices.
         " Design Decision: Abort on bad option, even if multiple specified.
         " TODO: Refactor to make this part of command line parsing, since it's used in several places.
@@ -1358,17 +1357,13 @@ endfu
 com! PrackStart call <SID>start()
 com! PrackStop call <SID>stop()
 com! -nargs=? Refresh call <SID>refresh(<q-args>)
-com! -bang -nargs=* Gr  call <SID>ack(<q-bang>, 0, '', <q-args>)
-com! -bang -nargs=* Grf call <SID>ack(<q-bang>, 0, 'file', <q-args>)
-com! -bang -nargs=* Grd call <SID>ack(<q-bang>, 0, 'dir', <q-args>)
 
-com! -bang -nargs=* LGr  call <SID>ack(<q-bang>, 1, '', <q-args>)
-com! -bang -nargs=* LGrf call <SID>ack(<q-bang>, 1, 'file', <q-args>)
-com! -bang -nargs=* LGrd call <SID>ack(<q-bang>, 1, 'dir', <q-args>)
+com! -bang -nargs=* Grep  call s:parse_grep_cmdline('Grep', <q-bang>, <f-args>)
+com! -bang -nargs=* Gr  call <SID>ack('Gr', <q-bang>, <f-args>)
+com! -bang -nargs=* LGr  call <SID>ack('LGr', <q-bang>, <f-args>)
 
-" TODO: Add support for bang and such...
-com! -bang -nargs=1 -complete=customlist,<SID>complete_filenames Split call s:parse_edit_cmdline('Split', "<bang>", <f-args>)
-com! -bang -nargs=1 -complete=customlist,<SID>complete_filenames Edit call s:parse_edit_cmdline('Edit', "<bang>", <f-args>)
+com! -bang -nargs=1 -complete=customlist,<SID>complete_filenames Split call s:parse_edit_cmdline('Split', <q-bang>, <f-args>)
+com! -bang -nargs=1 -complete=customlist,<SID>complete_filenames Edit call s:parse_edit_cmdline('Edit', <q-bang>, <f-args>)
 
 com! -nargs=* -complete=customlist,<SID>complete_filenames Spq call FA(<q-args>)
 " Quoted args play...
