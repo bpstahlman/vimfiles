@@ -112,6 +112,7 @@ fu! s:process_cfg()
             let i = i + 1 | continue
         endif
         let selectable = 0
+        " TODO: Probably require valid name, since we sometimes expect one.
         if has_key(cfg, 'name')
             " TODO: Don't hardcode these patterns...
             if (cfg.name !~ '^[a-zA-Z0-9_]\+$')
@@ -243,6 +244,21 @@ fu! s:get_cfg_idx(opt)
         endfor
         " Not found!
         return -1
+    endif
+endfu
+
+" Try various ways to get a subproject-specific value for specified option.
+fu! s:get_opt(sp_idx, opt, default_to_vim)
+    if has_key(s:cache_cfg[a:sp_idx], a:opt)
+        return s:cache_cfg[a:sp_idx][a:opt]
+    elseif exists('g:prack_' . a:opt)
+        " TODO: Revisit this when plugin global options are reworked.
+        return g:prack_{a:opt}
+    elseif a:default_to_vim
+        " Default to the Vim option value in effect for current window.
+        return getwinvar(0, '&' . a:opt)
+    else
+        throw "Internal error: No value found for option " . a:opt
     endif
 endfu
 
@@ -1047,6 +1063,24 @@ fu! s:parse_edit_cmdline(cmd, bang, filespec)
         call sf.destroy()
     endtry
 endfu
+" Convert potentially abbreviated plugin command name to canonical version of
+" the Vim equivalent: e.g.,
+" Grepa => grepadd
+" Lg => lgrep
+" Lgrepa => lgrepadd
+fu! s:canonicalize_grep_cmd(cmd)
+    if a:cmd =~ '\<Gr\%[ep]\>'
+        return 'grep'
+    elseif a:cmd =~ '\<Grepa\%[dd]\>'
+        return 'grepadd'
+    elseif a:cmd =~ '\<Lgr\%[ep]\>'
+        return 'lgrep'
+    elseif a:cmd =~ '\<Lgrepa\%[dd]\>'
+        return 'lgrepadd'
+    endif
+    throw "Internal error: Unknown grep command: " . a:cmd
+endfu
+
 " <<<
 " >>> Functions used for completion
 " Return list of filenames, filtered by the glob before the cursor, whose
@@ -1233,9 +1267,8 @@ fu! s:grep(cmd, bang, ...)
     let sf = s:sf_create()
     try
         let [pspecs, args] = s:parse_grep_cmdline(a:000)
-        let grepcmd = tolower(a:cmd)
-        echo "extra args: "
-        echo args
+        let grepcmd = s:canonicalize_grep_cmd(a:cmd)
+        " TODO: Turn the array into escaped string.
         "let exargs = escape(a:000)
         if empty(pspecs)
             " No specs provided: search all...
@@ -1245,27 +1278,36 @@ fu! s:grep(cmd, bang, ...)
         endif
         " TODO: Where to configure max len? Also, calculate fixlen
         let pspecs = s:xargify_pspecs(pspecs, 100, 4096)
-        echo "pspecs: "
-        echo pspecs
         return
 
-        " TODO: Optimization: Sort pspecs so that all specs involving a single
-        " subproject are processed together.
-        " -----------------
+        " UNDER CONSTRUCTION - Pick up here... Note that we won't be going to
+        " file anymore...
+        " TODO: Consider creating an object used to access options as function
+        " of project and subproject, which performs caching: e.g.,
+        " opt.get(sp_idx, opt) Note: This would be cleaner than accessing
+        " s:cache_cfg everywhere.
+
         " Process each subproject in turn...
+        let sp_idx_prev = -1
         for pspec in pspecs
             let cfg = s:cache_cfg[pspec.idx]
-            call sf.pushd(cfg.rootdir)
-            if !filereadable(s:listfile)
-                " TODO: Decide whether to abort, or eventually, continue with next list file
-                echohl WarningMsg|echomsg "Warning: Skipping unreadable listfile `"
-                            \. getcwd() . "/" . s:listfile . "', selected by "
-                            \. sel.opt|echohl None
+            if pspec.idx != sp_idx_prev
+                " Move to root of subproject.
+                call sf.pushd(cfg.rootdir)
+                let grepprg = s:get_opt(pspec.idx, 'grepprg', 0)
+                if !empty(grepprg) | call sf.setopt('grepprg', grepprg) | endif
+                let grepformat = s:get_opt(pspec.idx, 'grepformat', 0)
+                if !empty(grepformat) | call sf.setopt('grepformat', grepformat) | endif
+            elseif sp_idx_prev != -1
+                " This grep is overflow due to xargification: thus, append
+                " 'add' to the grep command's fiducial form. 
             endif
+            
             " Run [l]grep[add] with appropriate args.
             exe (a:use_ll ? 'l' : '') . 'grep' . (a:bang == '!' ? 'add' : '')
                         \. ' --files-from=' . s:listfile
                         \. ' ' . pcl.rem
+            let sp_idx_prev = pspec.idx
         endfor
         " -----------------
     catch /Vim(echoerr)/
