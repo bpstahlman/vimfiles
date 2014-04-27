@@ -300,6 +300,8 @@ fu! s:cache_listfile(cache_cfg, force_refresh)
         endfor
         " TODO: Make this optional so we can skip if user's find or whatever
         " ensures sorted.
+        " TODO: Should we uniquify? Doing so could permit some optimizations
+        " (e.g., find_insert_idx).
         call sort(files)
         let a:cache_cfg.files = files
         "echo s:cache_cfg
@@ -1114,58 +1116,108 @@ endfu
 
 " Input: List in following form...
 " [{idx: <sp_idx>, files: <files>}, ...]
-" ...in which the sp_idx's are unordered and non-unique.
+" ...in which the sp_idx's are unordered and non-unique, with the same files
+" potentially appearing under multiple subprojects.
+" Output: Equivalent list, but with each subproject represented only once (and
+" only if it contains files), in fiducial order, with files sorted and unique
+" within subproject
 fu! s:sort_and_combine_pspecs(pspecs)
-    let _pspecs = []
-    let _pspec_map = {}
+    let pspec_map = {}
     for pspec in a:pspecs
-        if !has_key(_pspec_map, pspec.idx)
-            _pspec_map[pspec.idx] = 
-        let _idx = index(_pspecs, 
+        if !has_key(pspec_map, pspec.idx)
+            let pspec_map[pspec.idx] = []
+        endif
+        let files = pspec_map[pspec.idx]
+        " Interleave current pspec.files with all previously-encountered files
+        " for same subproject.
+        let ins_idx = 0 " position in tgt list
+        let idx = 0     " position in src list
+        " Keep up with # of files in tgt list so we'll know when returned
+        " ins_idx indicates position past end.
+        let num_files = len(files)
+        for f in pspec.files
+            let [ins_idx, dup] = s:find_insert_idx(files, ins_idx, f)
+            if ins_idx >= num_files
+                " This and all subsequent files should be appended.
+                " TODO: Is this faster than continuing with insert?
+                call extend(files, pspec.files[idx : ])
+                break
+            elseif !dup
+                " Non-duplicate, non-final
+                call insert(files, f, ins_idx)
+                let num_files += 1
+            endif
+            let idx += 1
+        endfor
     endfor
+    " Iterate the arrays stored in pspec_map in sp_idx order to build return
+    " array.
+    let _pspecs = []
+    for sp_idx in sort(keys(pspec_map))
+        " Discard empty subprojects.
+        if !empty(pspec_map[sp_idx])
+            call add(_pspecs, {'idx': sp_idx, 'files': pspec_map[sp_idx]})
+        endif
+    endfor
+    return _pspecs
+endfu
+" TODO: Test only
+fu! Test_sort_and_combine_pspecs()
+    let pspecs = [
+        \{'idx': 0, 'files': ["abc", "def", "ghi", "jkl", "wx"]},
+        \{'idx': 2, 'files': ["abc", "def", "ghi", "jkl"]},
+        \{'idx': 0, 'files': ["abc", "jkl"]},
+        \{'idx': 0, 'files': ["a", "defg", "gh", "ghi", "uv", "wx", "yz"]}]
+    let pspecs = s:sort_and_combine_pspecs(pspecs)
+    echo pspecs
 endfu
 " Return an array of the following form:
 " [{idx: <sp_idx>, files: escaped_file_list}]
-" Note: Form is same as that returned by get_files_for_spec, but file lists
-" may be combined/broken at different locations (with idx potentially
-" appearing more than once) as a result of maxlen constraints.
+" Form is similar to that returned by get_files_for_spec, except that files is
+" a single command line escaped string, rather than a list of files. Also note
+" that the pspecs in the input list will be transformed to ensure that the
+" following constraints are met:
+" -Each subproject represented only once unless maxlen constraint forces
+"  processing single subproject with multiple greps.
+" -Files are sorted within subproject
+" -Files are unique within subproject
+" -Subprojects are in fiducial order
 fu! s:xargify_pspecs(pspecs, fixlen, maxlen)
+    let pspecs = s:sort_and_combine_pspecs(a:pspecs)
+    if empty(pspecs)
+        return []
+    endif
     let _pspecs = [] " transformed pspec list
-    let cumlen = fixlen
-    " TODO: Probably sort here...
-    let pspecs = s:sort_and_uniquify_pspecs(a:pspecs)
-    " UNDER CONSTRUCTION!!!!!!
     for pspec in pspecs
         if !exists('l:_pspec') || _pspec.idx != pspec.idx
             if exists('l:_pspec')
                 " Accumulate
                 call add(_pspecs, _pspec)
             endif
-            let _pspec = {idx: pspec.idx, files: ''}
+            let _pspec = {'idx': pspec.idx, 'files': ''}
+            let cumlen = a:fixlen
         endif
         " Accumulate as many files as possible without exceeding maxlen
         for f in pspec.files
-            " Escape and add prepend space before length test.
+            " Escape and prepend space before length test.
             let f = ' ' . fnameescape(f)
+            let len_f = strlen(f)
             " Decision: Always accumulate at least one file regardless of
             " maxlen constraint.
-            if len(_pspec.files) && len(f) + cumlen > maxlen
+            if len(_pspec.files) && len_f + cumlen > a:maxlen
                 " Accumulate early.
                 call add(_pspecs, _pspec)
-                let _pspec = {idx: pspec.idx, files: ''}
+                let _pspec = {'idx': pspec.idx, 'files': ''}
+                let cumlen = a:fixlen
             endif
             let _pspec.files .= f
+            let cumlen += len_f
         endfor
     endfor
     if exists('l:_pspec')
         " Accumulate final.
         call add(_pspecs, _pspec)
     endif
-    if empty(_pspecs)
-        return []
-    endif
-    " Filter non-empty list, removing any elements with no files.
-    call filter(_pspecs, 'len(v:val.files)')
     return _pspecs
 endfu
 fu! s:get_unconstrained_pspecs()
@@ -1182,15 +1234,20 @@ fu! s:grep(cmd, bang, ...)
     try
         let [pspecs, args] = s:parse_grep_cmdline(a:000)
         let grepcmd = tolower(a:cmd)
-        let exargs = escape(a:000)
+        echo "extra args: "
+        echo args
+        "let exargs = escape(a:000)
         if empty(pspecs)
             " No specs provided: search all...
             " Note: This is different from non-empty pspecs, which simply
             " contains no files...
             let pspecs = s:get_unconstrained_pspecs()
         endif
-        " TODO: Where to configure max len?
-        let pspecs = s:xargify_pspecs(pspecs, 4096)
+        " TODO: Where to configure max len? Also, calculate fixlen
+        let pspecs = s:xargify_pspecs(pspecs, 100, 4096)
+        echo "pspecs: "
+        echo pspecs
+        return
 
         " TODO: Optimization: Sort pspecs so that all specs involving a single
         " subproject are processed together.
@@ -1276,8 +1333,8 @@ endfu
 " >>> Functions for general utility
 " Calculate and return the bracket (defined as [start_index, end_index]) of
 " the region containing only those values in the input list, which are within
-" the region delineated by the input constraint. The input comparison may be
-" used to test a value like so:
+" the region delineated by the input constraint. The input comparison function
+" may be used to test a value like so:
 "   fn(value, fixed) =>
 "       -1  value before region 
 "       0   value in region
@@ -1449,14 +1506,47 @@ endfu
 fu! s:compare_file(file, fixed)
     " Does the constraint match at start?
     let filepart = strpart(a:file, 0, strlen(a:fixed))
+    " TODO: Consider case-sensitivity...
     return s:strcmp(filepart, a:fixed)
 endfu
 let s:compare_file_fn = function('s:compare_file')
+" Compares input str with input strs, starting at start_idx, and returns an
+" array of the following form: [idx, dup]
+" ...where dup is a flag that is set iff the input str is already in strs
+" ...and idx is one of the following:
+" insert-location
+"     Index of element before which input element should be inserted
+"     OR index of element with which it is duplicate (when dup == 1)
+" len(strs)
+"     Indicates input element (and all subsequent elements) can be appended.
+" Note: matchcase operators used for comparison.
+" Assumptions: Caller ensures that both input strs and list containing input
+" str are sorted. 
+fu! s:find_insert_idx(strs, start_idx, str)
+    let idx = a:start_idx
+    let len = len(a:strs)
+    while idx < len
+        if a:str <=# a:strs[idx]
+            " Either input str goes before current, or it's a duplicate.
+            " TODO: If individual subproject lists guaranteed uniqueness of
+            " their elements, we could advance idx in case of duplicate;
+            " currently, however, uniqueness is not explicitly enforced
+            " (though find commands will naturally tend to produce unique
+            " lists). Thus, safest course is to return idx without advancing,
+            " thereby ensuring existing duplicate will be re-checked (probably
+            " unnecessarily) on subsequent call.
+            return [idx, a:str ==# a:strs[idx]]
+        endif
+        let idx += 1
+    endwhile
+    " Append.
+    return [idx, 0]
+endfu
 
 fu! Test_bracket()
-    let fixed = 'd'
+    let fixed = 'ad'
     let files = ['a', 'aa', 'abc', 'accd', 'bb', 'bda', 'ca', 'cb', 'cc', 'ccc', 'dab', 'dbbb', 'dcs', 'dcsa', 'dcsab/foo', 'efg', 'fad', 'foo', 'goob', 'hoo']
-    echo s:bracket(files, fixed, s:compare)
+    echo s:bracket(files, fixed, s:compare_file_fn)
 endfu
 
 " <<<
