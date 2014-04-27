@@ -975,31 +975,37 @@ fu! s:get_files_for_spec(spec, partial, throw)
 endfu
 " TODO: Could probably combine with parse_refresh_cmdline with a bit of
 " refactoring.
-fu! s:parse_grep_cmdline(cmd, bang, ...)
+fu! s:parse_grep_cmdline(args)
     let argidx = 0 " Points to first non-plugin arg at loop termination
     " Command line can contain multiple specs; simply concatenate the arrays
-    " returned by each call to get_files_for_spec, each of which corresponds
-    " to a different spec, each of which could involve multiple subprojects.
+    " returned by each call to get_files_for_spec(), each of which corresponds
+    " to a different spec, with each spec potentially involving multiple
+    " subprojects).
     let sps = []
-    for arg in a:000
+    for arg in a:args
         if arg == '--'
             let argidx += 1
             break
         elseif arg[0] != '-' && arg[0] != ':'
             break
         else
-            call extend(sps, s:get_files_for_spec(a:filespec, a:partial, 1))
+            " TODO: Decide about partial
+            call extend(sps, s:get_files_for_spec(arg, 1, 1))
         endif
         let argidx += 1
     endfor
     " Return a dict containing array of parsed specs and array of non-plugin
     " args.
-    "return {'pspecs' => sps, 'args' => a:000[argidx:]}
-    return [sps, a:000[argidx:]]
+    "return {'pspecs' => sps, 'args' => a:args[argidx:]}
+    return [sps, a:args[argidx :]]
 endfu
 " This one is only for :Edit, :Split, et al.
 " It's fundamentally different from parse_grep_cmdline and
 " parse_refresh_cmdline in that the option format is more rigid.
+" Note: Currently, command is defined as taking only 1 arg, which means
+" multiple args will be treated as 1; if I defined it as taking any number
+" (like grep commands), I could probably commonize the basic command line
+" parsing, with a post-parse step that checks for correct # of args.
 fu! s:parse_edit_cmdline(cmd, bang, filespec)
     let sf = s:sf_create()
     try
@@ -1099,6 +1105,112 @@ fu! s:refresh(opts)
             let cache_cfg.rootdir = rootdir
             call s:cache_listfile(cache_cfg, 1)
         endfor
+    catch /Vim(echoerr)/
+        echohl ErrorMsg|echomsg v:exception|echohl None
+    finally
+        call sf.destroy()
+    endtry
+endfu
+
+" Input: List in following form...
+" [{idx: <sp_idx>, files: <files>}, ...]
+" ...in which the sp_idx's are unordered and non-unique.
+fu! s:sort_and_combine_pspecs(pspecs)
+    let _pspecs = []
+    let _pspec_map = {}
+    for pspec in a:pspecs
+        if !has_key(_pspec_map, pspec.idx)
+            _pspec_map[pspec.idx] = 
+        let _idx = index(_pspecs, 
+    endfor
+endfu
+" Return an array of the following form:
+" [{idx: <sp_idx>, files: escaped_file_list}]
+" Note: Form is same as that returned by get_files_for_spec, but file lists
+" may be combined/broken at different locations (with idx potentially
+" appearing more than once) as a result of maxlen constraints.
+fu! s:xargify_pspecs(pspecs, fixlen, maxlen)
+    let _pspecs = [] " transformed pspec list
+    let cumlen = fixlen
+    " TODO: Probably sort here...
+    let pspecs = s:sort_and_uniquify_pspecs(a:pspecs)
+    " UNDER CONSTRUCTION!!!!!!
+    for pspec in pspecs
+        if !exists('l:_pspec') || _pspec.idx != pspec.idx
+            if exists('l:_pspec')
+                " Accumulate
+                call add(_pspecs, _pspec)
+            endif
+            let _pspec = {idx: pspec.idx, files: ''}
+        endif
+        " Accumulate as many files as possible without exceeding maxlen
+        for f in pspec.files
+            " Escape and add prepend space before length test.
+            let f = ' ' . fnameescape(f)
+            " Decision: Always accumulate at least one file regardless of
+            " maxlen constraint.
+            if len(_pspec.files) && len(f) + cumlen > maxlen
+                " Accumulate early.
+                call add(_pspecs, _pspec)
+                let _pspec = {idx: pspec.idx, files: ''}
+            endif
+            let _pspec.files .= f
+        endfor
+    endfor
+    if exists('l:_pspec')
+        " Accumulate final.
+        call add(_pspecs, _pspec)
+    endif
+    if empty(_pspecs)
+        return []
+    endif
+    " Filter non-empty list, removing any elements with no files.
+    call filter(_pspecs, 'len(v:val.files)')
+    return _pspecs
+endfu
+fu! s:get_unconstrained_pspecs()
+    let sp_idx = 0
+    let ret = []
+    for cfg in s:cache_cfg
+        call add(ret, {idx: sp_idx, files: cfg.files})
+        let sp_idx += 1
+    endfor
+    return ret
+endfu
+fu! s:grep(cmd, bang, ...)
+    let sf = s:sf_create()
+    try
+        let [pspecs, args] = s:parse_grep_cmdline(a:000)
+        let grepcmd = tolower(a:cmd)
+        let exargs = escape(a:000)
+        if empty(pspecs)
+            " No specs provided: search all...
+            " Note: This is different from non-empty pspecs, which simply
+            " contains no files...
+            let pspecs = s:get_unconstrained_pspecs()
+        endif
+        " TODO: Where to configure max len?
+        let pspecs = s:xargify_pspecs(pspecs, 4096)
+
+        " TODO: Optimization: Sort pspecs so that all specs involving a single
+        " subproject are processed together.
+        " -----------------
+        " Process each subproject in turn...
+        for pspec in pspecs
+            let cfg = s:cache_cfg[pspec.idx]
+            call sf.pushd(cfg.rootdir)
+            if !filereadable(s:listfile)
+                " TODO: Decide whether to abort, or eventually, continue with next list file
+                echohl WarningMsg|echomsg "Warning: Skipping unreadable listfile `"
+                            \. getcwd() . "/" . s:listfile . "', selected by "
+                            \. sel.opt|echohl None
+            endif
+            " Run [l]grep[add] with appropriate args.
+            exe (a:use_ll ? 'l' : '') . 'grep' . (a:bang == '!' ? 'add' : '')
+                        \. ' --files-from=' . s:listfile
+                        \. ' ' . pcl.rem
+        endfor
+        " -----------------
     catch /Vim(echoerr)/
         echohl ErrorMsg|echomsg v:exception|echohl None
     finally
@@ -1358,7 +1470,7 @@ com! PrackStart call <SID>start()
 com! PrackStop call <SID>stop()
 com! -nargs=? Refresh call <SID>refresh(<q-args>)
 
-com! -bang -nargs=* Grep  call s:parse_grep_cmdline('Grep', <q-bang>, <f-args>)
+com! -bang -nargs=* Grep  call s:grep('Grep', <q-bang>, <f-args>)
 com! -bang -nargs=* Gr  call <SID>ack('Gr', <q-bang>, <f-args>)
 com! -bang -nargs=* LGr  call <SID>ack('LGr', <q-bang>, <f-args>)
 
