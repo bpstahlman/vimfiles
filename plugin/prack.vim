@@ -1268,6 +1268,8 @@ fu! s:grep(cmd, bang, ...)
     try
         let [pspecs, args] = s:parse_grep_cmdline(a:000)
         let grepcmd = s:canonicalize_grep_cmd(a:cmd)
+        " Is this grep command naturally adding?
+        let isadd = grepcmd[-3 : ] == 'add'
         " TODO: Turn the array into escaped string.
         "let exargs = escape(a:000)
         if empty(pspecs)
@@ -1291,6 +1293,9 @@ fu! s:grep(cmd, bang, ...)
         let sp_idx_prev = -1
         for pspec in pspecs
             let cfg = s:cache_cfg[pspec.idx]
+            " Will be set to 'add' suffix for overflow grep iff the grep
+            " command isn't already adding.
+            let grepadd = ''
             if pspec.idx != sp_idx_prev
                 " Move to root of subproject.
                 call sf.pushd(cfg.rootdir)
@@ -1298,15 +1303,18 @@ fu! s:grep(cmd, bang, ...)
                 if !empty(grepprg) | call sf.setopt('grepprg', grepprg) | endif
                 let grepformat = s:get_opt(pspec.idx, 'grepformat', 0)
                 if !empty(grepformat) | call sf.setopt('grepformat', grepformat) | endif
-            elseif sp_idx_prev != -1
-                " This grep is overflow due to xargification: thus, append
-                " 'add' to the grep command's fiducial form. 
+            elseif sp_idx_prev != -1 && !isadd
+                " This grep is overflow due to xargification, and the grep
+                " command isn't adding by nature: thus, append 'add' to the
+                " grep command's fiducial form.
+                let grepadd = 'add'
             endif
             
             " Run [l]grep[add] with appropriate args.
-            exe (a:use_ll ? 'l' : '') . 'grep' . (a:bang == '!' ? 'add' : '')
-                        \. ' --files-from=' . s:listfile
+            " TODO: Append escaped, joined args...
+            exe grepcmd . grepadd . a:bang
                         \. ' ' . pcl.rem
+
             let sp_idx_prev = pspec.idx
         endfor
         " -----------------
