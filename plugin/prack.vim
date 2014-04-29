@@ -970,6 +970,8 @@ endfu
 " Convert input spec to corresponding list of files.
 " TODO: More complete docs... E.g., document format somewhere.
 " [{sp_idx: <idx>, files: [<path>, ...]}, ...]
+" TODO: Need to support --php with no :<glob> following. Currently, the : is
+" mandatory.
 fu! s:get_files_for_spec(spec, partial, throw)
     let ret = []
     let opt = s:parse_spec(a:spec, a:throw)
@@ -1267,20 +1269,19 @@ fu! s:grep(cmd, bang, ...)
     let sf = s:sf_create()
     try
         let [pspecs, args] = s:parse_grep_cmdline(a:000)
+        " TODO: Turn the array into escaped string.
+        let grepargs = s:convert_arg_list_to_string(args, 0)
         let grepcmd = s:canonicalize_grep_cmd(a:cmd)
         " Is this grep command naturally adding?
         let isadd = grepcmd[-3 : ] == 'add'
-        " TODO: Turn the array into escaped string.
-        "let exargs = escape(a:000)
         if empty(pspecs)
             " No specs provided: search all...
-            " Note: This is different from non-empty pspecs, which simply
-            " contains no files...
+            " Note: This is different from non-empty pspecs that contain no
+            " files...
             let pspecs = s:get_unconstrained_pspecs()
         endif
         " TODO: Where to configure max len? Also, calculate fixlen
         let pspecs = s:xargify_pspecs(pspecs, 100, 4096)
-        return
 
         " UNDER CONSTRUCTION - Pick up here... Note that we won't be going to
         " file anymore...
@@ -1297,11 +1298,13 @@ fu! s:grep(cmd, bang, ...)
             " command isn't already adding.
             let grepadd = ''
             if pspec.idx != sp_idx_prev
+                " First encounter with this subproject
                 " Move to root of subproject.
                 call sf.pushd(cfg.rootdir)
-                let grepprg = s:get_opt(pspec.idx, 'grepprg', 0)
+                " TODO: Rework how these options are obtained.
+                let grepprg = s:get_opt(pspec.idx, 'grepprg', 1)
                 if !empty(grepprg) | call sf.setopt('grepprg', grepprg) | endif
-                let grepformat = s:get_opt(pspec.idx, 'grepformat', 0)
+                let grepformat = s:get_opt(pspec.idx, 'grepformat', 1)
                 if !empty(grepformat) | call sf.setopt('grepformat', grepformat) | endif
             elseif sp_idx_prev != -1 && !isadd
                 " This grep is overflow due to xargification, and the grep
@@ -1310,10 +1313,10 @@ fu! s:grep(cmd, bang, ...)
                 let grepadd = 'add'
             endif
             
+            echomsg grepcmd . grepadd . a:bang . ' ' . grepargs . pspec.files
             " Run [l]grep[add] with appropriate args.
             " TODO: Append escaped, joined args...
-            exe grepcmd . grepadd . a:bang
-                        \. ' ' . pcl.rem
+            exe grepcmd . grepadd . a:bang . ' ' . grepargs . pspec.files
 
             let sp_idx_prev = pspec.idx
         endfor
@@ -1599,6 +1602,14 @@ fu! Test_bracket()
     echo s:bracket(files, fixed, s:compare_file_fn)
 endfu
 
+" Convert input list of command line args to a space-separated string list, in
+" which the args are escaped in manner suitable for use in either internal
+" (vim) or external (shell) command line.
+fu! s:convert_arg_list_to_string(args, external)
+    let mapexpr = a:external ? 'shellescape(v:val)' : 'escape(v:val, '' \'')'
+    let args = map(copy(a:args), mapexpr)
+    return join(args, " ")
+endfu
 " <<<
 " >>> Commands
 " -- Notes --
