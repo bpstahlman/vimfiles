@@ -915,12 +915,22 @@ fu! s:parse_refresh_cmdline(cmdline)
     return {'opts': s:extract_opts(optstr), 'rem': remstr}
 endfu
 
-" [-<sopts>][--<lopt>[,<lopt>]...]:[<glob>]
-" Design Decision: Supersedes the one below...
-" Both components are optional, but you can't have the glob component without
-" a `:' prefixed to it. This removes some ambiguities...
-" Design Decision: I've decided to make the `:' mandatory, though *both* lhs
-" and rhs are optional. This approach removes multiple ambiguities...
+" Parse input spec designating subproject(s) and glob.
+" Input spec format:
+" [-<sopts>][--<lopt>[,<lopt>]...][:<glob>]
+" Note: Both the subproject and glob components are optional, but if non-null
+" glob is specified, it is always preceded by a `:', to remove potential
+" ambiguities, which arise because of the possibility of both `-' and `:'
+" appearing in filenames.
+" Returns: An object representation of the input spec, containing the
+" following keys:
+"   idxs: array of indices corresponding to selected subprojects, -1 if
+"         unconstrained (i.e., subproject spec omitted)
+"   glob: file glob as string, '' if glob omitted
+"         Note: Omitted glob effectively selects all files in selected
+"         subproject(s).
+" Rationale: Here are some specs that would be ambiguous if the `:' were not
+" mandatory...
 " Ambiguous spec #1:
 "   -bar
 " Possible interpretations:
@@ -932,14 +942,6 @@ endfu
 " On a filesystem that allows `:' in a filename, is the `:' part of the glob,
 " or is it an explicit (albeit unnecessary) separator between (omitted)
 " subproject spec and glob `foo'?
-" Note: By requiring the `:' in all cases, I remove all ambiguities.
-" Examples:
-"   --foo:**/*.c
-"   --foo:
-"   :**/*.c
-"   :
-" Note: The meaning of the first 3 specs should be obvious: the final spec
-" matches any file in any subproject.
 fu! s:parse_spec(opt, throw)
     let oc = '[a-zA-Z0-9_]' " chars that can appear in option
     "                  <sopts>              <lopts>                            <glob>
@@ -1292,14 +1294,17 @@ endfu
 fu! s:grep(cmd, bang, ...)
     let sf = s:sf_create()
     try
+        " Parse cmdline into an array of specs and trailing args (which will
+        " be supplied to grepprg)
         let [pspecs, args] = s:parse_grep_cmdline(a:000)
-        " TODO: Turn the array into escaped string.
+        " Turn the array of args into escaped string.
         let grepargs = s:convert_arg_list_to_string(args, 0)
+        " Convert plugin grep command into Vim grep command in canonical form.
         let grepcmd = s:canonicalize_grep_cmd(a:cmd)
         " Is this grep command naturally adding?
         let isadd = grepcmd[-3 : ] == 'add'
         if empty(pspecs)
-            " No specs provided: search all...
+            " No specs provided: search all files in all subprojects...
             " Note: This is different from non-empty pspecs that contain no
             " files...
             let pspecs = s:get_unconstrained_pspecs()
@@ -1313,17 +1318,19 @@ fu! s:grep(cmd, bang, ...)
         " s:cache_cfg everywhere.
 
         " Process each subproject in turn...
+        " Note: A subproject will be represented multiple times (in succession)
+        " in the pspecs array iff xargification constraints prevent the
+        " processing of all the subproject's files in a single grep.
         let sp_idx_prev = -1
         for pspec in pspecs
             let cfg = s:cache_cfg[pspec.idx]
-            " Will be set to 'add' suffix for overflow grep iff the grep
-            " command isn't already adding.
             let grepadd = ''
             if pspec.idx != sp_idx_prev
                 " First encounter with this subproject
                 " Move to root of subproject.
                 call sf.pushd(cfg.rootdir)
-                " TODO: Rework how these options are obtained.
+                " Note: If user has not overridden grepprg and grepformat,
+                " keep current Vim setting.
                 let grepprg = s:get_opt(pspec.idx, 'grepprg', 1)
                 if !empty(grepprg) | call sf.setopt('grepprg', grepprg) | endif
                 let grepformat = s:get_opt(pspec.idx, 'grepformat', 1)
@@ -1335,14 +1342,12 @@ fu! s:grep(cmd, bang, ...)
                 let grepadd = 'add'
             endif
             
-            echomsg grepcmd . grepadd . a:bang . ' ' . grepargs . pspec.files
             " Run [l]grep[add] with appropriate args.
             " TODO: Append escaped, joined args...
             exe grepcmd . grepadd . a:bang . ' ' . grepargs . pspec.files
 
             let sp_idx_prev = pspec.idx
         endfor
-        " -----------------
     catch /Vim(echoerr)/
         echohl ErrorMsg|echomsg v:exception|echohl None
     finally
