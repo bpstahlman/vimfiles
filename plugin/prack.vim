@@ -915,11 +915,35 @@ fu! s:parse_refresh_cmdline(cmdline)
     return {'opts': s:extract_opts(optstr), 'rem': remstr}
 endfu
 
-" [-<sopts>][--<lopt>[,<lopt>]...]:<glob>
+" [-<sopts>][--<lopt>[,<lopt>]...]:[<glob>]
+" Design Decision: Supersedes the one below...
+" Both components are optional, but you can't have the glob component without
+" a `:' prefixed to it. This removes some ambiguities...
+" Design Decision: I've decided to make the `:' mandatory, though *both* lhs
+" and rhs are optional. This approach removes multiple ambiguities...
+" Ambiguous spec #1:
+"   -bar
+" Possible interpretations:
+"   1. Selects any file in any of the 3 subprojects designated by short
+"      options -b, -a, and -r
+"   2. Specifies file -bar in any subproject
+" Ambiguous spec #2:
+"   :foo
+" On a filesystem that allows `:' in a filename, is the `:' part of the glob,
+" or is it an explicit (albeit unnecessary) separator between (omitted)
+" subproject spec and glob `foo'?
+" Note: By requiring the `:' in all cases, I remove all ambiguities.
+" Examples:
+"   --foo:**/*.c
+"   --foo:
+"   :**/*.c
+"   :
+" Note: The meaning of the first 3 specs should be obvious: the final spec
+" matches any file in any subproject.
 fu! s:parse_spec(opt, throw)
     let oc = '[a-zA-Z0-9_]' " chars that can appear in option
-    "                  <sopts>              <lopts>                         <glob>
-    let re_opt = '^\%(-\('.oc.'\+\)\)\?\%(--\('.oc.'\+\%(,'.oc.'\+\)*\)\)\?:\(.*\)'
+    "                  <sopts>              <lopts>                            <glob>
+    let re_opt = '^\%(-\('.oc.'\+\)\)\?\%(--\('.oc.'\+\%(,'.oc.'\+\)*\)\)\?\%(:\(.*\)\)\?'
     let ms = matchlist(a:opt, re_opt)
     if empty(ms)
         if a:throw
@@ -996,7 +1020,7 @@ endfu
 " TODO: Could probably combine with parse_refresh_cmdline with a bit of
 " refactoring.
 fu! s:parse_grep_cmdline(args)
-    let argidx = 0 " Points to first non-plugin arg at loop termination
+    let argidx = 0 " Will point to first non-plugin arg at loop termination
     " Command line can contain multiple specs; simply concatenate the arrays
     " returned by each call to get_files_for_spec(), each of which corresponds
     " to a different spec, with each spec potentially involving multiple
@@ -1283,8 +1307,6 @@ fu! s:grep(cmd, bang, ...)
         " TODO: Where to configure max len? Also, calculate fixlen
         let pspecs = s:xargify_pspecs(pspecs, 100, 4096)
 
-        " UNDER CONSTRUCTION - Pick up here... Note that we won't be going to
-        " file anymore...
         " TODO: Consider creating an object used to access options as function
         " of project and subproject, which performs caching: e.g.,
         " opt.get(sp_idx, opt) Note: This would be cleaner than accessing
