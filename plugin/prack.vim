@@ -1,27 +1,31 @@
-" TODO: This is one of the things that would be in the user-provided config.
-" TODO: Eventually, may provide a different way to set all this: e.g., function or
-" global-vars.
-let g:prack_listfile = 'files.list'
+"let g:prack_grepprg = grep -n $* /dev/null
+"let g:prack_grepformat = %f:%l:%m,%f:%l%m,%f  %l%m
 
-" TODO: Remove this comment once I no longer need the big test config in ~/tmp/prack_module_cfg.vim
-let g:prack_module_cfg = [
-    \{
-        \'name': 'php',
-        \'shortname': 'p',
-        \'root': ['private', ';asec/src'],
-        \'find': 'find . \( \( '
-            \.' -path ./extensions -o -path ./framework -o -path ./gii -o -path ./tests -o -path ./vendors \) '
-            \.' -prune -false \) -o -iname ''*.php'''
-    \},
-    \{
-        \'name': 'js',
-        \'shortname': 'j',
-        \'root': ['public', ';asec/src'],
-        \'find': 'find . \( \( '
-            \.' -path ./resources/js -o -path ./shared/extjs -o -path ./help/transition/jquery.js \) '
-            \.' -prune -false \) -o -iname ''*.js'''
+let g:prack_config = {
+    \'listfile': 'files.list',
+    \'maxgrepsize': 50000,
+    \'projects': {
+        \'asec': {
+            \'foo': 'bar',
+            \'subprojects': {
+                \'php': {
+                    \'shortname': 'p',
+                    \'root': ['private', ';asec/src'],
+                    \'find': 'find . \( \( '
+                        \.' -path ./extensions -o -path ./framework -o -path ./gii -o -path ./tests -o -path ./vendors \) '
+                        \.' -prune -false \) -o -iname ''*.php'''
+                \},
+                \'js': {
+                    \'shortname': 'j',
+                    \'root': ['public', ';asec/src'],
+                    \'find': 'find . \( \( '
+                        \.' -path ./resources/js -o -path ./shared/extjs -o -path ./help/transition/jquery.js \) '
+                        \.' -prune -false \) -o -iname ''*.js'''
+                \}
+            \}
+        \}
     \}
-\]
+\}
 
 " The structure above will be mirrored by a list which contains only valid
 " (though possibly disabled) entries, and whose values are dictionaries
@@ -76,7 +80,16 @@ endfu
 "   Sorted List of Dictionaries of the following form:
 "   { 'name': <longname>, 're': <regex matching name>, 'idx': <submodule index> }
 "   Note: Array is sorted by longname.
-fu! s:process_cfg()
+fu! s:process_cfg(p_name)
+    if !has_key(g:prack_config, p_name)
+        throw "No configuration found. :help TODO prack_config???"
+    endif
+    let p_cfg = g:prack_config[p_name]
+    if !has_key(p_cfg, 'subprojects')
+        throw "No subprojects defined for project " . p_name
+    endif
+    let sp_dict = p_cfg.subprojects
+
     " Determine basename of files used to hold lists of project files.
     if exists('g:prack_listfile') && g:prack_listfile != ''
         let s:listfile = g:prack_listfile
@@ -84,9 +97,147 @@ fu! s:process_cfg()
         let s:listfile = 'prack-files.list'
     endif
 
-    if !len(g:prack_module_cfg)
+    " Build snapshot of project config until re-initialization.
+    let s:cache_cfg = []
+    " Short (single-char) names stored in a hash
+    " Long names stored in sorted array of patterns employing \%[...]
+    let s:shortnames = {}
+    let longnames = []
+    let lname_to_index = {}
+    let i = 0
+    " Note: Index into s:cache_cfg (i.e., valid configs only)
+    let cfg_idx = 0
+    let sf = s:sf_create()
+    for [sp_name, sp_cfg] in items(sp_dict)
+        " TODO: This one is mandatory at sp level.
+        if !has_key(sp_cfg, 'root')
+            echohl WarningMsg|echomsg "Warning: Skipping invalid subproject config at index " . i . ": no `root' pattern specified."|echohl None
+            let i = i + 1 | continue
+        endif
+        " TODO: This one could be set higher.
+        if !has_key(sp_cfg, 'find')
+            echohl WarningMsg|echomsg "Warning: Skipping invalid subproject config at index " . i . ": no `find' string specified."|echohl None
+            let i = i + 1 | continue
+        endif
+        let selectable = 0
+        " TODO: Probably require valid name, since we sometimes expect one.
+        " TODO: Don't hardcode these patterns...
+        if (sp_name !~ '^[a-zA-Z0-9_]\+$')
+            echohl WarningMsg|echomsg "Ignoring invalid subproject name `" . sp_name|echohl None
+                        \. "': must be sequence of characters matching [a-zA-Z0-9_]."
+        else
+            if !has_key(lname_to_index, sp_name)
+                let selectable = 1
+                let lname_to_index[sp_name] = cfg_idx
+                call add(longnames, sp_name)
+            else
+                echohl WarningMsg|echomsg "Warning: Name " . sp_name . " used multiple times. All but first usage ignored."|echohl None
+            endif
+        endif
+        if has_key(sp_cfg, 'shortname')
+            if (sp_cfg.shortname !~ '^[a-zA-Z0-9_]$')
+                echohl WarningMsg|echomsg "Ignoring invalid shortname `" . sp_cfg.shortname|echohl None
+                            \. "': must be single character matching [a-zA-Z0-9_]."
+            else
+                if !has_key(s:shortnames, sp_cfg.shortname)
+                    let selectable = 1
+                    let s:shortnames[sp_cfg.shortname] = cfg_idx
+                else
+                    echohl WarningMsg|echomsg "Warning: Name " . sp_cfg.shortname . " used multiple times. All but first usage ignored."|echohl None
+                endif
+            endif
+        endif
+        " Subproject must be selectable by at least 1 of shortname/longname
+        if !selectable
+            echohl WarningMsg|echomsg "Warning: Skipping invalid subproject config at index " . i . ": at least 1 name or shortname must be specified."|echohl None
+            let i = i + 1 | continue
+        endif
+        " Current config item not skipped: i.e., valid subproject.
+        " TODO: Look at renaming some things: e.g., s:cache_cfg => s:cache_sp_cfg, etc...
+        call add(s:cache_cfg, deepcopy(sp_cfg, 1))
+        let cache_cfg = s:cache_cfg[-1]
+        " Add name, which was represented only as key of source object
+        cache_cfg.name = sp_name
+        " Save original index, in case it's needed for reporting.
+        " TODO: Perhaps save a title string (e.g., `--longname, -shortname')
+        " for reporting purposes...
+        let cache_cfg.orig_idx = i
+        let rootdir = call('finddir', sp_cfg.root)
+        if rootdir == ''
+            echohl WarningMsg|echomsg "Warning: Skipping invalid subproject config at index " . i . ": Couldn't locate project base. Make sure your cwd is within the project."|echohl None
+            let cache_cfg.disabled = 1
+            let i = i + 1 | continue
+        endif
+        " Save full path of rootdir.
+        let cache_cfg.rootdir = s:canonicalize_path(rootdir, '')
+        " Build cache, but don't force refresh.
+        call s:cache_listfile(cache_cfg, 0)
+        let cfg_idx = cfg_idx + 1 " Keep up with sp_idx
+        let i = i + 1 " Keep up with original idx
+    endfor
+    call sf.destroy()
+    " If no valid subprojects, no point in continuing...
+    if !len(s:cache_cfg)
+        throw "No valid subprojects. :help prack-config"
+    endif
+    " Process the long options to determine the portions required for
+    " uniqueness.
+    call sort(longnames)
+    let ln = len(longnames)
+    let i = 1
+    let reqs = [matchstr(longnames[0], '^.')]
+    while i < ln
+        " Get common portion + 1 char (if possible)
+        let ml = matchlist(longnames[i], '\(\%[' . longnames[i-1] . ']\)\(.\)\?')
+        let [cmn, nxt] = ml[1:2]
+        " Is it possible we need to lengthen previous req?
+        if len(cmn) >= len(reqs[i-1])
+            " Can we lengthen previous req?
+            if len(reqs[i-1]) < len(longnames[i-1])
+                " Set to common portion + 1 char (if possible)
+                let reqs[i-1] = matchstr(longnames[i-1], cmn . '.\?')
+            endif
+        endif
+        " Take only as much of current as is required for uniqueness:
+        " namely, common portion + 1 char.
+        call add(reqs, cmn . nxt)
+        let i = i + 1
+    endwhile
+    " Build an array of patterns and corresponding indices.
+    " Note: Arrays reqs and longnames are parallel, and original indices can
+    " be looked up in lname_to_index.
+    let s:longnames = []
+    let i = 0
+    while i < ln
+        let re = reqs[i]
+        " Is the long name longer than the required portion?
+        if len(longnames[i]) > len(reqs[i])
+            " Append the optional part within \%[...]
+            let re .= '\%[' . longnames[i][len(reqs[i]):] . ']'
+        endif
+        call add(s:longnames, {'name': longnames[i], 're': re, 'idx': lname_to_index[longnames[i]]})
+        let i = i + 1
+    endwhile
+    "echo "Config:"
+    "echo s:cache_cfg
+    "echo "longnames:"
+    "echo s:longnames
+    "echo "shortnames:"
+    "echo s:shortnames
+    let g:shortnames = s:shortnames
+
+endfu
+fu! s:process_cfg_old()
+    " Determine basename of files used to hold lists of project files.
+    if exists('g:prack_listfile') && g:prack_listfile != ''
+        let s:listfile = g:prack_listfile
+    elseif
+        let s:listfile = 'prack-files.list'
+    endif
+
+    if !len(g:prack_config)
         " TODO: Consider throwing exception here.
-        echoerr "Must define at least one project module within g:prack_module_cfg"
+        echoerr "Must define at least one project module within g:prack_submodule_cfg"
         return
     endif
     " Build snapshot of global config until re-initialization.
@@ -96,13 +247,13 @@ fu! s:process_cfg()
     let s:shortnames = {}
     let longnames = []
     let lname_to_index = {}
-    let ln = len(g:prack_module_cfg)
+    let ln = len(g:prack_submodule_cfg)
     let i = 0
     " Note: Index into s:cache_cfg (i.e., valid configs only)
     let cfg_idx = 0
     let sf = s:sf_create()
     while i < ln
-        let cfg = g:prack_module_cfg[i]
+        let cfg = g:prack_submodule_cfg[i]
         if !has_key(cfg, 'root')
             echohl WarningMsg|echomsg "Warning: Skipping invalid subproject config at index " . i . ": no `root' pattern specified."|echohl None
             let i = i + 1 | continue
