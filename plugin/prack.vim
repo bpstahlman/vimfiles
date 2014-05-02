@@ -70,7 +70,86 @@ fu! s:stop()
     " TODO: General cleanup. E.g., delete commands.
 endfu
 " <<<
+" >>> Static data used to process options
+" Notes:
+" -'type' is return value of type()
+" -No need to specify 'type' if there's a 'default'.
+" -'required' means user *must* provide a value.
+"  TODO: It's actually unnecessary, as it can be deduced from presence/absence
+"  of others: e.g., 'default', 'vim'
+let s:opt_cfg = {
+    \'listfiles': {
+        \'minlvl': 0,
+        \'maxlvl': 2,
+        \'type': 1,
+        \'default': 'files.list'
+    \},
+    \'maxgrepsize': {
+        \'minlvl': 0,
+        \'maxlvl': 2,
+        \'type': 0,
+        \'default': 50000
+    \},
+    \'grepprg': {
+        \'minlvl': 0,
+        \'maxlvl': 2,
+        \'default': 'grep -n $* /dev/null',
+        \'vim': 'grepprg'
+    \},
+    \'grepformat': {
+        \'minlvl': 0,
+        \'maxlvl': 2,
+        \'default': '%f:%l:%m,%f:%l%m,%f  %l%m',
+        \'vim': 'grepformat'
+    \},
+    \'find': {
+        \'minlvl': 0,
+        \'maxlvl': 2,
+        \'type': 1,
+        \'required': 1
+    \},
+    \'root': {
+        \'#comment': "Would be highly unusual to define root globally, but it could be made to work with appropriate subproject-specific finds..."
+        \'minlvl': 0,
+        \'maxlvl': 2,
+        \'type': 1,
+        \'required': 1
+    \}
+\}
+" <<<
 " >>> Functions used to process config
+fu! s:extract_opts(raw, lvl)
+    let opts = {}
+    for [opt_name, opt_val] in items(raw)
+        " TODO: As long as opts are not segregated in a subkey like 'opts', if
+        " we want to warng about non-existent opts, we need to maintain a set
+        " of names that are not opts, but are expected: e.g., 'shortname'.
+        " Decision: Don't complicate things unnecessarily by treating things
+        " like 'shortname' as options.
+        if !has_key(s:opt_cfg, opt_name) | continue | endif
+        " Option exists.
+        let opt_cfg = s:opt_cfg[opt_name]
+        if lvl < opt_cfg.minlvl || lvl > opt_cfg.maxlvl
+            " Option can't be set at this level; ignore.
+            " TODO: With warning?
+            continue
+        endif
+        " Validate type
+        if type(opt_val) != opt_cfg.type
+            " TODO: Flesh out the error message. Also, should we just skip for
+            " now?
+            throw "Invalid value supplied for option " . opt_name
+        endif
+        " Option value is valid.
+        let opts[opt_name] = opt_val
+
+    endfor
+    " Make all options that are mandatory at this level have a value.
+    " UNDER CONSTRUCTION!!!!! Pick up here...
+    " Question: Should we pass in hash of options that are already set at
+    " higher level or what?
+    return opts
+endfu
 " Process the subproject/module short/long name options.
 " Output: Sets the following data structures:
 " s:shortnames
