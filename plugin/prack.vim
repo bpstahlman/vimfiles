@@ -109,7 +109,7 @@ let s:opt_cfg = {
         \'required': 1
     \},
     \'root': {
-        \'#comment': "Would be highly unusual to define root globally, but it could be made to work with appropriate subproject-specific finds..."
+        \'#comment': "Would be highly unusual to define root globally, but it could be made to work with appropriate subproject-specific finds...",
         \'minlvl': 0,
         \'maxlvl': 2,
         \'type': 1,
@@ -118,7 +118,16 @@ let s:opt_cfg = {
 \}
 " <<<
 " >>> Functions used to process config
-fu! s:extract_opts(raw, lvl)
+fu! s:opts_create(opts, base)
+    let opts = {'opts': a:opts, 'base': a:base}
+    " TODO: Add initial options.
+    fu! opts.get(name) dict
+    endfu
+    fu! opts.set(name, value) dict
+    endfu
+    return opts
+endfu
+fu! s:extract_opts(raw, lvl, base)
     let opts = {}
     for [opt_name, opt_val] in items(raw)
         " TODO: As long as opts are not segregated in a subkey like 'opts', if
