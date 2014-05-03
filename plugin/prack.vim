@@ -118,20 +118,80 @@ let s:opt_cfg = {
 \}
 " <<<
 " >>> Functions used to process config
-fu! s:opts_create(opts, base)
-    let opts = {'opts': a:opts, 'base': a:base}
-    " TODO: Add initial options.
-    fu! opts.get(name) dict
+" Note: ... is base, defaults to {}
+fu! s:opts_create(opts, lvl, ...)
+    let base = a:0 > 0 ? a:1 : {}
+    let opts = {'opts': a:opts, 'lvl': a:lvl, 'base': base}
+    " Optional input object filled with the following flags:
+    " def, set, vim, lvl
+    " Assumption: Prior validation is such that failure to find a value for
+    " the option (possibly default) implies internal error.
+    fu! opts.get(name, ...) dict
+        let value = ''
+        if a:0 > 0
+            " Empty input object.
+            call filter(flags, 0)
+        endif
+        call extend(flags, {'def': 0, 'set': 0, 'vim': '', 'lvl': -1})
+        let obj = self
+        while !empty(obj)
+            if has_key(obj.opts, a:name)
+                let flags.lvl = obj.lvl
+                let flags.set = 1
+                let value = obj.opts[a:name]
+                break
+            endif
+            " Move up to parent
+            let obj = obj.base
+        endwhile
+        " Is this a valid option?
+        " TODO: Consider whether to add 'invalid' option (noting that that
+        " would amount to an internal error).
+        if has_key(s:opt_cfg, a:name)
+            " Is there a corresponding Vim option?
+            if has_key(s:opt_cfg[a:name], 'vim')
+                let flags.vim = s:opt_cfg[a:name].vim
+            endif
+            if !flags.set && has_key(s:opt_cfg[a:name], 'default')
+                let flags.def = 1
+                let flags.set = 1
+                let value = s:opt_cfg[a:name].default
+            endif
+        endfu
+        return value
     endfu
     fu! opts.set(name, value) dict
+        let self.opts[a:name] = a:value
     endfu
     return opts
 endfu
+" TODO: This test function is obsolete, now that format of the get method has
+" changed!
+fu! Test_opts_create()
+    let opts = s:opts_create({'boo': 1, 'hoo': 2, 'yong': 3}, 0, {})
+    let p_opts = s:opts_create({'hoo': 21, 'lala': 49}, 1, opts)
+    let sp_opts = s:opts_create({'egg': 234, 'foo': 523, 'yong': 299, 'grepper': 923}, 2, p_opts)
+
+    call opts.set('fooper', 'blooper')
+
+    let objs = [p_opts, sp_opts]
+    let keys = ['boo', 'hoo', 'yong', 'lala', 'egg', 'foo', 'grepper', 'fooper']
+    for obj in objs
+        let lvl = obj.lvl
+        for key in keys
+            let flags = {}
+            let value = obj.get(key, flags)
+            echo key . "\t: L" . lvl . "\t|" . value . "|\tFound at lvl: " . flags.lvl
+        endfor
+    endfor
+endfu
+" TODO: Something that differentiates this from runtime (cmdline) option
+" processing.
 fu! s:extract_opts(raw, lvl, base)
-    let opts = {}
+    let opts = s:opts_create({}, lvl, base)
     for [opt_name, opt_val] in items(raw)
         " TODO: As long as opts are not segregated in a subkey like 'opts', if
-        " we want to warng about non-existent opts, we need to maintain a set
+        " we want to warn about non-existent opts, we need to maintain a set
         " of names that are not opts, but are expected: e.g., 'shortname'.
         " Decision: Don't complicate things unnecessarily by treating things
         " like 'shortname' as options.
@@ -140,7 +200,7 @@ fu! s:extract_opts(raw, lvl, base)
         let opt_cfg = s:opt_cfg[opt_name]
         if lvl < opt_cfg.minlvl || lvl > opt_cfg.maxlvl
             " Option can't be set at this level; ignore.
-            " TODO: With warning?
+            " TODO: Add warning!
             continue
         endif
         " Validate type
@@ -150,13 +210,18 @@ fu! s:extract_opts(raw, lvl, base)
             throw "Invalid value supplied for option " . opt_name
         endif
         " Option value is valid.
-        let opts[opt_name] = opt_val
-
+        call opts.set(opt_name, opt_val)
     endfor
-    " Make all options that are mandatory at this level have a value.
-    " UNDER CONSTRUCTION!!!!! Pick up here...
-    " Question: Should we pass in hash of options that are already set at
-    " higher level or what?
+    " Make sure all options that are required by this level have been set.
+    for [opt_name, opt_cfg] in items(s:opt_cfg)
+        if opt_cfg.required && a:lvl > opt_cfg.maxlvl
+            let flags = {}
+            call opts.get(opt_name, flags)
+            if !flags.set
+                throw "Missing required option: " . opt_name
+            endif
+        endif
+    endfor
     return opts
 endfu
 " Process the subproject/module short/long name options.
@@ -172,43 +237,33 @@ fu! s:process_cfg(p_name)
     if !has_key(g:prack_config, p_name)
         throw "No configuration found. :help TODO prack_config???"
     endif
+    " TODO: extract_opts will throw on (eg) missing required args - handle
+    " somehow...
+    let g_opt = s:extract_opts(g:prack_config, 0, {})
     let p_cfg = g:prack_config[p_name]
+    let s:p_opt = s:extract_opts(p_cfg, 1, g_opt)
     if !has_key(p_cfg, 'subprojects')
         throw "No subprojects defined for project " . p_name
     endif
-    let sp_dict = p_cfg.subprojects
-
-    " Determine basename of files used to hold lists of project files.
-    if exists('g:prack_listfile') && g:prack_listfile != ''
-        let s:listfile = g:prack_listfile
-    elseif
-        let s:listfile = 'prack-files.list'
+    if type(p_cfg.subprojects) != 4
+        throw "Invalid subprojects definition for project " . a:p_name . ". Must be Dictionary."
     endif
 
-    " Build snapshot of project config until re-initialization.
-    let s:cache_cfg = []
+    " Build snapshot of project opt/cfg until re-initialization.
+    let s:sp_cfg = []
+    let s:sp_opt = []
     " Short (single-char) names stored in a hash
     " Long names stored in sorted array of patterns employing \%[...]
     let s:shortnames = {}
     let longnames = []
     let lname_to_index = {}
     let i = 0
-    " Note: Index into s:cache_cfg (i.e., valid configs only)
+    " Note: Index into s:sp_cfg (i.e., valid configs only)
     let cfg_idx = 0
     let sf = s:sf_create()
-    for [sp_name, sp_cfg] in items(sp_dict)
-        " TODO: This one is mandatory at sp level.
-        if !has_key(sp_cfg, 'root')
-            echohl WarningMsg|echomsg "Warning: Skipping invalid subproject config at index " . i . ": no `root' pattern specified."|echohl None
-            let i = i + 1 | continue
-        endif
-        " TODO: This one could be set higher.
-        if !has_key(sp_cfg, 'find')
-            echohl WarningMsg|echomsg "Warning: Skipping invalid subproject config at index " . i . ": no `find' string specified."|echohl None
-            let i = i + 1 | continue
-        endif
+    for [sp_name, sp_cfg] in items(p_cfg.subprojects)
+        let s:sp_opt[cfg_idx] = s:opts_create(sp_cfg, 2, s:p_opt)
         let selectable = 0
-        " TODO: Probably require valid name, since we sometimes expect one.
         " TODO: Don't hardcode these patterns...
         if (sp_name !~ '^[a-zA-Z0-9_]\+$')
             echohl WarningMsg|echomsg "Ignoring invalid subproject name `" . sp_name|echohl None
@@ -241,31 +296,33 @@ fu! s:process_cfg(p_name)
             let i = i + 1 | continue
         endif
         " Current config item not skipped: i.e., valid subproject.
-        " TODO: Look at renaming some things: e.g., s:cache_cfg => s:cache_sp_cfg, etc...
-        call add(s:cache_cfg, deepcopy(sp_cfg, 1))
-        let cache_cfg = s:cache_cfg[-1]
+        call add(s:sp_cfg, {})
+        " Cache reference for convenience below...
+        let cfg = s:sp_cfg[-1]
         " Add name, which was represented only as key of source object
-        cache_cfg.name = sp_name
+        cfg.name = sp_name
         " Save original index, in case it's needed for reporting.
         " TODO: Perhaps save a title string (e.g., `--longname, -shortname')
         " for reporting purposes...
-        let cache_cfg.orig_idx = i
-        let rootdir = call('finddir', sp_cfg.root)
+        let cfg.orig_idx = i
+        let rootdir = call('finddir', s:sp_opt.get('root'))
         if rootdir == ''
             echohl WarningMsg|echomsg "Warning: Skipping invalid subproject config at index " . i . ": Couldn't locate project base. Make sure your cwd is within the project."|echohl None
-            let cache_cfg.disabled = 1
+            " TODO: Don't set disabled - remove (or don't add) to list. Note
+            " that this currently is also set in cache_listfile...
+            let cfg.disabled = 1
             let i = i + 1 | continue
         endif
         " Save full path of rootdir.
-        let cache_cfg.rootdir = s:canonicalize_path(rootdir, '')
+        let cfg.rootdir = s:canonicalize_path(rootdir, '')
         " Build cache, but don't force refresh.
-        call s:cache_listfile(cache_cfg, 0)
+        call s:cache_listfile(cfg, 0)
         let cfg_idx = cfg_idx + 1 " Keep up with sp_idx
         let i = i + 1 " Keep up with original idx
     endfor
     call sf.destroy()
     " If no valid subprojects, no point in continuing...
-    if !len(s:cache_cfg)
+    if !len(s:sp_cfg)
         throw "No valid subprojects. :help prack-config"
     endif
     " Process the long options to determine the portions required for
@@ -307,13 +364,26 @@ fu! s:process_cfg(p_name)
         let i = i + 1
     endwhile
     "echo "Config:"
-    "echo s:cache_cfg
+    "echo s:sp_cfg
     "echo "longnames:"
     "echo s:longnames
     "echo "shortnames:"
     "echo s:shortnames
     let g:shortnames = s:shortnames
 
+    return
+    " UNDER CONSTRUCTION!!!!! Pick up here...
+    " Verify required options!!!!!!!
+    " TODO: This one is mandatory at sp level.
+    if !has_key(sp_cfg, 'root')
+        echohl WarningMsg|echomsg "Warning: Skipping invalid subproject config at index " . i . ": no `root' pattern specified."|echohl None
+        let i = i + 1 | continue
+    endif
+    " TODO: This one could be set higher.
+    if !has_key(sp_cfg, 'find')
+        echohl WarningMsg|echomsg "Warning: Skipping invalid subproject config at index " . i . ": no `find' string specified."|echohl None
+        let i = i + 1 | continue
+    endif
 endfu
 fu! s:process_cfg_old()
     " Determine basename of files used to hold lists of project files.
@@ -329,7 +399,7 @@ fu! s:process_cfg_old()
         return
     endif
     " Build snapshot of global config until re-initialization.
-    let s:cache_cfg = []
+    let s:sp_cfg = []
     " Short (single-char) names stored in a hash
     " Long names stored in sorted array of patterns employing \%[...]
     let s:shortnames = {}
@@ -337,7 +407,7 @@ fu! s:process_cfg_old()
     let lname_to_index = {}
     let ln = len(g:prack_submodule_cfg)
     let i = 0
-    " Note: Index into s:cache_cfg (i.e., valid configs only)
+    " Note: Index into s:sp_cfg (i.e., valid configs only)
     let cfg_idx = 0
     let sf = s:sf_create()
     while i < ln
@@ -386,8 +456,8 @@ fu! s:process_cfg_old()
             let i = i + 1 | continue
         endif
         " Current config item not skipped: i.e., valid subproject.
-        call add(s:cache_cfg, deepcopy(cfg, 1))
-        let cache_cfg = s:cache_cfg[-1]
+        call add(s:sp_cfg, deepcopy(cfg, 1))
+        let cache_cfg = s:sp_cfg[-1]
         " Save original index, in case it's needed for reporting.
         " TODO: Perhaps save a title string (e.g., `--longname, -shortname')
         " for reporting purposes...
@@ -407,7 +477,7 @@ fu! s:process_cfg_old()
     endwhile
     call sf.destroy()
     " If no valid subprojects, no point in continuing...
-    if !len(s:cache_cfg)
+    if !len(s:sp_cfg)
         throw "No valid subprojects. :help prack-config"
     endif
     " Process the long options to determine the portions required for
@@ -449,7 +519,7 @@ fu! s:process_cfg_old()
         let i = i + 1
     endwhile
     "echo "Config:"
-    "echo s:cache_cfg
+    "echo s:sp_cfg
     "echo "longnames:"
     "echo s:longnames
     "echo "shortnames:"
@@ -458,7 +528,7 @@ fu! s:process_cfg_old()
 
 endfu
 
-" Return s:cache_cfg index corresponding to input short/long option name (or
+" Return s:sp_cfg index corresponding to input short/long option name (or
 " -1 if matching config not found).
 " Input(s):
 "   opt
@@ -488,8 +558,8 @@ endfu
 
 " Try various ways to get a subproject-specific value for specified option.
 fu! s:get_opt(sp_idx, opt, default_to_vim)
-    if has_key(s:cache_cfg[a:sp_idx], a:opt)
-        return s:cache_cfg[a:sp_idx][a:opt]
+    if has_key(s:sp_cfg[a:sp_idx], a:opt)
+        return s:sp_cfg[a:sp_idx][a:opt]
     elseif exists('g:prack_' . a:opt)
         " TODO: Revisit this when plugin global options are reworked.
         return g:prack_{a:opt}
@@ -559,7 +629,7 @@ fu! s:cache_listfile(cache_cfg, force_refresh)
         " (e.g., find_insert_idx).
         call sort(files)
         let a:cache_cfg.files = files
-        "echo s:cache_cfg
+        "echo s:sp_cfg
         "echo a:cache_cfg
         let success = 1
     catch
@@ -924,7 +994,7 @@ fu! s:get_matching_files(cfg, glob, partial)
 endfu
 
 fu! Test_get_matching_files(cfg_idx, glob, partial)
-    let matches = s:get_matching_files(s:cache_cfg[a:cfg_idx], a:glob, a:partial)
+    let matches = s:get_matching_files(s:sp_cfg[a:cfg_idx], a:glob, a:partial)
     for m in matches
         echo m
     endfor
@@ -1248,11 +1318,11 @@ fu! s:get_files_for_spec(spec, partial, throw)
         let sp_idxs = opt.idxs
     else
         " No subproject constraints
-        let sp_idxs = range(len(s:cache_cfg))
+        let sp_idxs = range(len(s:sp_cfg))
     endif
     let files = []
     for sp_idx in sp_idxs
-        let fs = s:get_matching_files(s:cache_cfg[sp_idx], opt.glob, a:partial)
+        let fs = s:get_matching_files(s:sp_cfg[sp_idx], opt.glob, a:partial)
         " Accumulate subproject-specific object.
         call add(ret, {'idx': sp_idx, 'files': fs})
     endfor
@@ -1318,7 +1388,7 @@ fu! s:parse_edit_cmdline(cmd, bang, filespec)
         " If error not raised by now, we have a single file to open; move to
         " its subproject to execute the applicable open command, then restore
         " cwd (by destroying stack frame).
-        let sp_cfg = s:cache_cfg[sps[0].idx]
+        let sp_cfg = s:sp_cfg[sps[0].idx]
         call sf.pushd(sp_cfg.rootdir)
         " Note: For each of the plugin editing commands, there's a Vim
         " equivalent whose name is identical except for capitalization.
@@ -1369,7 +1439,7 @@ fu! s:complete_filenames(arg_lead, cmd_line, cursor_pos)
     let files = []
     for sp in sps
         let sp_idx = sp.idx
-        let sp_name = s:cache_cfg[sp_idx].name
+        let sp_name = s:sp_cfg[sp_idx].name
         let sp_files = sp.files
         call map(sp_files, '"--" . l:sp_name . ":" . v:val')
         call extend(files, sp_files)
@@ -1397,7 +1467,7 @@ fu! s:refresh(opts)
         endfor
         " Process the selected configs.
         for cfg_idx in cfg_idxs
-            let cache_cfg = s:cache_cfg[cfg_idx]
+            let cache_cfg = s:sp_cfg[cfg_idx]
             let rootdir = call('finddir', cache_cfg.root)
             if rootdir == ''
                 throw "Couldn't locate project base. Make sure your cwd is within the project."
@@ -1524,7 +1594,7 @@ endfu
 fu! s:get_unconstrained_pspecs()
     let sp_idx = 0
     let ret = []
-    for cfg in s:cache_cfg
+    for cfg in s:sp_cfg
         call add(ret, {idx: sp_idx, files: cfg.files})
         let sp_idx += 1
     endfor
@@ -1554,7 +1624,7 @@ fu! s:grep(cmd, bang, ...)
         " TODO: Consider creating an object used to access options as function
         " of project and subproject, which performs caching: e.g.,
         " opt.get(sp_idx, opt) Note: This would be cleaner than accessing
-        " s:cache_cfg everywhere.
+        " s:sp_cfg everywhere.
 
         " Process each subproject in turn...
         " Note: A subproject will be represented multiple times (in succession)
@@ -1562,7 +1632,7 @@ fu! s:grep(cmd, bang, ...)
         " processing of all the subproject's files in a single grep.
         let sp_idx_prev = -1
         for pspec in pspecs
-            let cfg = s:cache_cfg[pspec.idx]
+            let cfg = s:sp_cfg[pspec.idx]
             let grepadd = ''
             if pspec.idx != sp_idx_prev
                 " First encounter with this subproject
@@ -1619,7 +1689,7 @@ fu! s:ack(cmd, bang, ...)
         if a:mode != 'file' && a:mode != 'dir'
             " Process the selected configs.
             for sel in sels
-                let cfg = s:cache_cfg[sel.idx]
+                let cfg = s:sp_cfg[sel.idx]
                 let rootdir = call('finddir', cfg.root)
                 if rootdir == ''
                     throw "Couldn't locate project base. Make sure your cwd is within the project."
