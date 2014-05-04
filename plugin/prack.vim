@@ -17,6 +17,8 @@ let g:prack_config = {
                         \.' -prune -false \) -o -iname ''*.php'''
                 \},
                 \'js': {
+                    \'grepprg': 'Ack',
+                    \'maxgrepsize': 1000,
                     \'shortname': 'j',
                     \'root': ['src/public', ';asec'],
                     \'find': 'find . \( \( '
@@ -84,7 +86,7 @@ endfu
 " TODO: I believe required and default are redundant: i.e., all options are
 " required unless they have a default...
 let s:opt_cfg = {
-    \'listfiles': {
+    \'listfile': {
         \'minlvl': 0,
         \'maxlvl': 2,
         \'type': 1,
@@ -99,12 +101,14 @@ let s:opt_cfg = {
     \'grepprg': {
         \'minlvl': 0,
         \'maxlvl': 2,
+        \'type': 1,
         \'default': 'grep -n $* /dev/null',
         \'vim': 'grepprg'
     \},
     \'grepformat': {
         \'minlvl': 0,
         \'maxlvl': 2,
+        \'type': 1,
         \'default': '%f:%l:%m,%f:%l%m,%f  %l%m',
         \'vim': 'grepformat'
     \},
@@ -117,7 +121,7 @@ let s:opt_cfg = {
         \'#comment': "Would be highly unusual to define root globally, but it could be made to work with appropriate subproject-specific finds...",
         \'minlvl': 0,
         \'maxlvl': 2,
-        \'type': 1
+        \'type': 3
     \}
 \}
 " <<<
@@ -173,23 +177,21 @@ fu! s:opts_create(opts, lvl, ...)
     endfu
     return opts
 endfu
-" TODO: This test function is obsolete, now that format of the get method has
-" changed!
 fu! Test_opts_create()
-    let opts = s:opts_create({'boo': 1, 'hoo': 2, 'yong': 3}, 0, {})
-    let p_opts = s:opts_create({'hoo': 21, 'lala': 49}, 1, opts)
+    let g_opts = s:opts_create({'boo': 1, 'hoo': 2, 'yong': 3}, 0, {})
+    let p_opts = s:opts_create({'hoo': 21, 'lala': 49}, 1, g_opts)
     let sp_opts = s:opts_create({'egg': 234, 'foo': 523, 'yong': 299, 'grepper': 923}, 2, p_opts)
 
-    call opts.set('fooper', 'blooper')
+    call g_opts.set('fooper', 'boop')
 
     let objs = [p_opts, sp_opts]
-    let keys = ['boo', 'hoo', 'yong', 'lala', 'egg', 'foo', 'grepper', 'fooper']
+    let keys = ['boo', 'hoo', 'yong', 'lala', 'egg', 'foo', 'grep', 'foop']
     for obj in objs
         let lvl = obj.lvl
         for key in keys
             let flags = {}
             let value = obj.get(key, flags)
-            echo key . "\t: L" . lvl . "\t|" . value . "|\tFound at lvl: " . flags.lvl
+            echo key . " \t(L" . lvl . ") \t|" . value . "| \t@" . flags.lvl . " \tFlags: " . string(flags)
         endfor
     endfor
 endfu
@@ -229,7 +231,7 @@ fu! s:build_opts(raw, lvl, base)
     endfor
     " Make sure all options that are required by this level have been set.
     for [opt_name, opt_cfg] in items(s:opt_cfg)
-        if !has_key(opt_cfg, 'default') && a:lvl > opt_cfg.maxlvl
+        if !has_key(opt_cfg, 'default') && !has_key(opt_cfg, 'vim') && a:lvl > opt_cfg.maxlvl
             let flags = {}
             call opts.get(opt_name, flags)
             if !flags.set
@@ -285,13 +287,9 @@ fu! s:process_cfg(p_name)
     let lname_to_index = {}
     let i = 0
     let cfg_idx = 0 " index into s:sp_cfg (i.e., valid configs only)
-    " TODO: I don't think there's anything at this level that requires a
-    " stack frame. Probably just let the called functions create them as
-    " required.
-    let sf = s:sf_create()
     for [sp_name, sp_raw] in items(p_raw.subprojects)
         try
-            let sp_opt = s:opts_create(sp_raw, 2, s:p_opt)
+            let sp_opt = s:build_opts(sp_raw, 2, s:p_opt)
             " TODO: Don't hardcode these patterns...
             if (sp_name !~ '^[a-zA-Z0-9_]\+$')
                 throw "Ignoring invalid subproject name `" . sp_name
@@ -346,7 +344,6 @@ fu! s:process_cfg(p_name)
             let i = i + 1 " Keep up with original idx
         endtry
     endfor
-    call sf.destroy()
     " If no valid subprojects, no point in continuing...
     if empty(s:sp_cfg)
         throw "No valid subprojects. :help prack-config"
@@ -455,37 +452,48 @@ fu! s:cache_listfile(sp_cfg, sp_opt, force_refresh)
     " See whether the listfile exists and is readable.
     let listfile_path = a:sp_cfg.rootdir . listfile
     let listfile_path_found = findfile(listfile, a:sp_cfg.rootdir)
-    " Both listfile generation and file canonicalization require us to be
-    " in root dir.
-    call sf.pushd(a:sp_cfg.rootdir)
-    " Do we need to create/update the listfile?
-    if listfile_path_found == '' || a:force_refresh
-        let v:errmsg = ''
-        " Note: silent avoids the annoying 'Hit enter' prompt.
-        exe 'silent !' . a:sp_cfg.find . ' >' . listfile
-        if v:errmsg != ''
-            throw "Encountered error attempting to build listfile `" . listfile_path . "' for subproject "
-                \. a:sp_cfg.name . ": " . v:errmsg . ". Disabling subproject."
+    let sf = s:sf_create()
+    try
+        " Both listfile generation and file canonicalization require us to be
+        " in root dir.
+        call sf.pushd(a:sp_cfg.rootdir)
+        " Do we need to create/update the listfile?
+        if listfile_path_found == '' || a:force_refresh
+            let v:errmsg = ''
+            " Note: silent avoids the annoying 'Hit enter' prompt.
+            exe 'silent !' . a:sp_opt.get('find') . ' >' . listfile
+            if v:errmsg != ''
+                throw "Encountered error attempting to build listfile `" . listfile_path . "' for subproject "
+                    \. a:sp_cfg.name . ": " . v:errmsg . ". Disabling subproject."
+            endif
         endif
-    endif
-    " If here, we expect to have a file to read.
-    if !filereadable(listfile_path)
-        throw "Couldn't open listfile `" . listfile_path . "' for subproject "
-            \. a:sp_cfg.name . ". Disabling subproject."
-    endif
-    let files_raw = readfile(listfile_path)
-    " Note: We must set 'shellslash' for canonicalization.
-    call sf.setopt('shellslash', 1, {'boolean': 1})
-    " Build canonicalized list within loop.
-    let files = []
-    for file_raw in files_raw
-        "echo "Before: " file_raw
-        let file_raw = s:canonicalize_path(file_raw, a:sp_cfg.rootdir)
-        "echo "After: " file_raw
-        "echo "rootdir: " a:sp_cfg.rootdir
-        " Add canonical name to list.
-        call add(files, file_raw)
-    endfor
+        " If here, we expect to have a file to read.
+        if !filereadable(listfile_path)
+            throw "Couldn't open listfile `" . listfile_path . "' for subproject "
+                \. a:sp_cfg.name . ". Disabling subproject."
+        endif
+        let files_raw = readfile(listfile_path)
+        " Note: We must set 'shellslash' for canonicalization.
+        call sf.setopt('shellslash', 1, {'boolean': 1})
+        " Build canonicalized list within loop.
+        let files = []
+        for file_raw in files_raw
+            "echo "Before: " file_raw
+            let file_raw = s:canonicalize_path(file_raw, a:sp_cfg.rootdir)
+            "echo "After: " file_raw
+            "echo "rootdir: " a:sp_cfg.rootdir
+            " Add canonical name to list.
+            call add(files, file_raw)
+        endfor
+    catch
+        " TODO: Perhaps a Rethrow method to be used everywhere instead of
+        " this (for stripping extra Vim(echoerr) at head).
+        " Alternatively, a display function to strip them all from v:exception
+        " before output...
+        echoerr v:exception
+    finally
+        call sf.destroy()
+    endtry
     " TODO: Make this optional so we can skip if user's find or whatever
     " ensures sorted.
     " TODO: Should we uniquify? Doing so could permit some optimizations
@@ -978,36 +986,6 @@ endfu
 
 " <<<
 " >>> Functions used during command execution
-" Save any state that needs to be changed to perform the grep.
-" TODO: Perhaps a string of flags indicating which state to save? (Need to add
-" ability to save regex engine to use.)
-" Caveat: save/restore calls MUST occur in matched pairs; all but outermost
-" calls are do-nothing.
-" TODO!!!!!!!!!!!!!! Change this mechanism completely: use dict functions and
-" stack frame instances...
-" TODO: Remove this after replacing completely...
-fu! s:save_state()
-    if !exists('s:save_level')
-        let s:save_level = 0
-    endif
-    if s:save_level == 0
-        let s:ssl_save = &ssl
-        let s:cwd_save = getcwd()
-        let s:grepprg_save = &grepprg
-    endif
-    let s:save_level = s:save_level + 1
-endfu
-" Restore state that was changed to perform the grep.
-fu! s:restore_state()
-    if s:save_level > 0
-        let s:save_level = s:save_level - 1
-        if s:save_level == 0
-            let &ssl = s:ssl_save
-            exe 'lcd ' . s:cwd_save
-            let &grepprg = s:grepprg_save
-        endif
-    endif
-endfu
 " Convert string containing only long and short options into list in which
 " each element represents a single option in one of the following forms:
 " s:<opt_char>
@@ -1400,12 +1378,12 @@ endfu
 " a single command line escaped string, rather than a list of files. Also note
 " that the pspecs in the input list will be transformed to ensure that the
 " following constraints are met:
-" -Each subproject represented only once unless maxlen constraint forces
+" -Each subproject represented only once unless maxgrepsize constraint forces
 "  processing single subproject with multiple greps.
 " -Files are sorted within subproject
 " -Files are unique within subproject
 " -Subprojects are in fiducial order
-fu! s:xargify_pspecs(pspecs, fixlen, maxlen)
+fu! s:xargify_pspecs(pspecs, fixlen)
     let pspecs = s:sort_and_combine_pspecs(a:pspecs)
     if empty(pspecs)
         return []
@@ -1420,14 +1398,15 @@ fu! s:xargify_pspecs(pspecs, fixlen, maxlen)
             let _pspec = {'idx': pspec.idx, 'files': ''}
             let cumlen = a:fixlen
         endif
-        " Accumulate as many files as possible without exceeding maxlen
+        let maxgrepsize = s:sp_opt[pspec.idx].get('maxgrepsize')
+        " Accumulate as many files as possible without exceeding maxgrepsize
         for f in pspec.files
             " Escape and prepend space before length test.
             let f = ' ' . fnameescape(f)
             let len_f = strlen(f)
             " Decision: Always accumulate at least one file regardless of
-            " maxlen constraint.
-            if len(_pspec.files) && len_f + cumlen > a:maxlen
+            " maxgrepsize constraint.
+            if len(_pspec.files) && len_f + cumlen > maxgrepsize
                 " Accumulate early.
                 call add(_pspecs, _pspec)
                 let _pspec = {'idx': pspec.idx, 'files': ''}
@@ -1471,7 +1450,7 @@ fu! s:grep(cmd, bang, ...)
             let pspecs = s:get_unconstrained_pspecs()
         endif
         " TODO: Where to configure max len? Also, calculate fixlen
-        let pspecs = s:xargify_pspecs(pspecs, 100, 4096)
+        let pspecs = s:xargify_pspecs(pspecs, 100)
 
         " TODO: Consider creating an object used to access options as function
         " of project and subproject, which performs caching: e.g.,
@@ -1492,10 +1471,13 @@ fu! s:grep(cmd, bang, ...)
                 call sf.pushd(cfg.rootdir)
                 " Note: If user has not overridden grepprg and grepformat,
                 " keep current Vim setting.
-                let grepprg = s:get_opt(pspec.idx, 'grepprg', 1)
-                if !empty(grepprg) | call sf.setopt('grepprg', grepprg) | endif
-                let grepformat = s:get_opt(pspec.idx, 'grepformat', 1)
-                if !empty(grepformat) | call sf.setopt('grepformat', grepformat) | endif
+                let flags = {}
+                let grepprg = s:sp_opt[pspec.idx].get('grepprg', flags)
+                " TODO: Do we need to check 'vim' flag, or simply assume it's
+                " set if 'set' is false?
+                if flags.set | call sf.setopt('grepprg', grepprg) | endif
+                let grepformat = s:sp_opt[pspec.idx].get('grepformat', flags)
+                if flags.set | call sf.setopt('grepformat', grepformat) | endif
             elseif sp_idx_prev != -1 && !isadd
                 " This grep is overflow due to xargification, and the grep
                 " command isn't adding by nature: thus, append 'add' to the
@@ -1509,61 +1491,8 @@ fu! s:grep(cmd, bang, ...)
 
             let sp_idx_prev = pspec.idx
         endfor
-    catch /Vim(echoerr)/
-        echohl ErrorMsg|echomsg v:exception|echohl None
-    finally
-        call sf.destroy()
-    endtry
-endfu
-fu! s:ack(cmd, bang, ...)
-    let sf = s:sf_create()
-    try
-        " Break raw command line into parsed prack options, and string
-        " containing everything else (essentially, the ack options).
-        " TODO: UNDER CONSTRUCTION!!!!!!!!!!!!!!!
-        let [pspecs, args] = s:parse_grep_cmdline(a:000)
-        echo pspecs
-        echo args
-        return
-        " Get list of config indices.
-        " Design Decision: Abort on bad option, even if multiple specified.
-        " TODO: Refactor to make this part of command line parsing, since it's used in several places.
-        let sels = []
-        for opt in pcl.opts
-            " Note: In case it's needed for display, convert s:a to -a and l:abc to --abc
-            let [idx, opt] = [s:get_cfg_idx(opt), (opt[0] == 'l' ? '--' : '-') . opt[2:]]
-            if idx == -1
-                echoerr "Invalid subproject option: " . opt
-            else
-                call add(sels, {'idx': idx, 'opt': opt})
-            endif
-        endfor
-        if a:mode != 'file' && a:mode != 'dir'
-            " Process the selected configs.
-            for sel in sels
-                let cfg = s:sp_cfg[sel.idx]
-                let rootdir = call('finddir', cfg.root)
-                if rootdir == ''
-                    throw "Couldn't locate project base. Make sure your cwd is within the project."
-                endif
-                "exe 'lcd ' . rootdir
-                call sf.pushd(rootdir)
-                if !filereadable(s:listfile)
-                    " TODO: Decide whether to abort, or eventually, continue with next list file
-                    echohl WarningMsg|echomsg "Warning: Skipping unreadable listfile `"
-                                \. getcwd() . "/" . s:listfile . "', selected by "
-                                \. sel.opt|echohl None
-                endif
-                " Run [l]grep[add] with appropriate args.
-                exe (a:use_ll ? 'l' : '') . 'grep' . (a:bang == '!' ? 'add' : '')
-                            \. ' --files-from=' . s:listfile
-                            \. ' ' . pcl.rem
-            endfor
-        else
-            " Run [l]grep[add] with appropriate args.
-            exe (a:use_ll ? 'l' : '') . 'grep' . (a:bang == '!' ? 'add' : '')
-                        \. ' ' . pcl.rem
-        endif
+    " TODO: What's the rationale for catching only Vim(echoerr) here? What
+    " about Vim internal errors?
     catch /Vim(echoerr)/
         echohl ErrorMsg|echomsg v:exception|echohl None
     finally
@@ -1840,8 +1769,5 @@ fu! Complete_custom(A, L, P)
 endfu
 com! -nargs=1 -complete=customlist,Complete_customlist CL echo "foo"
 com! -nargs=1 -complete=custom,Complete_custom C echo "foo"
-" <<<
-" >>> Works in progress...
-
 " <<<
 " vim:ts=4:sw=4:et:fdm=marker:fmr=>>>,<<<
