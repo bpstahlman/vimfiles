@@ -11,14 +11,14 @@ let g:prack_config = {
             \'subprojects': {
                 \'php': {
                     \'shortname': 'p',
-                    \'root': ['private', ';asec/src'],
+                    \'root': ['src/private', ';asec'],
                     \'find': 'find . \( \( '
                         \.' -path ./extensions -o -path ./framework -o -path ./gii -o -path ./tests -o -path ./vendors \) '
                         \.' -prune -false \) -o -iname ''*.php'''
                 \},
                 \'js': {
                     \'shortname': 'j',
-                    \'root': ['public', ';asec/src'],
+                    \'root': ['src/public', ';asec'],
                     \'find': 'find . \( \( '
                         \.' -path ./resources/js -o -path ./shared/extjs -o -path ./help/transition/jquery.js \) '
                         \.' -prune -false \) -o -iname ''*.js'''
@@ -88,42 +88,36 @@ let s:opt_cfg = {
         \'minlvl': 0,
         \'maxlvl': 2,
         \'type': 1,
-        \'default': 'files.list',
-        \'required': 0
+        \'default': 'files.list'
     \},
     \'maxgrepsize': {
         \'minlvl': 0,
         \'maxlvl': 2,
         \'type': 0,
-        \'default': 50000,
-        \'required': 0
+        \'default': 50000
     \},
     \'grepprg': {
         \'minlvl': 0,
         \'maxlvl': 2,
         \'default': 'grep -n $* /dev/null',
-        \'vim': 'grepprg',
-        \'required': 0
+        \'vim': 'grepprg'
     \},
     \'grepformat': {
         \'minlvl': 0,
         \'maxlvl': 2,
         \'default': '%f:%l:%m,%f:%l%m,%f  %l%m',
-        \'vim': 'grepformat',
-        \'required': 0
+        \'vim': 'grepformat'
     \},
     \'find': {
         \'minlvl': 0,
         \'maxlvl': 2,
-        \'type': 1,
-        \'required': 1
+        \'type': 1
     \},
     \'root': {
         \'#comment': "Would be highly unusual to define root globally, but it could be made to work with appropriate subproject-specific finds...",
         \'minlvl': 0,
         \'maxlvl': 2,
-        \'type': 1,
-        \'required': 1
+        \'type': 1
     \}
 \}
 " <<<
@@ -139,7 +133,6 @@ fu! s:opts_create(opts, lvl, ...)
     " Assumption: Prior validation is such that failure to find a value for
     " the option (possibly default) implies internal error.
     fu! opts.get(name, ...) dict
-        let value = ''
         if a:0 > 0
             let flags = a:1
             " Empty input object.
@@ -173,7 +166,7 @@ fu! s:opts_create(opts, lvl, ...)
                 let value = s:opt_cfg[a:name].default
             endif
         endif
-        return value
+        return exists('l:value') ? value : ''
     endfu
     fu! opts.set(name, value) dict
         let self.opts[a:name] = a:value
@@ -212,12 +205,16 @@ fu! s:build_opts(raw, lvl, base)
         " of names that are not opts, but are expected: e.g., 'shortname'.
         " Decision: Don't complicate things unnecessarily by treating things
         " like 'shortname' as options.
-        if !has_key(s:opt_cfg, opt_name) | continue | endif
+        if !has_key(s:opt_cfg, opt_name)
+            unlet opt_val " E706 workaround
+            continue
+        endif
         " Option exists.
         let opt_cfg = s:opt_cfg[opt_name]
         if a:lvl < opt_cfg.minlvl || a:lvl > opt_cfg.maxlvl
             " Option can't be set at this level; ignore.
             " TODO: Add warning!
+            unlet opt_val " E706 workaround
             continue
         endif
         " Validate type
@@ -228,11 +225,11 @@ fu! s:build_opts(raw, lvl, base)
         endif
         " Option value is valid.
         call opts.set(opt_name, opt_val)
-        unlet opt_val " prevent variable type mismatch on next iter
+        unlet opt_val " E706 workaround
     endfor
     " Make sure all options that are required by this level have been set.
     for [opt_name, opt_cfg] in items(s:opt_cfg)
-        if opt_cfg.required && a:lvl > opt_cfg.maxlvl
+        if !has_key(opt_cfg, 'default') && a:lvl > opt_cfg.maxlvl
             let flags = {}
             call opts.get(opt_name, flags)
             if !flags.set
@@ -322,19 +319,19 @@ fu! s:process_cfg(p_name)
             " Don't commit to adding to s:sp_cfg[] yet...
             let sp_cfg = {}
             " Add name, which was represented only as key of source object
-            sp_cfg.name = sp_name
+            let sp_cfg.name = sp_name
             " Save original index, in case it's needed for reporting.
             " TODO: Perhaps save a title string (e.g., `--longname, -shortname')
             " for reporting purposes...
             let sp_cfg.orig_idx = i
             let sp_cfg.rootdir = call('finddir', sp_opt.get('root'))
-            if rootdir == ''
+            if sp_cfg.rootdir == ''
                 throw "Warning: Skipping invalid subproject config at index " . i . ": Couldn't locate project base. Make sure your cwd is within the project."
             endif
             " Save full path of rootdir.
             let sp_cfg.rootdir = s:canonicalize_path(sp_cfg.rootdir, '')
             " Build cache, but don't force refresh.
-            call s:cache_listfile(sp_cfg, 0)
+            call s:cache_listfile(sp_cfg, sp_opt, 0)
             " Current config item not skipped: i.e., valid subproject.
             call add(s:sp_cfg, sp_cfg)
             call add(s:sp_opt, sp_opt)
@@ -452,27 +449,29 @@ endfu
 " TODO: Have this done once at Refresh and initial load and saved in a
 " persistent structure.
 " Exceptions: Leave for caller.
-fu! s:cache_listfile(cache_cfg, force_refresh)
+" TODO: Perhaps replace sp_cfg/sp_opt with an sp_idx.
+fu! s:cache_listfile(sp_cfg, sp_opt, force_refresh)
+    let listfile = a:sp_opt.get('listfile')
     " See whether the listfile exists and is readable.
-    let listfile_path = a:cache_cfg.rootdir . s:listfile
-    let listfile_path_found = findfile(s:listfile, a:cache_cfg.rootdir)
+    let listfile_path = a:sp_cfg.rootdir . listfile
+    let listfile_path_found = findfile(listfile, a:sp_cfg.rootdir)
     " Both listfile generation and file canonicalization require us to be
     " in root dir.
-    call sf.pushd(a:cache_cfg.rootdir)
+    call sf.pushd(a:sp_cfg.rootdir)
     " Do we need to create/update the listfile?
     if listfile_path_found == '' || a:force_refresh
         let v:errmsg = ''
         " Note: silent avoids the annoying 'Hit enter' prompt.
-        exe 'silent !' . a:cache_cfg.find . ' >' . s:listfile
+        exe 'silent !' . a:sp_cfg.find . ' >' . listfile
         if v:errmsg != ''
             throw "Encountered error attempting to build listfile `" . listfile_path . "' for subproject "
-                \. a:cache_cfg.name . ": " . v:errmsg . ". Disabling subproject."
+                \. a:sp_cfg.name . ": " . v:errmsg . ". Disabling subproject."
         endif
     endif
     " If here, we expect to have a file to read.
     if !filereadable(listfile_path)
         throw "Couldn't open listfile `" . listfile_path . "' for subproject "
-            \. a:cache_cfg.name . ". Disabling subproject."
+            \. a:sp_cfg.name . ". Disabling subproject."
     endif
     let files_raw = readfile(listfile_path)
     " Note: We must set 'shellslash' for canonicalization.
@@ -481,9 +480,9 @@ fu! s:cache_listfile(cache_cfg, force_refresh)
     let files = []
     for file_raw in files_raw
         "echo "Before: " file_raw
-        let file_raw = s:canonicalize_path(file_raw, a:cache_cfg.rootdir)
+        let file_raw = s:canonicalize_path(file_raw, a:sp_cfg.rootdir)
         "echo "After: " file_raw
-        "echo "rootdir: " a:cache_cfg.rootdir
+        "echo "rootdir: " a:sp_cfg.rootdir
         " Add canonical name to list.
         call add(files, file_raw)
     endfor
@@ -492,7 +491,7 @@ fu! s:cache_listfile(cache_cfg, force_refresh)
     " TODO: Should we uniquify? Doing so could permit some optimizations
     " (e.g., find_insert_idx).
     call sort(files)
-    let a:cache_cfg.files = files
+    let a:sp_cfg.files = files
 endfu
 " <<<
 " >>> Functions pertaining to file processing
