@@ -1,6 +1,7 @@
 "let g:prack_grepprg = grep -n $* /dev/null
 "let g:prack_grepformat = %f:%l:%m,%f:%l%m,%f  %l%m
 
+" TODO: Move this elsewhere...
 let g:prack_config = {
     \'listfile': 'files.list',
     \'maxgrepsize': 50000,
@@ -46,18 +47,21 @@ let g:prack_config = {
 "   1: byte offset into indexed path in s:files
 
 " >>> Functions used to start/stop the plugin
-fu! s:start()
+" TODO: Perhaps change start to open.
+fu! s:open(p_name)
+    " TODO: Probably change s:started to s:opened and have it store name of
+    " project.
     if exists('s:started')
         " Subsequent start implies stop.
         call s:stop()
     endif
     try
-        call s:process_cfg()
+        call s:process_cfg(a:p_name)
         " TODO: Do caching here...
         " Only now that we know initialization was successful...
         let s:started = 1
     catch
-        echoerr "Cannot start Prack, due to the following error, encountered while processing configuration: " . v:exception
+        echoerr "Cannot open project `" . a:p_name . "': " . v:exception
         " TODO: Is this necessary? We haven't done any setup yet... We may
         " have set some static vars (e.g., s:longnames/s:shortnames), but
         " they'd be set next time...
@@ -77,30 +81,36 @@ endfu
 " -'required' means user *must* provide a value.
 "  TODO: It's actually unnecessary, as it can be deduced from presence/absence
 "  of others: e.g., 'default', 'vim'
+" TODO: I believe required and default are redundant: i.e., all options are
+" required unless they have a default...
 let s:opt_cfg = {
     \'listfiles': {
         \'minlvl': 0,
         \'maxlvl': 2,
         \'type': 1,
-        \'default': 'files.list'
+        \'default': 'files.list',
+        \'required': 0
     \},
     \'maxgrepsize': {
         \'minlvl': 0,
         \'maxlvl': 2,
         \'type': 0,
-        \'default': 50000
+        \'default': 50000,
+        \'required': 0
     \},
     \'grepprg': {
         \'minlvl': 0,
         \'maxlvl': 2,
         \'default': 'grep -n $* /dev/null',
-        \'vim': 'grepprg'
+        \'vim': 'grepprg',
+        \'required': 0
     \},
     \'grepformat': {
         \'minlvl': 0,
         \'maxlvl': 2,
         \'default': '%f:%l:%m,%f:%l%m,%f  %l%m',
-        \'vim': 'grepformat'
+        \'vim': 'grepformat',
+        \'required': 0
     \},
     \'find': {
         \'minlvl': 0,
@@ -119,6 +129,8 @@ let s:opt_cfg = {
 " <<<
 " >>> Functions used to process config
 " Note: ... is base, defaults to {}
+" TODO: Consider whether all these return flags are needed, given that prior
+" option processing should preclude possibility (eg) of invalid/missing opt.
 fu! s:opts_create(opts, lvl, ...)
     let base = a:0 > 0 ? a:1 : {}
     let opts = {'opts': a:opts, 'lvl': a:lvl, 'base': base}
@@ -129,8 +141,11 @@ fu! s:opts_create(opts, lvl, ...)
     fu! opts.get(name, ...) dict
         let value = ''
         if a:0 > 0
+            let flags = a:1
             " Empty input object.
             call filter(flags, 0)
+        else
+            let flags = {}
         endif
         call extend(flags, {'def': 0, 'set': 0, 'vim': '', 'lvl': -1})
         let obj = self
@@ -157,7 +172,7 @@ fu! s:opts_create(opts, lvl, ...)
                 let flags.set = 1
                 let value = s:opt_cfg[a:name].default
             endif
-        endfu
+        endif
         return value
     endfu
     fu! opts.set(name, value) dict
@@ -185,11 +200,13 @@ fu! Test_opts_create()
         endfor
     endfor
 endfu
-" TODO: Something that differentiates this from runtime (cmdline) option
-" processing.
-fu! s:extract_opts(raw, lvl, base)
-    let opts = s:opts_create({}, lvl, base)
-    for [opt_name, opt_val] in items(raw)
+" TODO: A name that differentiates this from runtime (cmdline) option
+" processing. Is this even needed between caller and s:opts_create?
+" TODO: No need for this. Put it in s:opts_create. This makes sense, as it
+" would consolidate all the s:opt_cfg[] access.
+fu! s:build_opts(raw, lvl, base)
+    let opts = s:opts_create({}, a:lvl, a:base)
+    for [opt_name, opt_val] in items(a:raw)
         " TODO: As long as opts are not segregated in a subkey like 'opts', if
         " we want to warn about non-existent opts, we need to maintain a set
         " of names that are not opts, but are expected: e.g., 'shortname'.
@@ -198,7 +215,7 @@ fu! s:extract_opts(raw, lvl, base)
         if !has_key(s:opt_cfg, opt_name) | continue | endif
         " Option exists.
         let opt_cfg = s:opt_cfg[opt_name]
-        if lvl < opt_cfg.minlvl || lvl > opt_cfg.maxlvl
+        if a:lvl < opt_cfg.minlvl || a:lvl > opt_cfg.maxlvl
             " Option can't be set at this level; ignore.
             " TODO: Add warning!
             continue
@@ -211,6 +228,7 @@ fu! s:extract_opts(raw, lvl, base)
         endif
         " Option value is valid.
         call opts.set(opt_name, opt_val)
+        unlet opt_val " prevent variable type mismatch on next iter
     endfor
     " Make sure all options that are required by this level have been set.
     for [opt_name, opt_cfg] in items(s:opt_cfg)
@@ -234,97 +252,109 @@ endfu
 "   { 'name': <longname>, 're': <regex matching name>, 'idx': <submodule index> }
 "   Note: Array is sorted by longname.
 fu! s:process_cfg(p_name)
-    if !has_key(g:prack_config, p_name)
+    " Make sure there's at least 1 project
+    if !has_key(g:prack_config, 'projects')
+        throw "No projects defined."
+    endif
+    if type(g:prack_config.projects) != 4
+        throw "Invalid project definition. Must be Dictionary."
+    endif
+    " Does the named project exist?
+    if !has_key(g:prack_config.projects, a:p_name)
         throw "No configuration found. :help TODO prack_config???"
     endif
-    " TODO: extract_opts will throw on (eg) missing required args - handle
+    " TODO: build_opts will throw on (eg) missing required args - handle
     " somehow...
-    let g_opt = s:extract_opts(g:prack_config, 0, {})
-    let p_cfg = g:prack_config[p_name]
-    let s:p_opt = s:extract_opts(p_cfg, 1, g_opt)
-    if !has_key(p_cfg, 'subprojects')
-        throw "No subprojects defined for project " . p_name
+    let p_raw = g:prack_config.projects[a:p_name]
+    " Make sure there's at least 1 subproject
+    if !has_key(p_raw, 'subprojects')
+        throw "No subprojects defined for project " . a:p_name
     endif
-    if type(p_cfg.subprojects) != 4
+    if type(p_raw.subprojects) != 4
         throw "Invalid subprojects definition for project " . a:p_name . ". Must be Dictionary."
     endif
+    " Note: We don't need to preserve g_opt with s:var, as it will be
+    " accessible via prototype of project-level opt.
+    let g_opt = s:build_opts(g:prack_config, 0, {}) " TODO: No need to pass global...
+    let s:p_opt = s:build_opts(p_raw, 1, g_opt)
 
     " Build snapshot of project opt/cfg until re-initialization.
-    let s:sp_cfg = []
     let s:sp_opt = []
+    let s:sp_cfg = []
     " Short (single-char) names stored in a hash
     " Long names stored in sorted array of patterns employing \%[...]
     let s:shortnames = {}
     let longnames = []
     let lname_to_index = {}
     let i = 0
-    " Note: Index into s:sp_cfg (i.e., valid configs only)
-    let cfg_idx = 0
+    let cfg_idx = 0 " index into s:sp_cfg (i.e., valid configs only)
+    " TODO: I don't think there's anything at this level that requires a
+    " stack frame. Probably just let the called functions create them as
+    " required.
     let sf = s:sf_create()
-    for [sp_name, sp_cfg] in items(p_cfg.subprojects)
-        let s:sp_opt[cfg_idx] = s:opts_create(sp_cfg, 2, s:p_opt)
-        let selectable = 0
-        " TODO: Don't hardcode these patterns...
-        if (sp_name !~ '^[a-zA-Z0-9_]\+$')
-            echohl WarningMsg|echomsg "Ignoring invalid subproject name `" . sp_name|echohl None
-                        \. "': must be sequence of characters matching [a-zA-Z0-9_]."
-        else
-            if !has_key(lname_to_index, sp_name)
-                let selectable = 1
-                let lname_to_index[sp_name] = cfg_idx
-                call add(longnames, sp_name)
+    for [sp_name, sp_raw] in items(p_raw.subprojects)
+        try
+            let sp_opt = s:opts_create(sp_raw, 2, s:p_opt)
+            " TODO: Don't hardcode these patterns...
+            if (sp_name !~ '^[a-zA-Z0-9_]\+$')
+                throw "Ignoring invalid subproject name `" . sp_name
+                    \. "': must be sequence of characters matching [a-zA-Z0-9_]."
             else
-                echohl WarningMsg|echomsg "Warning: Name " . sp_name . " used multiple times. All but first usage ignored."|echohl None
-            endif
-        endif
-        if has_key(sp_cfg, 'shortname')
-            if (sp_cfg.shortname !~ '^[a-zA-Z0-9_]$')
-                echohl WarningMsg|echomsg "Ignoring invalid shortname `" . sp_cfg.shortname|echohl None
-                            \. "': must be single character matching [a-zA-Z0-9_]."
-            else
-                if !has_key(s:shortnames, sp_cfg.shortname)
-                    let selectable = 1
-                    let s:shortnames[sp_cfg.shortname] = cfg_idx
+                if !has_key(lname_to_index, sp_name)
+                    let lname_to_index[sp_name] = cfg_idx
+                    call add(longnames, sp_name)
                 else
-                    echohl WarningMsg|echomsg "Warning: Name " . sp_cfg.shortname . " used multiple times. All but first usage ignored."|echohl None
+                    call s:warn("Warning: Name " . sp_name . " used multiple times. All but first usage ignored.")
                 endif
             endif
-        endif
-        " Subproject must be selectable by at least 1 of shortname/longname
-        if !selectable
-            echohl WarningMsg|echomsg "Warning: Skipping invalid subproject config at index " . i . ": at least 1 name or shortname must be specified."|echohl None
-            let i = i + 1 | continue
-        endif
-        " Current config item not skipped: i.e., valid subproject.
-        call add(s:sp_cfg, {})
-        " Cache reference for convenience below...
-        let cfg = s:sp_cfg[-1]
-        " Add name, which was represented only as key of source object
-        cfg.name = sp_name
-        " Save original index, in case it's needed for reporting.
-        " TODO: Perhaps save a title string (e.g., `--longname, -shortname')
-        " for reporting purposes...
-        let cfg.orig_idx = i
-        let rootdir = call('finddir', s:sp_opt.get('root'))
-        if rootdir == ''
-            echohl WarningMsg|echomsg "Warning: Skipping invalid subproject config at index " . i . ": Couldn't locate project base. Make sure your cwd is within the project."|echohl None
-            " TODO: Don't set disabled - remove (or don't add) to list. Note
-            " that this currently is also set in cache_listfile...
-            let cfg.disabled = 1
-            let i = i + 1 | continue
-        endif
-        " Save full path of rootdir.
-        let cfg.rootdir = s:canonicalize_path(rootdir, '')
-        " Build cache, but don't force refresh.
-        call s:cache_listfile(cfg, 0)
-        let cfg_idx = cfg_idx + 1 " Keep up with sp_idx
-        let i = i + 1 " Keep up with original idx
+            if has_key(sp_raw, 'shortname')
+                if (sp_raw.shortname !~ '^[a-zA-Z0-9_]$')
+                    call s:warn("Ignoring invalid shortname `" . sp_raw.shortname
+                        \. "': must be single character matching [a-zA-Z0-9_].")
+                else
+                    if !has_key(s:shortnames, sp_raw.shortname)
+                        let s:shortnames[sp_raw.shortname] = cfg_idx
+                    else
+                        call s:warn("Warning: Name " . sp_raw.shortname . " used multiple times. All but first usage ignored.")
+                    endif
+                endif
+            endif
+            " Don't commit to adding to s:sp_cfg[] yet...
+            let sp_cfg = {}
+            " Add name, which was represented only as key of source object
+            sp_cfg.name = sp_name
+            " Save original index, in case it's needed for reporting.
+            " TODO: Perhaps save a title string (e.g., `--longname, -shortname')
+            " for reporting purposes...
+            let sp_cfg.orig_idx = i
+            let sp_cfg.rootdir = call('finddir', sp_opt.get('root'))
+            if rootdir == ''
+                throw "Warning: Skipping invalid subproject config at index " . i . ": Couldn't locate project base. Make sure your cwd is within the project."
+            endif
+            " Save full path of rootdir.
+            let sp_cfg.rootdir = s:canonicalize_path(sp_cfg.rootdir, '')
+            " Build cache, but don't force refresh.
+            call s:cache_listfile(sp_cfg, 0)
+            " Current config item not skipped: i.e., valid subproject.
+            call add(s:sp_cfg, sp_cfg)
+            call add(s:sp_opt, sp_opt)
+            let cfg_idx = cfg_idx + 1 " Keep up with sp_idx
+        catch
+            " Invalid subproject
+            call s:warn("Warning: Skipping invalid subproject config at index " . i . ": " . v:exception)
+            " TODO: Decide on disabled. Perhaps just remove... But consider
+            " fact that disabling might be required on a refresh...
+            let sp_cfg.disabled = 1
+        finally
+            let i = i + 1 " Keep up with original idx
+        endtry
     endfor
     call sf.destroy()
     " If no valid subprojects, no point in continuing...
-    if !len(s:sp_cfg)
+    if empty(s:sp_cfg)
         throw "No valid subprojects. :help prack-config"
     endif
+    " TODO: Perhaps refactor some of this into function.
     " Process the long options to determine the portions required for
     " uniqueness.
     call sort(longnames)
@@ -363,169 +393,6 @@ fu! s:process_cfg(p_name)
         call add(s:longnames, {'name': longnames[i], 're': re, 'idx': lname_to_index[longnames[i]]})
         let i = i + 1
     endwhile
-    "echo "Config:"
-    "echo s:sp_cfg
-    "echo "longnames:"
-    "echo s:longnames
-    "echo "shortnames:"
-    "echo s:shortnames
-    let g:shortnames = s:shortnames
-
-    return
-    " UNDER CONSTRUCTION!!!!! Pick up here...
-    " Verify required options!!!!!!!
-    " TODO: This one is mandatory at sp level.
-    if !has_key(sp_cfg, 'root')
-        echohl WarningMsg|echomsg "Warning: Skipping invalid subproject config at index " . i . ": no `root' pattern specified."|echohl None
-        let i = i + 1 | continue
-    endif
-    " TODO: This one could be set higher.
-    if !has_key(sp_cfg, 'find')
-        echohl WarningMsg|echomsg "Warning: Skipping invalid subproject config at index " . i . ": no `find' string specified."|echohl None
-        let i = i + 1 | continue
-    endif
-endfu
-fu! s:process_cfg_old()
-    " Determine basename of files used to hold lists of project files.
-    if exists('g:prack_listfile') && g:prack_listfile != ''
-        let s:listfile = g:prack_listfile
-    elseif
-        let s:listfile = 'prack-files.list'
-    endif
-
-    if !len(g:prack_config)
-        " TODO: Consider throwing exception here.
-        echoerr "Must define at least one project module within g:prack_submodule_cfg"
-        return
-    endif
-    " Build snapshot of global config until re-initialization.
-    let s:sp_cfg = []
-    " Short (single-char) names stored in a hash
-    " Long names stored in sorted array of patterns employing \%[...]
-    let s:shortnames = {}
-    let longnames = []
-    let lname_to_index = {}
-    let ln = len(g:prack_submodule_cfg)
-    let i = 0
-    " Note: Index into s:sp_cfg (i.e., valid configs only)
-    let cfg_idx = 0
-    let sf = s:sf_create()
-    while i < ln
-        let cfg = g:prack_submodule_cfg[i]
-        if !has_key(cfg, 'root')
-            echohl WarningMsg|echomsg "Warning: Skipping invalid subproject config at index " . i . ": no `root' pattern specified."|echohl None
-            let i = i + 1 | continue
-        endif
-        if !has_key(cfg, 'find')
-            echohl WarningMsg|echomsg "Warning: Skipping invalid subproject config at index " . i . ": no `find' string specified."|echohl None
-            let i = i + 1 | continue
-        endif
-        let selectable = 0
-        " TODO: Probably require valid name, since we sometimes expect one.
-        if has_key(cfg, 'name')
-            " TODO: Don't hardcode these patterns...
-            if (cfg.name !~ '^[a-zA-Z0-9_]\+$')
-                echohl WarningMsg|echomsg "Ignoring invalid (long) name `" . cfg.name|echohl None
-                            \. "': must be sequence of characters matching [a-zA-Z0-9_]."
-            else
-                if !has_key(lname_to_index, cfg.name)
-                    let selectable = 1
-                    let lname_to_index[cfg.name] = cfg_idx
-                    call add(longnames, cfg.name)
-                else
-                    echohl WarningMsg|echomsg "Warning: Name " . cfg.name . " used multiple times. All but first usage ignored."|echohl None
-                endif
-            endif
-        endif
-        if has_key(cfg, 'shortname')
-            if (cfg.shortname !~ '^[a-zA-Z0-9_]$')
-                echohl WarningMsg|echomsg "Ignoring invalid shortname `" . cfg.shortname|echohl None
-                            \. "': must be single character matching [a-zA-Z0-9_]."
-            else
-                if !has_key(s:shortnames, cfg.shortname)
-                    let selectable = 1
-                    let s:shortnames[cfg.shortname] = cfg_idx
-                else
-                    echohl WarningMsg|echomsg "Warning: Name " . cfg.shortname . " used multiple times. All but first usage ignored."|echohl None
-                endif
-            endif
-        endif
-        " Subproject must be selectable by at least 1 of shortname/longname
-        if !selectable
-            echohl WarningMsg|echomsg "Warning: Skipping invalid subproject config at index " . i . ": at least 1 name or shortname must be specified."|echohl None
-            let i = i + 1 | continue
-        endif
-        " Current config item not skipped: i.e., valid subproject.
-        call add(s:sp_cfg, deepcopy(cfg, 1))
-        let cache_cfg = s:sp_cfg[-1]
-        " Save original index, in case it's needed for reporting.
-        " TODO: Perhaps save a title string (e.g., `--longname, -shortname')
-        " for reporting purposes...
-        let cache_cfg.orig_idx = i
-        let rootdir = call('finddir', cfg.root)
-        if rootdir == ''
-            echohl WarningMsg|echomsg "Warning: Skipping invalid subproject config at index " . i . ": Couldn't locate project base. Make sure your cwd is within the project."|echohl None
-            let cache_cfg.disabled = 1
-            let i = i + 1 | continue
-        endif
-        " Save full path of rootdir.
-        let cache_cfg.rootdir = s:canonicalize_path(rootdir, '')
-        " Build cache, but don't force refresh.
-        call s:cache_listfile(cache_cfg, 0)
-        let cfg_idx = cfg_idx + 1
-        let i = i + 1
-    endwhile
-    call sf.destroy()
-    " If no valid subprojects, no point in continuing...
-    if !len(s:sp_cfg)
-        throw "No valid subprojects. :help prack-config"
-    endif
-    " Process the long options to determine the portions required for
-    " uniqueness.
-    call sort(longnames)
-    let ln = len(longnames)
-    let i = 1
-    let reqs = [matchstr(longnames[0], '^.')]
-    while i < ln
-        " Get common portion + 1 char (if possible)
-        let ml = matchlist(longnames[i], '\(\%[' . longnames[i-1] . ']\)\(.\)\?')
-        let [cmn, nxt] = ml[1:2]
-        " Is it possible we need to lengthen previous req?
-        if len(cmn) >= len(reqs[i-1])
-            " Can we lengthen previous req?
-            if len(reqs[i-1]) < len(longnames[i-1])
-                " Set to common portion + 1 char (if possible)
-                let reqs[i-1] = matchstr(longnames[i-1], cmn . '.\?')
-            endif
-        endif
-        " Take only as much of current as is required for uniqueness:
-        " namely, common portion + 1 char.
-        call add(reqs, cmn . nxt)
-        let i = i + 1
-    endwhile
-    " Build an array of patterns and corresponding indices.
-    " Note: Arrays reqs and longnames are parallel, and original indices can
-    " be looked up in lname_to_index.
-    let s:longnames = []
-    let i = 0
-    while i < ln
-        let re = reqs[i]
-        " Is the long name longer than the required portion?
-        if len(longnames[i]) > len(reqs[i])
-            " Append the optional part within \%[...]
-            let re .= '\%[' . longnames[i][len(reqs[i]):] . ']'
-        endif
-        call add(s:longnames, {'name': longnames[i], 're': re, 'idx': lname_to_index[longnames[i]]})
-        let i = i + 1
-    endwhile
-    "echo "Config:"
-    "echo s:sp_cfg
-    "echo "longnames:"
-    "echo s:longnames
-    "echo "shortnames:"
-    "echo s:shortnames
-    let g:shortnames = s:shortnames
-
 endfu
 
 " Return s:sp_cfg index corresponding to input short/long option name (or
@@ -584,62 +451,48 @@ endfu
 " Return: The canonicalized list.
 " TODO: Have this done once at Refresh and initial load and saved in a
 " persistent structure.
+" Exceptions: Leave for caller.
 fu! s:cache_listfile(cache_cfg, force_refresh)
-    let success = 0
     " See whether the listfile exists and is readable.
     let listfile_path = a:cache_cfg.rootdir . s:listfile
     let listfile_path_found = findfile(s:listfile, a:cache_cfg.rootdir)
-    " TODO: Rely upon higher-level try/catch?
-    let sf = s:sf_create()
-    try
-        " Both listfile generation and file canonicalization require us to be
-        " in root dir.
-        call sf.pushd(a:cache_cfg.rootdir)
-        " Do we need to create/update the listfile?
-        if listfile_path_found == '' || a:force_refresh
-            let v:errmsg = ''
-            " Note: silent avoids the annoying 'Hit enter' prompt.
-            exe 'silent !' . a:cache_cfg.find . ' >' . s:listfile
-            if v:errmsg != ''
-                throw "Encountered error attempting to build listfile `" . listfile_path . "' for subproject "
-                    \. a:cache_cfg.name . ": " . v:errmsg . ". Disabling subproject."
-            endif
+    " Both listfile generation and file canonicalization require us to be
+    " in root dir.
+    call sf.pushd(a:cache_cfg.rootdir)
+    " Do we need to create/update the listfile?
+    if listfile_path_found == '' || a:force_refresh
+        let v:errmsg = ''
+        " Note: silent avoids the annoying 'Hit enter' prompt.
+        exe 'silent !' . a:cache_cfg.find . ' >' . s:listfile
+        if v:errmsg != ''
+            throw "Encountered error attempting to build listfile `" . listfile_path . "' for subproject "
+                \. a:cache_cfg.name . ": " . v:errmsg . ". Disabling subproject."
         endif
-        " If here, we expect to have a file to read.
-        if !filereadable(listfile_path)
-            throw "Couldn't open listfile `" . listfile_path . "' for subproject "
-                \. a:cache_cfg.name . ". Disabling subproject."
-        endif
-        let files_raw = readfile(listfile_path)
-        " Note: We must set 'shellslash' for canonicalization.
-        call sf.setopt('shellslash', 1, {'boolean': 1})
-        " Build canonicalized list within loop.
-        let files = []
-        for file_raw in files_raw
-            "echo "Before: " file_raw
-            let file_raw = s:canonicalize_path(file_raw, a:cache_cfg.rootdir)
-            "echo "After: " file_raw
-            "echo "rootdir: " a:cache_cfg.rootdir
-            " Add canonical name to list.
-            call add(files, file_raw)
-        endfor
-        " TODO: Make this optional so we can skip if user's find or whatever
-        " ensures sorted.
-        " TODO: Should we uniquify? Doing so could permit some optimizations
-        " (e.g., find_insert_idx).
-        call sort(files)
-        let a:cache_cfg.files = files
-        "echo s:sp_cfg
-        "echo a:cache_cfg
-        let success = 1
-    catch
-        call s:warn(v:exception)
-        let a:cache_cfg.disabled = 1
-        let a:cache_cfg.files = []
-    finally
-        call sf.destroy()
-    endtry
-    return success
+    endif
+    " If here, we expect to have a file to read.
+    if !filereadable(listfile_path)
+        throw "Couldn't open listfile `" . listfile_path . "' for subproject "
+            \. a:cache_cfg.name . ". Disabling subproject."
+    endif
+    let files_raw = readfile(listfile_path)
+    " Note: We must set 'shellslash' for canonicalization.
+    call sf.setopt('shellslash', 1, {'boolean': 1})
+    " Build canonicalized list within loop.
+    let files = []
+    for file_raw in files_raw
+        "echo "Before: " file_raw
+        let file_raw = s:canonicalize_path(file_raw, a:cache_cfg.rootdir)
+        "echo "After: " file_raw
+        "echo "rootdir: " a:cache_cfg.rootdir
+        " Add canonical name to list.
+        call add(files, file_raw)
+    endfor
+    " TODO: Make this optional so we can skip if user's find or whatever
+    " ensures sorted.
+    " TODO: Should we uniquify? Doing so could permit some optimizations
+    " (e.g., find_insert_idx).
+    call sort(files)
+    let a:cache_cfg.files = files
 endfu
 " <<<
 " >>> Functions pertaining to file processing
@@ -1953,13 +1806,16 @@ endfu
 " [L]Grf and [LGrd] ignore listfiles, anchoring their search from the
 " current file's dir and the cwd, respectively.
 "
-com! PrackStart call <SID>start()
-com! PrackStop call <SID>stop()
+" TODO: -bang for refresh and add completion maybe... Hmmm... Maybe not,
+" because this would entail reading some config at Vim startup...
+com! -nargs=1 PrackStart call s:open(<f-args>)
+com! PrackStop call s:stop()
 com! -nargs=? Refresh call <SID>refresh(<q-args>)
 
 com! -bang -nargs=* Grep  call s:grep('Grep', <q-bang>, <f-args>)
-com! -bang -nargs=* Gr  call <SID>ack('Gr', <q-bang>, <f-args>)
-com! -bang -nargs=* LGr  call <SID>ack('LGr', <q-bang>, <f-args>)
+com! -bang -nargs=* Lgrep  call s:grep('Lgrep', <q-bang>, <f-args>)
+com! -bang -nargs=* Grepadd  call s:grep('Grepadd', <q-bang>, <f-args>)
+com! -bang -nargs=* Lgrepadd  call s:grep('Lgrepadd', <q-bang>, <f-args>)
 
 com! -bang -nargs=1 -complete=customlist,<SID>complete_filenames Split call s:parse_edit_cmdline('Split', <q-bang>, <f-args>)
 com! -bang -nargs=1 -complete=customlist,<SID>complete_filenames Edit call s:parse_edit_cmdline('Edit', <q-bang>, <f-args>)
