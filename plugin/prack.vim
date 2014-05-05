@@ -1,6 +1,6 @@
 
 " TODO: Move this elsewhere...
-let g:prack_config = {
+let g:fps_config = {
     \'listfile': 'files.list',
     \'maxgrepsize': 4095,
     \'grepprg': 'grep -n $* /dev/null',
@@ -52,7 +52,7 @@ fu! s:open(p_name)
     " project.
     if exists('s:started')
         " Subsequent start implies stop.
-        call s:stop()
+        call s:close()
     endif
     try
         call s:process_cfg(a:p_name)
@@ -64,11 +64,11 @@ fu! s:open(p_name)
         " TODO: Is this necessary? We haven't done any setup yet... We may
         " have set some static vars (e.g., s:longnames/s:shortnames), but
         " they'd be set next time...
-        call s:stop()
+        call s:close()
     endtry
 endfu
 
-fu! s:stop()
+fu! s:close()
     unlet! s:started
     " TODO: General cleanup. E.g., delete commands.
 endfu
@@ -249,19 +249,19 @@ endfu
 "   Note: Array is sorted by longname.
 fu! s:process_cfg(p_name)
     " Make sure there's at least 1 project
-    if !has_key(g:prack_config, 'projects')
+    if !has_key(g:fps_config, 'projects')
         throw "No projects defined."
     endif
-    if type(g:prack_config.projects) != 4
+    if type(g:fps_config.projects) != 4
         throw "Invalid project definition. Must be Dictionary."
     endif
     " Does the named project exist?
-    if !has_key(g:prack_config.projects, a:p_name)
-        throw "No configuration found. :help TODO prack_config???"
+    if !has_key(g:fps_config.projects, a:p_name)
+        throw "No configuration found. :help TODO fps_config???"
     endif
     " TODO: build_opts will throw on (eg) missing required args - handle
     " somehow...
-    let p_raw = g:prack_config.projects[a:p_name]
+    let p_raw = g:fps_config.projects[a:p_name]
     " Make sure there's at least 1 subproject
     if !has_key(p_raw, 'subprojects')
         throw "No subprojects defined for project " . a:p_name
@@ -271,7 +271,7 @@ fu! s:process_cfg(p_name)
     endif
     " Note: We don't need to preserve g_opt with s:var, as it will be
     " accessible via prototype of project-level opt.
-    let g_opt = s:build_opts(g:prack_config, 0, {}) " TODO: No need to pass global...
+    let g_opt = s:build_opts(g:fps_config, 0, {}) " TODO: No need to pass global...
     let s:p_opt = s:build_opts(p_raw, 1, g_opt)
 
     " Build snapshot of project opt/cfg until re-initialization.
@@ -343,7 +343,7 @@ fu! s:process_cfg(p_name)
     endfor
     " If no valid subprojects, no point in continuing...
     if empty(s:sp_cfg)
-        throw "No valid subprojects. :help prack-config"
+        throw "No valid subprojects. :help fps-config"
     endif
     " TODO: Perhaps refactor some of this into function.
     " Process the long options to determine the portions required for
@@ -418,9 +418,9 @@ endfu
 fu! s:get_opt(sp_idx, opt, default_to_vim)
     if has_key(s:sp_cfg[a:sp_idx], a:opt)
         return s:sp_cfg[a:sp_idx][a:opt]
-    elseif exists('g:prack_' . a:opt)
+    elseif exists('g:fps_' . a:opt)
         " TODO: Revisit this when plugin global options are reworked.
-        return g:prack_{a:opt}
+        return g:fps_{a:opt}
     elseif a:default_to_vim
         " Default to the Vim option value in effect for current window.
         return getwinvar(0, '&' . a:opt)
@@ -1022,25 +1022,25 @@ fu! s:extract_opts(optstr)
     endfor
     return opts
 endfu
-" Break input command line into 2 pieces: 1) a string containing the prack
+" Break input command line into 2 pieces: 1) a string containing the fps
 " options, and 2) everything else.
 " Returns a Dictionary with the following keys:
 "   opt
 "     List of all short and long options, in which long options are
 "     represented as 'l:loptname', and short options as 's:soptname'.
 "   rem
-"     command line remaining after prack option removal
+"     command line remaining after fps option removal
 fu! s:parse_refresh_cmdline(cmdline)
     " Example valid forms: (Note that Cmd will already have been stripped.)
     "   Cmd --
     "   Cmd --abcd -efg
     "   Cmd --abcd -efg --
     "   Cmd --abcd -efg -- --ack --options
-    "   Cmd --abcd -efg non prack options
-    "   Cmd non prack options
+    "   Cmd --abcd -efg non fps options
+    "   Cmd non fps options
     " 3 part regex, 2 of them capturing:
-    "   1. Sequence of long/short prack opts (optional, captured)
-    "   2. `--' Separating prack opts from anything that follows (optional)
+    "   1. Sequence of long/short fps opts (optional, captured)
+    "   2. `--' Separating fps opts from anything that follows (optional)
     "   3. Everything else (possibly empty, captured)
     " Test Note: Tested on 28Dec2013
     " TODO: Bug in new Vim regex engine precludes use. Need to force old,
@@ -1733,8 +1733,11 @@ endfu
 "
 " TODO: -bang for refresh and add completion maybe... Hmmm... Maybe not,
 " because this would entail reading some config at Vim startup...
-com! -nargs=1 PrackStart call s:open(<f-args>)
-com! PrackStop call s:stop()
+com! -nargs=1 FPSOpen call s:open(<f-args>)
+com! FPSClose call s:close()
+" TODO: Move all but load command into load function.
+" Avoid: Better for Grep et al. not to exist than to get errors trying to run
+" it too soon.
 com! -nargs=? Refresh call <SID>refresh(<q-args>)
 
 com! -bang -nargs=* Grep  call s:grep('Grep', <q-bang>, <f-args>)
@@ -1770,7 +1773,7 @@ com! -nargs=1 -complete=custom,Complete_custom C echo "foo"
 
 " >>> Running notes
 
-" Prack:< Get rid of last vestiges of this name: e.g., g:prack_config should
+" Prack:< Get rid of last vestiges of this name: e.g., g:fps_config should
 " bear new name (TBD).
 " 
 " Commenting-options:< I don't like not being able to comment options in the big
