@@ -1,13 +1,12 @@
-"let g:prack_grepprg = grep -n $* /dev/null
-"let g:prack_grepformat = %f:%l:%m,%f:%l%m,%f  %l%m
 
 " TODO: Move this elsewhere...
 let g:prack_config = {
     \'listfile': 'files.list',
-    \'maxgrepsize': 50000,
+    \'maxgrepsize': 4095,
+    \'grepprg': 'grep -n $* /dev/null',
+    \'grepformat': '%f:%l:%m,%f:%l%m,%f  %l%m',
     \'projects': {
         \'asec': {
-            \'foo': 'bar',
             \'subprojects': {
                 \'php': {
                     \'shortname': 'p',
@@ -17,8 +16,6 @@ let g:prack_config = {
                         \.' -prune -false \) -o -iname ''*.php'''
                 \},
                 \'js': {
-                    \'grepprg': 'Ack',
-                    \'maxgrepsize': 1000,
                     \'shortname': 'j',
                     \'root': ['src/public', ';asec'],
                     \'find': 'find . \( \( '
@@ -1426,7 +1423,7 @@ fu! s:get_unconstrained_pspecs()
     let sp_idx = 0
     let ret = []
     for cfg in s:sp_cfg
-        call add(ret, {idx: sp_idx, files: cfg.files})
+        call add(ret, {'idx': sp_idx, 'files': cfg.files})
         let sp_idx += 1
     endfor
     return ret
@@ -1769,5 +1766,160 @@ fu! Complete_custom(A, L, P)
 endfu
 com! -nargs=1 -complete=customlist,Complete_customlist CL echo "foo"
 com! -nargs=1 -complete=custom,Complete_custom C echo "foo"
+" <<<
+
+" >>> Running notes
+
+" Prack:< Get rid of last vestiges of this name: e.g., g:prack_config should
+" bear new name (TBD).
+" 
+" Commenting-options:< I don't like not being able to comment options in the big
+" option dict.
+" Note: Vim provides no way to insert comments within a multi-line Dictionary
+" initialization. Of course, users could define the dictionary however they
+" like (e.g., breaking up into many assignments), but the standard way will
+" probably be to start with a template from the help and tailor it.
+" Possible-approaches:<
+" 	1. A valid key cannot begin with a `#' sign, so you could "comment out"
+" 	   options without removing them like so...
+" 	   {
+"             \'listfile': 'files.list',
+"             \'#grepprg': 'leaving this one here but commenting...'
+"        \}
+" 	2. Use some sort of parsed .ini file, rather than a global Dictionary, to
+" 	   specify options.
+" 
+" Listfiles:< Long-term, I'm thinking it would be nice to permit user to have
+" the listfiles stored in a tempdir (e.g., $TMP, $TEMP, etc...), with names
+" created from project and subproject, rather than having to have them clutter
+" up his work tree.
+" Could have 'listfile' option (may rename) support some sort of special
+" symbolic vars, which facilitate naming the file and/or path.
+" Note: See note on Listfile-handling earlier...
+" 
+" Add-options:<
+" 'more' - When a grep engenders multiple greps, it's annoying to have to keep
+" hitting space.
+" 
+" Disabled-subprojects:< Do I want to keep this concept? Or simply ensure that
+" s:sp_cfg never contains entries that would be disabled.
+" Note: This is easy to ensure at load time, but what about after that? E.g., if
+" a find command fails...
+" Caveat: Could delete from list at that point, but consider that there may be
+" several other data structures, which rely upon specific subproject indices.
+" Would need to adjust all of them. Simpler approach may be simply to set
+" disabled for the subproject, but then I'd need to be sure to check this
+" everywhere...
+" Note: Currently, this isn't really handled at all...
+" Question: Would it make more sense to store everything in a hash rather than
+" an List? Look at how sp_cfg[] is used, and see what the implications would be.
+" 
+" Load-not-Open:< Originally, it was Start, but now that I'm passing a project
+" name, I'm thinking Load makes more sense.
+" 
+" Load-vs-Refresh:< I'm thinking there could be some overlap here: option
+" processing, list file caching, etc... Need to decide what should be done when.
+" Note: I'm thinking it might make sense to have a -bang argument at least for
+" Load, which would force refreshing file list. Might even be able to do without
+" a separate Refresh command. Could just have...
+" Load <project>   " loads named project
+" Load! <project>  " loads named project, forcing file refresh
+" Load             " re-loads current project
+" Load!            " re-loads current project, forcing file refresh
+" 
+" Comment...Comment...Comment!!!!:< Lots of code written, not much commenting
+" the past few days...
+" 
+" Idea:< Instead of giving error when one of the Edit commands gets more than 1
+" file match, what about presenting the list to user and allowing him to
+" downselect somehow? Of course, this is conceptually what we do with
+" completion, but still... I don't really like the fact that we leave the spspec
+" at the head of a file, and nothing really is done with it when the command is
+" executed. (See Big idea further down...)
+" Note: Even if I don't add the down-selection, I need to provide a way for user
+" to interrupt and get immediately back to the starting point, without cycling
+" through all possible matches.
+" Question: Does Vim provide a mechanism for interrupting the completion? No. In
+" fact, there's no autocommand event that would let us know when completion is
+" terminated (as there is for insert mode completion).
+" Note: There is a way to alter the history, though, so if I can know when the
+" completion has terminated abnormally (e.g., due to CTRL-C), I could add the
+" original command line (e.g., the one on which completion was attempted) after
+" removing the final one (containing whatever happened to be the last path
+" completed).
+" Rationale: Canceling completion typically means user made a mistake with the
+" pspec/glob and wants to alter it somehow.
+" :help histadd histdel
+" Autocommands:< CmdwinEnter, CmdwinLeave, CompleteDone 
+" NO!!!:< Those are for cmdline *window* and *insert-mode* completion. Not what
+" I need...
+" Conclusion:< No good way to do this; perhaps just provide a convenient cmdline
+" mapping or two permitting user easily to recover the last cmdline on which
+" edit completion was attempted. Could be both normal mode mappings (that bring
+" up the command line), and mappings for when command line has already been
+" entered.
+" TODO: Flesh out the commands...
+" 
+" Issue: Completion works here...
+" :Edit --js --php:<TAB>
+" ...or even here...
+" :Edit --js  <TAB>
+" ...even though :Edit is listed as -nargs=1.
+" Look at this closely.
+" 
+" Big-idea!!!!:< Solves the issues outlined above, while harmonizing the 2 sets
+" of commands (edit/grep) in a way that will permit consolidation of
+" command-line handling!!!
+" Idea:<Make all the edit commands work with quickfix/location lists too
+" whenever there are more than a single match! Eg,
+" 	:Edit --js:**/*Panel.js
+" ...would load all <...>Panel.js files into the quickfix list.
+" ...additionally, it would :edit the first one in the list.
+" Question: If there's only 1 in the list, should we add it to quickfix list, or
+" should the default be simply to edit according to the specific edit command
+" (e.g., e, sp) when there's only 1 match? I'm thinking this would make sense,
+" as it would allow for the original use-case unmodified: e.g., use these
+" commands when you want to edit a single file, but don't know its path, and so
+" want to use the edit commands' completion to find it first.
+" 	Bang:< 2 possible uses for bang:
+" 	1. Inhibit opening first file when there are multiple matches: i.e.,
+" 	   command used only to get the file list into the qf/ll.
+" 	2. If only 1 match, still add to qf/ll.
+" 	Hmmm...:< Both use cases could be supported by having the meaning of !
+" 	change as a function of # of matches: i.e., single match means use #2,
+" 	multiple matches means use #1.
+" 	Drawback:< Doesn't support the following use case: I want a single match
+" 	to go to qf/ll, but if there happen to be multiple, I want the normal
+" 	behavior: i.e., jump to first *and* populate quickfix.
+" 	Note: This seems to be a contrived use case. If user is using bang,
+" 	chances are it's because he's wanting to build up a list of files for
+" 	working with later; in fact, if he's doing this when there's only a single
+" 	match, chances are he's using the :Editadd or :Splitadd form. He probably
+" 	knows to expect only 1 match; perhaps he's already gotten it via
+" 	completion. The point is, though bang is used in 2 slightly different ways
+" 	here, there's probably not much overlap in the use cases involved.
+" 	Heuristic:< Could think of bang as emphasizing the adding to list over
+" 	edit: e.g., if there happens to be only 1 match, put it in the list
+" 	because that was the whole point of the edit command.
+" Aside: In the words of the story writer from Elf, "I'm psyched out of my
+" *mind* about this!"
+" Implementation:< Shouldn't be hard at all. Re-uses mostly existing stuff...
+" 
+" Auto-set-options:< I'm thinking that if s:opt_cfg contained a bit more
+" information on options with corresponding Vim options, I could have them set
+" automatically without the client code needing to contain much logic: e.g.,
+" given a stack frame "sf" and an option "opt", could set something like grepprg
+" with the following:
+" opt.set_in_sf('grepprg', sf)
+" ...or
+" sf.setopt_obj('grepprg', opt)
+" Rationale: The wrapper would first look at the opt object to determine whether
+" the Vim option is being overridden. If so, it would look at the extra info in
+" s:opt_cfg to determine how to set (e.g., is it a boolean or string opt?) If
+" not overridden by user config, it would know simply to leave it alone.
+" Important Note: Look at sf."  before implementing anything. Try not to
+" duplicate logic...
+" Note: Currently, s:opt_cfg 'vim' key is just the name of a Vim option;
+" however, it would need to be an object more info: at least name and type.
 " <<<
 " vim:ts=4:sw=4:et:fdm=marker:fmr=>>>,<<<
