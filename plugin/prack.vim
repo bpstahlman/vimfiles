@@ -1155,7 +1155,6 @@ fu! s:get_files_for_spec(spec, partial, throw)
         " No subproject constraints
         let sp_idxs = range(len(s:sp_cfg))
     endif
-    let files = []
     for sp_idx in sp_idxs
         let fs = s:get_matching_files(s:sp_cfg[sp_idx], opt.glob, a:partial)
         " Accumulate subproject-specific object.
@@ -1165,6 +1164,7 @@ fu! s:get_files_for_spec(spec, partial, throw)
 endfu
 " TODO: Could probably combine with parse_refresh_cmdline with a bit of
 " refactoring.
+" TODO: Decide whether to keep separate ones, or use same for both...
 fu! s:parse_grep_cmdline(args)
     let argidx = 0 " Will point to first non-plugin arg at loop termination
     " Command line can contain multiple specs; simply concatenate the arrays
@@ -1240,6 +1240,8 @@ endfu
 " Grepa => grepadd
 " Lg => lgrep
 " Lgrepa => lgrepadd
+" TODO: I'm thinking this isn't needed, since we always pass canonical form
+" from command to implementing function.
 fu! s:canonicalize_grep_cmd(cmd)
     if a:cmd =~ '\<Gr\%[ep]\>'
         return 'grep'
@@ -1445,6 +1447,8 @@ fu! s:grep(cmd, bang, ...)
         " Turn the array of args into escaped string.
         let grepargs = s:convert_arg_list_to_string(args, 0)
         " Convert plugin grep command into Vim grep command in canonical form.
+        " TODO: I'm thinking this call is unnecessary: a:cmd will always be in
+        " canonical form.
         let grepcmd = s:canonicalize_grep_cmd(a:cmd)
         " Is this grep command naturally adding?
         let isadd = grepcmd[-3 : ] == 'add'
@@ -1490,6 +1494,10 @@ fu! s:grep(cmd, bang, ...)
                 let grepadd = 'add'
             endif
             
+            " TODO: Possibly make 'more' a user-configurable option, but in
+            " any case, make sure that if 'more' is going to be set at all,
+            " it's set only for the final grep (when xargification has
+            " occurred).
             " Run [l]grep[add] with appropriate args.
             " TODO: Append escaped, joined args...
             exe grepcmd . grepadd . a:bang . ' ' . grepargs . pspec.files
@@ -1504,6 +1512,51 @@ fu! s:grep(cmd, bang, ...)
         call sf.destroy()
     endtry
 endfu
+" UNDER CONSTRUCTION!!!!!
+fu! s:edit(cmd, bang, ...)
+    let cmd = tolower(a:cmd)
+    let editcmd = substitute(cmd, 'l\?\(.*\)\%(add\)\?', '\1', '')
+    let sf = s:sf_create()
+    try
+        " Parse cmdline into an array of specs
+        " TODO: Decide whether to use command cmdline parser for both grep and
+        " edit cases?
+        let [pspecs, args] = s:parse_grep_cmdline(a:000)
+        let editcmd = tolower(a:cmd)
+        if !empty(args)
+            throw "Non pspec arg supplied to " . a:cmd . " command."
+        endif
+        " TODO: Question: Is it possible for pspecs to be empty at this point
+        " (i.e., given -nargs=+, and given that we apparently haven't aborted
+        " on bad spec)?
+        if empty(pspecs)
+            throw "No file(s) found."
+        endif
+        let pspecs = s:sort_and_combine_pspecs(a:pspecs)
+        let sp_cnt = len(pspecs)
+        let add_all = sp_cnt > 1 || a:bang
+        let edit_first = sp_cnt == 1 || !a:bang
+        let sp_idx = 0
+        for pspec in pspecs
+            let sp_cfg = s:sp_cfg[pspec.idx]
+            call sf.pushd(cfg.rootdir)
+            " In manner analogous to grep, use the following, taking into
+            " account bang, the capitalized command name actually used, and
+            " whether this is final sp...
+            " cexpr, lexpr, caddexpr, laddexpr
+
+            let sp_idx += 1
+        endfor
+
+    " TODO: What's the rationale for catching only Vim(echoerr) here? What
+    " about Vim internal errors?
+    catch /Vim(echoerr)/
+        echohl ErrorMsg|echomsg v:exception|echohl None
+    finally
+        call sf.destroy()
+    endtry
+endfu
+
 " <<<
 " >>> Functions for general utility
 " Calculate and return the bracket (defined as [start_index, end_index]) of
@@ -1753,8 +1806,8 @@ com! -bang -nargs=* Lgrep  call s:grep('Lgrep', <q-bang>, <f-args>)
 com! -bang -nargs=* Grepadd  call s:grep('Grepadd', <q-bang>, <f-args>)
 com! -bang -nargs=* Lgrepadd  call s:grep('Lgrepadd', <q-bang>, <f-args>)
 
-com! -bang -nargs=1 -complete=customlist,<SID>complete_filenames Split call s:parse_edit_cmdline('Split', <q-bang>, <f-args>)
-com! -bang -nargs=1 -complete=customlist,<SID>complete_filenames Edit call s:parse_edit_cmdline('Edit', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Split call s:edit('Split', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Edit call s:edit('Edit', <q-bang>, <f-args>)
 
 com! -nargs=* -complete=customlist,<SID>complete_filenames Spq call FA(<q-args>)
 " Quoted args play...
