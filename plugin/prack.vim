@@ -1541,7 +1541,7 @@ fu! s:edit(cmd, bang, ...)
             let use_ll = cmd[0] == 'l'
             let is_adding = cmd[-3 : ] == 'add'
             let first_iter = 1
-            call sf.setopt('errorformat', '%f (%l)')
+            "call sf.setopt('errorformat', '%f(%l)')
             for pspec in pspecs
                 let sp_cfg = s:sp_cfg[pspec.idx]
                 " UNDER CONSTRUCTION!!!!!!!!!!!!!!!!!!!!!!!!
@@ -1561,10 +1561,14 @@ fu! s:edit(cmd, bang, ...)
                 " line number - use 1 or can I omit?
                 " TODO: Always use bang on the cexpr command to avoid jumping
                 " to file, which is handled later, if at all...
+                "set efm=%f(%l)
                 let addcmd = (use_ll ? 'l' : 'c') . (is_adding || !first_iter ? 'add' : '') . 'expr'
+                " TODO: sp_cfg is ref to s:sp_cfg!!!! Can't mutate like
+                " this... FIXME!!!
                 call map(sp_cfg.files, 'fnameescape(v:val) . " (1)"')
-                echomsg string(sp_cfg.files)
+                "echomsg string(sp_cfg.files)
                 exe addcmd . ' l:sp_cfg.files'
+                echomsg addcmd . ' l:sp_cfg.files'
                 echomsg "addcmd: " . addcmd
                 echomsg "efm: " . &efm
                 let first_iter = 0
