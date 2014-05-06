@@ -95,19 +95,27 @@ let s:opt_cfg = {
         \'type': 0,
         \'default': 50000
     \},
+    \'more': {
+        \'#TODO:': 'Decide whether to support more than true/false.',
+        \'minlvl': 0,
+        \'maxlvl': 2,
+        \'type': 0,
+        \'default': 0,
+        \'vim': {'name': 'grepprg', 'boolean': 0}
+    \},
     \'grepprg': {
         \'minlvl': 0,
         \'maxlvl': 2,
         \'type': 1,
         \'default': 'grep -n $* /dev/null',
-        \'vim': 'grepprg'
+        \'vim': {'name': 'grepprg', 'boolean': 0}
     \},
     \'grepformat': {
         \'minlvl': 0,
         \'maxlvl': 2,
         \'type': 1,
         \'default': '%f:%l:%m,%f:%l%m,%f  %l%m',
-        \'vim': 'grepformat'
+        \'vim': {'name': 'grepformat', 'boolean': 0}
     \},
     \'find': {
         \'minlvl': 0,
