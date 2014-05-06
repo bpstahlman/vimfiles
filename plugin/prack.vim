@@ -1515,14 +1515,12 @@ endfu
 " UNDER CONSTRUCTION!!!!!
 fu! s:edit(cmd, bang, ...)
     let cmd = tolower(a:cmd)
-    let editcmd = substitute(cmd, 'l\?\(.*\)\%(add\)\?', '\1', '')
     let sf = s:sf_create()
     try
         " Parse cmdline into an array of specs
         " TODO: Decide whether to use command cmdline parser for both grep and
         " edit cases?
         let [pspecs, args] = s:parse_grep_cmdline(a:000)
-        let editcmd = tolower(a:cmd)
         if !empty(args)
             throw "Non pspec arg supplied to " . a:cmd . " command."
         endif
@@ -1532,21 +1530,53 @@ fu! s:edit(cmd, bang, ...)
         if empty(pspecs)
             throw "No file(s) found."
         endif
-        let pspecs = s:sort_and_combine_pspecs(a:pspecs)
+        " Combine, sort, uniquify, etc... the pspecs list.
+        let pspecs = s:sort_and_combine_pspecs(pspecs)
         let sp_cnt = len(pspecs)
-        let add_all = sp_cnt > 1 || a:bang
-        let edit_first = sp_cnt == 1 || !a:bang
-        let sp_idx = 0
-        for pspec in pspecs
-            let sp_cfg = s:sp_cfg[pspec.idx]
-            call sf.pushd(cfg.rootdir)
-            " In manner analogous to grep, use the following, taking into
-            " account bang, the capitalized command name actually used, and
-            " whether this is final sp...
-            " cexpr, lexpr, caddexpr, laddexpr
-
-            let sp_idx += 1
-        endfor
+        " Determine whether we're in single or multi-file regime (bearing in
+        " mind that we've already determined pspecs is non-empty).
+        let cnt = sp_cnt > 1 ? 2 : len(pspecs[0].files)
+        " Will we be updating the qf/ll?
+        if cnt > 1 || a:bang
+            let use_ll = cmd[0] == 'l'
+            let is_adding = cmd[-3 : ] == 'add'
+            let first_iter = 1
+            call sf.setopt('errorformat', '%f (%l)')
+            for pspec in pspecs
+                let sp_cfg = s:sp_cfg[pspec.idx]
+                " UNDER CONSTRUCTION!!!!!!!!!!!!!!!!!!!!!!!!
+                " TODO: Understand implications of this for what gets added to
+                " qf list; seems that file displayed by clist is relative to
+                " the sp dir, but with nothing to indicate the sp, this may be
+                " problematic. Ah... Actually, I think an lcd may be getting
+                " used... See what's going on with pushd...
+                " TODO: I believe I may want to use the
+                " quickfix-directory-stack here: research!!!!!!
+                call sf.pushd(sp_cfg.rootdir)
+                " In manner analogous to grep, use the following, taking into
+                " account bang, the capitalized command name actually used, and
+                " whether this is first sp...
+                " cexpr, lexpr, caddexpr, laddexpr
+                " TODO: Need to set 'errorformat' - note that I won't have a
+                " line number - use 1 or can I omit?
+                " TODO: Always use bang on the cexpr command to avoid jumping
+                " to file, which is handled later, if at all...
+                let addcmd = (use_ll ? 'l' : 'c') . (is_adding || !first_iter ? 'add' : '') . 'expr'
+                call map(sp_cfg.files, 'fnameescape(v:val) . " (1)"')
+                echomsg string(sp_cfg.files)
+                exe addcmd . ' l:sp_cfg.files'
+                echomsg "addcmd: " . addcmd
+                echomsg "efm: " . &efm
+                let first_iter = 0
+            endfor
+        endif
+        " Will we be jumping to first match?
+        if cnt == 1 || !a:bang
+            " splitadd
+            " Determine Vim edit command corresponding to plugin command.
+            let editcmd = substitute(cmd, 'l\?\(\%(\%(add\)\@!.\)\+\).*', '\1', '')
+            exe editcmd . ' ' . fnameescape(l:pspecs[0].files[0])
+        endif
 
     " TODO: What's the rationale for catching only Vim(echoerr) here? What
     " about Vim internal errors?
@@ -1807,7 +1837,14 @@ com! -bang -nargs=* Grepadd  call s:grep('Grepadd', <q-bang>, <f-args>)
 com! -bang -nargs=* Lgrepadd  call s:grep('Lgrepadd', <q-bang>, <f-args>)
 
 com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Split call s:edit('Split', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Lsplit call s:edit('Lsplit', <q-bang>, <f-args>)
 com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Edit call s:edit('Edit', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Ledit call s:edit('Ledit', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Splitadd call s:edit('Splitadd', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Lsplitadd call s:edit('Lsplitadd', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Editadd call s:edit('Editadd', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Leditadd call s:edit('Leditadd', <q-bang>, <f-args>)
+
 
 com! -nargs=* -complete=customlist,<SID>complete_filenames Spq call FA(<q-args>)
 " Quoted args play...
