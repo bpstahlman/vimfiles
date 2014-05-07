@@ -1140,8 +1140,6 @@ endfu
 " Convert input spec to corresponding list of files.
 " TODO: More complete docs... E.g., document format somewhere.
 " [{sp_idx: <idx>, files: [<path>, ...]}, ...]
-" TODO: Need to support --php with no :<glob> following. Currently, the : is
-" mandatory.
 fu! s:get_files_for_spec(spec, partial, throw)
     let ret = []
     let opt = s:parse_spec(a:spec, a:throw)
@@ -1541,9 +1539,14 @@ fu! s:edit(cmd, bang, ...)
             let use_ll = cmd[0] == 'l'
             let is_adding = cmd[-3 : ] == 'add'
             let first_iter = 1
-            "call sf.setopt('errorformat', '%f(%l)')
+            call sf.setopt('errorformat', '%f')
             for pspec in pspecs
                 let sp_cfg = s:sp_cfg[pspec.idx]
+                " Note: As long as we're not going to be mutating (e.g., to
+                " map line numbers onto end of filename), we might as well
+                " skip this copy.
+                let files = pspec.files "pspec.files[:]
+                echomsg string(files)
                 " UNDER CONSTRUCTION!!!!!!!!!!!!!!!!!!!!!!!!
                 " TODO: Understand implications of this for what gets added to
                 " qf list; seems that file displayed by clist is relative to
@@ -1561,20 +1564,20 @@ fu! s:edit(cmd, bang, ...)
                 " line number - use 1 or can I omit?
                 " TODO: Always use bang on the cexpr command to avoid jumping
                 " to file, which is handled later, if at all...
-                "set efm=%f(%l)
+                " TODO: Understand implications: the add versions of [cl]expr
+                " don't support bang operator: they never jump...
                 let addcmd = (use_ll ? 'l' : 'c') . (is_adding || !first_iter ? 'add' : '') . 'expr'
-                " TODO: sp_cfg is ref to s:sp_cfg!!!! Can't mutate like
-                " this... FIXME!!!
-                call map(sp_cfg.files, 'fnameescape(v:val) . " (1)"')
-                "echomsg string(sp_cfg.files)
-                exe addcmd . ' l:sp_cfg.files'
-                echomsg addcmd . ' l:sp_cfg.files'
+                exe addcmd . ' files'
+                echomsg addcmd . ' files'
+                echomsg 'cwd: ' . getcwd()
                 echomsg "addcmd: " . addcmd
                 echomsg "efm: " . &efm
                 let first_iter = 0
             endfor
         endif
         " Will we be jumping to first match?
+        " TODO: Revisit this - perhaps rely more on cexpr et al. Also, figure
+        " out why split commands are messing up cwd and how to fix...
         if cnt == 1 || !a:bang
             " splitadd
             " Determine Vim edit command corresponding to plugin command.
