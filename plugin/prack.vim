@@ -971,18 +971,22 @@ fu! s:sf_create()
             \. (boolean ? '' : op . escape(a:val, ' \'))
     endfu
     " Change cwd, pushing the old onto a stack.
+    " Design Decision: Originally, lcd was used, but this complicates things
+    " when we're splitting windows. Given the pains I'm taking to restore
+    " thins (e.g., stack frame destruction in a finally clause), there's
+    " really no need to avoid using cd.
     fu! sf.pushd(dir) dict
         call add(self.dirs, getcwd())
         " Note: As mentioned in Vim doc (:help :filename), commands expecting
         " single filename don't require escaping.
-        exe 'lcd ' . a:dir
+        exe 'cd ' . a:dir
     endfu
     fu! sf.popd() dict
         " Question: Should I add logic to handle underflow (which is
         " essentially an internal error)?
         if len(self.dirs)
-            " lcd to popped dir.
-            exe 'lcd ' . remove(self.dirs, -1)
+            " cd to popped dir.
+            exe 'cd ' . remove(self.dirs, -1)
         endif
     endfu
     " Return the stack frame
@@ -1516,8 +1520,8 @@ fu! s:edit(cmd, bang, ...)
     let sf = s:sf_create()
     try
         " Parse cmdline into an array of specs
-        " TODO: Decide whether to use command cmdline parser for both grep and
-        " edit cases?
+        " TODO: Decide whether to use cmdline parser for both grep and edit
+        " cases?
         let [pspecs, args] = s:parse_grep_cmdline(a:000)
         if !empty(args)
             throw "Non pspec arg supplied to " . a:cmd . " command."
@@ -1542,19 +1546,16 @@ fu! s:edit(cmd, bang, ...)
             call sf.setopt('errorformat', '%f')
             for pspec in pspecs
                 let sp_cfg = s:sp_cfg[pspec.idx]
-                " Note: As long as we're not going to be mutating (e.g., to
-                " map line numbers onto end of filename), we might as well
-                " skip this copy.
+                " Note: As long as we're not going to be mutating (e.g.,
+                " mapping line numbers onto end of filename), there's no realy
+                " reason to copy...
                 let files = pspec.files "pspec.files[:]
-                echomsg string(files)
                 " UNDER CONSTRUCTION!!!!!!!!!!!!!!!!!!!!!!!!
-                " TODO: Understand implications of this for what gets added to
-                " qf list; seems that file displayed by clist is relative to
-                " the sp dir, but with nothing to indicate the sp, this may be
-                " problematic. Ah... Actually, I think an lcd may be getting
-                " used... See what's going on with pushd...
-                " TODO: I believe I may want to use the
-                " quickfix-directory-stack here: research!!!!!!
+                " TODO: Would there be any advantage to using quickfix-directory-stack here?
+                " Move to the directory to which files in pspec are relative;
+                " note that Vim remembers the directory that was current when
+                " qf/ll was update, and will keep the qf/ll list in sync as
+                " cwd is subsequently changed.
                 call sf.pushd(sp_cfg.rootdir)
                 " In manner analogous to grep, use the following, taking into
                 " account bang, the capitalized command name actually used, and
@@ -1857,6 +1858,7 @@ com! -nargs=* -complete=customlist,<SID>complete_filenames Spq call FA(<q-args>)
 " Quoted args play...
 com! -nargs=* QA FA <q-args>
 com! -nargs=* FA call FA(<f-args>)
+com! -nargs=1 FA1 call FA(<f-args>)
 fu! FA(...)
     for s in a:000
         echon "|" . s . "|"
@@ -1872,7 +1874,7 @@ fu! Complete_custom(A, L, P)
     echomsg "Completing custom `" . a:A . "', Leading part is `" . a:L . "'"
     return join(g:ls, "\n")
 endfu
-com! -nargs=1 -complete=customlist,Complete_customlist CL echo "foo"
+com! -nargs=1 -complete=customlist,Complete_customlist CL call FA(<f-args>)
 com! -nargs=1 -complete=custom,Complete_custom C echo "foo"
 " <<<
 
