@@ -962,19 +962,30 @@ fu! s:sf_create()
             if has_key(opt, 'boolean') | let boolean = !!opt.boolean | endif
         endif
         " Set the option
-        " Note: Use set[l] in lieu of let-&.
+        " Note: Use set in lieu of let-&.
+        " Implication: Saving/restoring an option will effectively destroy any
+        " local setting.
         " Rationale: Supports more assignment operators: e.g., += doesn't work
         " for string-list options with let-&.
-        exe 'setl '
+        " Design Decision: Use non-local sets.
+        " Rationale: There are several issues with use of local options:
+        " -Without a lot of messy logic and hidden window creation,
+        " there's no way to tell whether a local setting exists, and if it
+        " doesn't, we don't want to create one.
+        " -When we split a window, local settings are not copied to the new window.
+        " -The stack frame mechanism in its current form cannot restore local
+        "  options in multiple windows.
+        exe 'set '
             \. (boolean ? (!!a:val ? '' : 'no') : '')
             \. a:name
             \. (boolean ? '' : op . escape(a:val, ' \'))
     endfu
     " Change cwd, pushing the old onto a stack.
     " Design Decision: Originally, lcd was used, but this complicates things
-    " when we're splitting windows. Given the pains I'm taking to restore
-    " thins (e.g., stack frame destruction in a finally clause), there's
-    " really no need to avoid using cd.
+    " when we're splitting windows. Moreover, though intended to be less
+    " obtrusive, it was probably more so, as its effect was to create a
+    " (persistent) local cwd where the user had none previously.
+    " Implication: If the user does have a local cwd set, it will be lost.
     fu! sf.pushd(dir) dict
         call add(self.dirs, getcwd())
         " Note: As mentioned in Vim doc (:help :filename), commands expecting
@@ -1500,9 +1511,10 @@ fu! s:grep(cmd, bang, ...)
             " any case, make sure that if 'more' is going to be set at all,
             " it's set only for the final grep (when xargification has
             " occurred).
+            " TODO: Also make silent configurable.
             " Run [l]grep[add] with appropriate args.
             " TODO: Append escaped, joined args...
-            exe grepcmd . grepadd . a:bang . ' ' . grepargs . pspec.files
+            exe 'silent ' . grepcmd . grepadd . a:bang . ' ' . grepargs . pspec.files
 
             let sp_idx_prev = pspec.idx
         endfor
@@ -1515,6 +1527,87 @@ fu! s:grep(cmd, bang, ...)
     endtry
 endfu
 " UNDER CONSTRUCTION!!!!!
+" TODO: Get rid of s:edit() and rename this one when it's complete...
+fu! s:edit2(cmd, bang, ...)
+    let cmd = tolower(a:cmd)
+    let sf = s:sf_create()
+    try
+        " Parse cmdline into an array of specs
+        " TODO: Decide whether to use cmdline parser for both grep and edit
+        " cases?
+        let [pspecs, args] = s:parse_grep_cmdline(a:000)
+        if !empty(args)
+            throw "Non pspec arg supplied to " . a:cmd . " command."
+        endif
+        " TODO: Question: Is it possible for pspecs to be empty at this point
+        " (i.e., given -nargs=+, and given that we apparently haven't aborted
+        " on bad spec)?
+        if empty(pspecs)
+            throw "No file(s) found."
+        endif
+        " Combine, sort, uniquify, etc... the pspecs list.
+        let pspecs = s:sort_and_combine_pspecs(pspecs)
+        let sp_cnt = len(pspecs)
+        " Determine whether we're in single or multi-file regime (bearing in
+        " mind that we've already determined pspecs is non-empty).
+        let cnt = sp_cnt > 1 ? 2 : len(pspecs[0].files)
+        " Will we be updating the qf/ll?
+        if cnt > 1 || a:bang
+            let use_ll = cmd[0] == 'l'
+            let is_adding = cmd[-3 : ] == 'add'
+            let new_win_cmd = a:cmd =~ '^\%(S\|Ls\)' ? 'new' : a:cmd =~ '^\%(T\|Lt\)' ? 'tabnew' : ''
+            let first_iter = 1
+            call sf.setopt('errorformat', '%f')
+            for pspec in pspecs
+                let sp_cfg = s:sp_cfg[pspec.idx]
+                " Note: As long as we're not going to be mutating (e.g.,
+                " mapping line numbers onto end of filename), there's no real
+                " reason to copy...
+                let files = pspec.files "pspec.files[:]
+                " UNDER CONSTRUCTION!!!!!!!!!!!!!!!!!!!!!!!!
+                " TODO: Would there be any advantage to using quickfix-directory-stack here?
+                " Move to the directory to which files in pspec are relative;
+                " note that Vim remembers the directory that was current when
+                " qf/ll was update, and will keep the qf/ll list in sync as
+                " cwd is subsequently changed.
+                call sf.pushd(sp_cfg.rootdir)
+                " In manner analogous to grep, use the following, taking into
+                " account bang, the capitalized command name actually used, and
+                " whether this is first sp...
+                " cexpr, lexpr, caddexpr, laddexpr
+                " TODO: Need to set 'errorformat' - note that I won't have a
+                " line number - use 1 or can I omit?
+                " TODO: Always use bang on the cexpr command to avoid jumping
+                " to file, which is handled later, if at all...
+                " TODO: Understand implications: the add versions of [cl]expr
+                " don't support bang operator: they never jump...
+                let addcmd = (use_ll ? 'l' : 'c') . (is_adding || !first_iter ? 'add' : '') . 'expr'
+                exe addcmd . ' files'
+                echomsg addcmd . ' files'
+                echomsg 'cwd: ' . getcwd()
+                echomsg "addcmd: " . addcmd
+                echomsg "efm: " . &efm
+                let first_iter = 0
+            endfor
+        endif
+        " Will we be jumping to first match?
+        " TODO: Revisit this - perhaps rely more on cexpr et al. Also, figure
+        " out why split commands are messing up cwd and how to fix...
+        if cnt == 1 || !a:bang
+            " splitadd
+            " Determine Vim edit command corresponding to plugin command.
+            let editcmd = substitute(cmd, 'l\?\(\%(\%(add\)\@!.\)\+\).*', '\1', '')
+            exe editcmd . ' ' . fnameescape(l:pspecs[0].files[0])
+        endif
+
+    " TODO: What's the rationale for catching only Vim(echoerr) here? What
+    " about Vim internal errors?
+    catch /Vim(echoerr)/
+        echohl ErrorMsg|echomsg v:exception|echohl None
+    finally
+        call sf.destroy()
+    endtry
+endfu
 fu! s:edit(cmd, bang, ...)
     let cmd = tolower(a:cmd)
     let sf = s:sf_create()
@@ -1841,6 +1934,7 @@ com! -nargs=? Refresh call <SID>refresh(<q-args>)
 
 com! -bang -nargs=* Grep  call s:grep('Grep', <q-bang>, <f-args>)
 com! -bang -nargs=* Lgrep  call s:grep('Lgrep', <q-bang>, <f-args>)
+" TODO: Remove bang from the following.
 com! -bang -nargs=* Grepadd  call s:grep('Grepadd', <q-bang>, <f-args>)
 com! -bang -nargs=* Lgrepadd  call s:grep('Lgrepadd', <q-bang>, <f-args>)
 
@@ -1852,6 +1946,21 @@ com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Splitadd call s
 com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Lsplitadd call s:edit('Lsplitadd', <q-bang>, <f-args>)
 com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Editadd call s:edit('Editadd', <q-bang>, <f-args>)
 com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Leditadd call s:edit('Leditadd', <q-bang>, <f-args>)
+
+" UNDER CONSTRUCTION!!!
+com! -bang-nargs=+ -complete=customlist,<SID>complete_filenames Find call s:edit2('Find', <q-bang>, <f-args>)
+com! -bang-nargs=+ -complete=customlist,<SID>complete_filenames Sfind call s:edit2('Sfind', <q-bang>, <f-args>)
+com! -bang-nargs=+ -complete=customlist,<SID>complete_filenames Tabfind call s:edit2('Tabfind', <q-bang>, <f-args>)
+com! -bang-nargs=+ -complete=customlist,<SID>complete_filenames Lfind call s:edit2('Lfind', <q-bang>, <f-args>)
+com! -bang-nargs=+ -complete=customlist,<SID>complete_filenames Lsfind call s:edit2('Lsfind', <q-bang>, <f-args>)
+com! -bang-nargs=+ -complete=customlist,<SID>complete_filenames Ltabfind call s:edit2('Ltabfind', <q-bang>, <f-args>)
+
+com!-nargs=+ -complete=customlist,<SID>complete_filenames Findadd call s:edit2('Findadd', 0, <f-args>)
+com!-nargs=+ -complete=customlist,<SID>complete_filenames Sfindadd call s:edit2('Sfindadd', 0, <f-args>)
+com!-nargs=+ -complete=customlist,<SID>complete_filenames Tabfindadd call s:edit2('Tabfindadd', 0, <f-args>)
+com!-nargs=+ -complete=customlist,<SID>complete_filenames Lfindadd call s:edit2('Lfindadd', 0, <f-args>)
+com!-nargs=+ -complete=customlist,<SID>complete_filenames Lsfindadd call s:edit2('Lsfindadd', 0, <f-args>)
+com!-nargs=+ -complete=customlist,<SID>complete_filenames Ltabfindadd call s:edit2('Ltabfindadd', 0, <f-args>)
 
 
 com! -nargs=* -complete=customlist,<SID>complete_filenames Spq call FA(<q-args>)
