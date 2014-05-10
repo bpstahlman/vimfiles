@@ -825,10 +825,10 @@ fu! s:get_matching_files(cfg, glob, partial)
         " ./ works just like Vim
         " .// specifies the current working dir
         " all other paths must match from the beginning
-        " TODO - UNDER CONSTRUCTION!!!!!!!!
-        " To speed things up, extract all fixed strings (non-*, non-**) within
-        " the glob, and skip the pattern match if any aren't found in the
-        " target file string.
+        " TODO: Add support for any number of ../ just after the ./ or .//
+        " Rationale: Very useful, as there are times when you want to start
+        " the search from a near ancestor of the cwd or the current file's
+        " dir.
         let glob = a:glob
         if glob =~ '^\.//'
             " Use fnamemodify to ensure trailing slash.
@@ -901,13 +901,20 @@ endfu
 " >>> Functions for displaying Errors/Warnings
 " TODO: Make warn vs. error configurable.
 fu! s:warn(msg)
-    try
-        echohl WarningMsg
-        echomsg "Warning: " . a:msg
-    catch
-    finally
-        echohl None
-    endtry
+    echohl WarningMsg
+    echomsg "Warning: " . a:msg
+    echohl None
+endfu
+" Optional args:
+" 1: strip leading Vim(echoerr)
+" TODO: Decide whether we shouldn't just always do that. If so, no reason to
+" have separate functions for warn and error; just make warn optional...
+fu! s:err(msg, ...)
+    let strip = a:0 && a:1
+    let msg = strip ? substitute(a:msg, '^\s*Vim(echoerr)\s*:\s*', '', '') : a:msg
+    echohl ErrorMsg
+    echomsg msg
+    echohl None
 endfu
 " <<<
 " >>> Functions used to implement stack frames
@@ -978,7 +985,7 @@ fu! s:sf_create()
         exe 'set '
             \. (boolean ? (!!a:val ? '' : 'no') : '')
             \. a:name
-            \. (boolean ? '' : op . escape(a:val, ' \'))
+            \. (boolean ? '' : op . escape(a:val, ' |\'))
     endfu
     " Change cwd, pushing the old onto a stack.
     " Design Decision: Originally, lcd was used, but this complicates things
@@ -1539,8 +1546,7 @@ fu! s:grep(cmd, bang, ...)
 endfu
 " UNDER CONSTRUCTION!!!!!
 " TODO: Get rid of s:edit() and rename this one when it's complete...
-fu! s:edit2(cmd, bang, ...)
-    let cmd = tolower(a:cmd)
+fu! s:find(cmd, bang, ...)
     let sf = s:sf_create()
     try
         " Parse cmdline into an array of specs
@@ -1548,73 +1554,79 @@ fu! s:edit2(cmd, bang, ...)
         " cases?
         let [pspecs, args] = s:parse_grep_cmdline(a:000)
         if !empty(args)
-            throw "Non pspec arg supplied to " . a:cmd . " command."
+            echoerr "Non pspec arg supplied to " . a:cmd . " command."
         endif
         " TODO: Question: Is it possible for pspecs to be empty at this point
         " (i.e., given -nargs=+, and given that we apparently haven't aborted
         " on bad spec)?
         if empty(pspecs)
-            throw "No file(s) found."
+            echoerr "No file(s) found."
         endif
         " Combine, sort, uniquify, etc... the pspecs list.
         let pspecs = s:sort_and_combine_pspecs(pspecs)
         let sp_cnt = len(pspecs)
         " Determine whether we're in single or multi-file regime (bearing in
         " mind that we've already determined pspecs is non-empty).
-        let cnt = sp_cnt > 1 ? 2 : len(pspecs[0].files)
+        let cnt = sp_cnt > 1 ? 2 : sp_cnt > 0 ? len(pspecs[0].files) : 0
+        if !cnt
+            echoerr "No matching files"
+        endif
         " Will we be updating the qf/ll?
-        if cnt > 1 || a:bang
-            let use_ll = cmd[0] == 'l'
-            let is_adding = cmd[-3 : ] == 'add'
-            let new_win_cmd = a:cmd =~ '^\%(S\|Ls\)' ? 'new' : a:cmd =~ '^\%(T\|Lt\)' ? 'tabnew' : ''
-            let first_iter = 1
-            call sf.setopt('errorformat', '%f')
+        " Note: Don't open new window (for commands that require it) if no
+        " files.
+        if cnt > 0
+            " Extract some parameters from command name.
+            let use_ll = a:cmd =~? '^l'
+            let is_adding = a:cmd[-3:] == 'add'
+            let win_cmd = a:cmd =~? '^[l]\?s' ? 'new' : a:cmd =~? '^[l]\?tab' ? 'tabnew' : ''
+            " TODO: Consider whether to make the 'errorformat' set local to
+            " the window for commands that create a new window. Weigh against
+            " benefits of consistency with common case of using an existing
+            " one.
+            call sf.setopt('errorformat', '%f|%m')
+            if win_cmd != ''
+                " Open new window in manner determined by command
+                exe win_cmd
+            endif
+            let sp_idx = 0
             for pspec in pspecs
                 let sp_cfg = s:sp_cfg[pspec.idx]
-                " Note: As long as we're not going to be mutating (e.g.,
-                " mapping line numbers onto end of filename), there's no real
-                " reason to copy...
-                let files = pspec.files "pspec.files[:]
-                " UNDER CONSTRUCTION!!!!!!!!!!!!!!!!!!!!!!!!
-                " TODO: Would there be any advantage to using quickfix-directory-stack here?
+                " Make a copy for mutation.
+                let files = pspec.files[:]
+                " Design Decision: Without an error message, the `(i of N)'
+                " message in the status area looks a bit bare...
+                call map(files, 'v:val . "|" . v:val')
                 " Move to the directory to which files in pspec are relative;
                 " note that Vim remembers the directory that was current when
-                " qf/ll was update, and will keep the qf/ll list in sync as
+                " qf/ll was updated, and will keep the qf/ll list in sync as
                 " cwd is subsequently changed.
+                " TODO: cd semantics make more sense than pushd in loop...
                 call sf.pushd(sp_cfg.rootdir)
                 " In manner analogous to grep, use the following, taking into
                 " account bang, the capitalized command name actually used, and
                 " whether this is first sp...
                 " cexpr, lexpr, caddexpr, laddexpr
-                " TODO: Need to set 'errorformat' - note that I won't have a
-                " line number - use 1 or can I omit?
-                " TODO: Always use bang on the cexpr command to avoid jumping
-                " to file, which is handled later, if at all...
                 " TODO: Understand implications: the add versions of [cl]expr
                 " don't support bang operator: they never jump...
-                let addcmd = (use_ll ? 'l' : 'c') . (is_adding || !first_iter ? 'add' : '') . 'expr'
-                exe addcmd . ' files'
-                echomsg addcmd . ' files'
-                echomsg 'cwd: ' . getcwd()
-                echomsg "addcmd: " . addcmd
-                echomsg "efm: " . &efm
-                let first_iter = 0
+                let addcmd = (use_ll ? 'l' : 'c')
+                    \. (is_adding || sp_idx > 0 ? 'add' : '')
+                    \. 'expr' . (!is_adding ? '!' : '')
+                exe 'silent ' . addcmd . ' files'
+                "echomsg addcmd . ' files'
+                let sp_idx += 1
             endfor
+            " TODO: Decide whether to echo a message indicating how many files
+            " were added. Without this, user gets no feedback for a
+            " non-jumping command; moreover, even with jump, we may see
+            " something like (1 of 10) with no 'message' following.
+            if !is_adding
+                " Jump to first match.
+                exe use_ll ? 'lcc' : 'cc'
+            endif
         endif
-        " Will we be jumping to first match?
-        " TODO: Revisit this - perhaps rely more on cexpr et al. Also, figure
-        " out why split commands are messing up cwd and how to fix...
-        if cnt == 1 || !a:bang
-            " splitadd
-            " Determine Vim edit command corresponding to plugin command.
-            let editcmd = substitute(cmd, 'l\?\(\%(\%(add\)\@!.\)\+\).*', '\1', '')
-            exe editcmd . ' ' . fnameescape(l:pspecs[0].files[0])
-        endif
-
-    " TODO: What's the rationale for catching only Vim(echoerr) here? What
-    " about Vim internal errors?
+    " Note: Intentionally letting Vim exceptions go uncaught.
     catch /Vim(echoerr)/
-        echohl ErrorMsg|echomsg v:exception|echohl None
+        call s:err(v:exception, 1)
     finally
         call sf.destroy()
     endtry
@@ -1959,19 +1971,15 @@ com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Editadd call s:
 com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Leditadd call s:edit('Leditadd', <q-bang>, <f-args>)
 
 " UNDER CONSTRUCTION!!!
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Find call s:edit2('Find', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Sfind call s:edit2('Sfind', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Tabfind call s:edit2('Tabfind', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Lfind call s:edit2('Lfind', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Lsfind call s:edit2('Lsfind', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Ltabfind call s:edit2('Ltabfind', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Find call s:find('Find', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Sfind call s:find('Sfind', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Tabfind call s:find('Tabfind', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Lfind call s:find('Lfind', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Lsfind call s:find('Lsfind', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Ltabfind call s:find('Ltabfind', <q-bang>, <f-args>)
 
-com!-nargs=+ -complete=customlist,<SID>complete_filenames Findadd call s:edit2('Findadd', 0, <f-args>)
-com!-nargs=+ -complete=customlist,<SID>complete_filenames Sfindadd call s:edit2('Sfindadd', 0, <f-args>)
-com!-nargs=+ -complete=customlist,<SID>complete_filenames Tabfindadd call s:edit2('Tabfindadd', 0, <f-args>)
-com!-nargs=+ -complete=customlist,<SID>complete_filenames Lfindadd call s:edit2('Lfindadd', 0, <f-args>)
-com!-nargs=+ -complete=customlist,<SID>complete_filenames Lsfindadd call s:edit2('Lsfindadd', 0, <f-args>)
-com!-nargs=+ -complete=customlist,<SID>complete_filenames Ltabfindadd call s:edit2('Ltabfindadd', 0, <f-args>)
+com!-nargs=+ -complete=customlist,<SID>complete_filenames Findadd call s:find('Findadd', 0, <f-args>)
+com!-nargs=+ -complete=customlist,<SID>complete_filenames Lfindadd call s:find('Lfindadd', 0, <f-args>)
 
 
 com! -nargs=* -complete=customlist,<SID>complete_filenames Spq call FA(<q-args>)
