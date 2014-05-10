@@ -1307,26 +1307,26 @@ fu! s:refresh(opts)
         endif
         " Get list of config indices.
         " Design Decision: Abort on bad option, even if multiple specified.
-        let cfg_idxs = []
+        let sp_idxs = []
         for opt in pcl.opts
-            let cfg_idx = s:get_cfg_idx(opt)
-            if cfg_idx == -1
+            let sp_idx = s:get_cfg_idx(opt)
+            if sp_idx == -1
                 echoerr "Invalid subproject option: " . (opt[0] == 'l' ? '--' : '-') . opt[2:]
             endif
-            call add(cfg_idxs, cfg_idx)
+            call add(sp_idxs, sp_idx)
         endfor
         " Process the selected configs.
-        for cfg_idx in cfg_idxs
-            let cache_cfg = s:sp_cfg[cfg_idx]
-            let rootdir = call('finddir', cache_cfg.root)
+        for sp_idx in sp_idxs
+            let [sp_cfg, sp_opt] = [s:sp_cfg[sp_idx], s:sp_opt[sp_idx]]
+            let rootdir = call('finddir', sp_opt.get('root'))
             if rootdir == ''
                 throw "Couldn't locate project base. Make sure your cwd is within the project."
             endif
             let rootdir = s:canonicalize_path(rootdir, '')
-            "exe 'lcd ' . rootdir
+            " Note: An sf.cd (TODO) would make more sense here than pushd...
             call sf.pushd(rootdir)
-            let cache_cfg.rootdir = rootdir
-            call s:cache_listfile(cache_cfg, 1)
+            let sp_cfg.rootdir = rootdir
+            call s:cache_listfile(sp_cfg, sp_opt, 1)
         endfor
     catch /Vim(echoerr)/
         echohl ErrorMsg|echomsg v:exception|echohl None
@@ -1512,12 +1512,23 @@ fu! s:grep(cmd, bang, ...)
             " it's set only for the final grep (when xargification has
             " occurred).
             " TODO: Also make silent configurable.
+            " Problem TODO: silent inhibits hit-enter prompt, which I'd like
+            " to see.
+            " Possible solution: Consider using cexpr et al. with system() in
+            " lieu of grep at al... This would prevent user seeing huge list
+            " of files, but would allow him to see the first error at the
+            " bottom...
+            " Another possible solution: Use silent, but then use :cc or :ll
+            " to have the first error displayed afterwards.
             " Run [l]grep[add] with appropriate args.
             " TODO: Append escaped, joined args...
             exe 'silent ' . grepcmd . grepadd . a:bang . ' ' . grepargs . pspec.files
-
+            " TEMP DEBUG - May need to be ll instead...
             let sp_idx_prev = pspec.idx
         endfor
+        " TEMP DEBUG ONLY: Need to use either cc or ll as function of command
+        " if I stick with this approach.
+        cc
     " TODO: What's the rationale for catching only Vim(echoerr) here? What
     " about Vim internal errors?
     catch /Vim(echoerr)/
@@ -1948,12 +1959,12 @@ com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Editadd call s:
 com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Leditadd call s:edit('Leditadd', <q-bang>, <f-args>)
 
 " UNDER CONSTRUCTION!!!
-com! -bang-nargs=+ -complete=customlist,<SID>complete_filenames Find call s:edit2('Find', <q-bang>, <f-args>)
-com! -bang-nargs=+ -complete=customlist,<SID>complete_filenames Sfind call s:edit2('Sfind', <q-bang>, <f-args>)
-com! -bang-nargs=+ -complete=customlist,<SID>complete_filenames Tabfind call s:edit2('Tabfind', <q-bang>, <f-args>)
-com! -bang-nargs=+ -complete=customlist,<SID>complete_filenames Lfind call s:edit2('Lfind', <q-bang>, <f-args>)
-com! -bang-nargs=+ -complete=customlist,<SID>complete_filenames Lsfind call s:edit2('Lsfind', <q-bang>, <f-args>)
-com! -bang-nargs=+ -complete=customlist,<SID>complete_filenames Ltabfind call s:edit2('Ltabfind', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Find call s:edit2('Find', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Sfind call s:edit2('Sfind', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Tabfind call s:edit2('Tabfind', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Lfind call s:edit2('Lfind', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Lsfind call s:edit2('Lsfind', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Ltabfind call s:edit2('Ltabfind', <q-bang>, <f-args>)
 
 com!-nargs=+ -complete=customlist,<SID>complete_filenames Findadd call s:edit2('Findadd', 0, <f-args>)
 com!-nargs=+ -complete=customlist,<SID>complete_filenames Sfindadd call s:edit2('Sfindadd', 0, <f-args>)
