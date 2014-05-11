@@ -1956,29 +1956,15 @@ com! FPSClose call s:close()
 " it too soon.
 com! -nargs=? Refresh call <SID>refresh(<q-args>)
 
-com! -bang -nargs=* Grep  call s:grep('Grep', <q-bang>, <f-args>)
-com! -bang -nargs=* Lgrep  call s:grep('Lgrep', <q-bang>, <f-args>)
-" TODO: Remove bang from the following.
-com! -bang -nargs=* Grepadd  call s:grep('Grepadd', <q-bang>, <f-args>)
-com! -bang -nargs=* Lgrepadd  call s:grep('Lgrepadd', <q-bang>, <f-args>)
+" Grep commands
+com! -bang -nargs=+ Grep call s:grep('Grep', <q-bang>, <f-args>)
+com! -bang -nargs=+ Sgrep call s:grep('Sgrep', <q-bang>, <f-args>)
+com! -bang -nargs=+ Tabgrep call s:grep('Tabgrep', <q-bang>, <f-args>)
+com! -bang -nargs=+ Lgrep call s:grep('Lgrep', <q-bang>, <f-args>)
+com! -bang -nargs=+ Lsgrep call s:grep('Lsgrep', <q-bang>, <f-args>)
+com! -bang -nargs=+ Ltabgrep call s:grep('Ltabgrep', <q-bang>, <f-args>)
 
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Split call s:edit('Split', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Lsplit call s:edit('Lsplit', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Edit call s:edit('Edit', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Ledit call s:edit('Ledit', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Splitadd call s:edit('Splitadd', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Lsplitadd call s:edit('Lsplitadd', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Editadd call s:edit('Editadd', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Leditadd call s:edit('Leditadd', <q-bang>, <f-args>)
-
-" UNDER CONSTRUCTION!!!
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Find call s:find('Find', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Sfind call s:find('Sfind', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Tabfind call s:find('Tabfind', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Lfind call s:find('Lfind', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Lsfind call s:find('Lsfind', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Ltabfind call s:find('Ltabfind', <q-bang>, <f-args>)
-
+" Grep add variants
 " Design Decision: Don't support window-creating/adding variants.
 " Rationale: Not much use case for it: location list isn't even copied to new
 " window, so adding would be difficult. Moreover, you typically use a
@@ -1987,8 +1973,31 @@ com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Ltabfind call s
 " entry prior to the command (which often means no jump at all).
 " Bottom Line: The complexity engendered by window-creating/adding variants
 " would not be justified by the expected use case.
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Grepadd call s:grep('Grepadd', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Lgrepadd call s:grep('Lgrepadd', <q-bang>, <f-args>)
+
+" Find commands
+com! -bang -nargs=+ Find call s:find('Find', <q-bang>, <f-args>)
+com! -bang -nargs=+ Sfind call s:find('Sfind', <q-bang>, <f-args>)
+com! -bang -nargs=+ Tabfind call s:find('Tabfind', <q-bang>, <f-args>)
+com! -bang -nargs=+ Lfind call s:find('Lfind', <q-bang>, <f-args>)
+com! -bang -nargs=+ Lsfind call s:find('Lsfind', <q-bang>, <f-args>)
+com! -bang -nargs=+ Ltabfind call s:find('Ltabfind', <q-bang>, <f-args>)
+
+" Find add variants
+" Design Decision: See note on Grep add variants.
 com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Findadd call s:find('Findadd', <q-bang>, <f-args>)
 com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Lfindadd call s:find('Lfindadd', <q-bang>, <f-args>)
+
+" Edit commands (UNDER CONSTRUCTION)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Split call s:edit('Split', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Lsplit call s:edit('Lsplit', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Edit call s:edit('Edit', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Ledit call s:edit('Ledit', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Splitadd call s:edit('Splitadd', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Lsplitadd call s:edit('Lsplitadd', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Editadd call s:edit('Editadd', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Leditadd call s:edit('Leditadd', <q-bang>, <f-args>)
 
 
 com! -nargs=* -complete=customlist,<SID>complete_filenames Spq call FA(<q-args>)
