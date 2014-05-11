@@ -1571,61 +1571,62 @@ fu! s:find(cmd, bang, ...)
         if !cnt
             echoerr "No matching files"
         endif
-        " Will we be updating the qf/ll?
-        " Note: Don't open new window (for commands that require it) if no
-        " files.
-        if cnt > 0
-            " Extract some parameters from command name.
-            let use_ll = a:cmd =~? '^l'
-            let is_adding = a:cmd[-3:] == 'add'
-            let win_cmd = a:cmd =~? '^[l]\?s' ? 'new' : a:cmd =~? '^[l]\?tab' ? 'tabnew' : ''
-            " TODO: Consider whether to make the 'errorformat' set local to
-            " the window for commands that create a new window. Weigh against
-            " benefits of consistency with common case of using an existing
-            " one.
-            call sf.setopt('errorformat', '%f|%m')
-            if win_cmd != ''
-                " Open new window in manner determined by command
-                exe win_cmd
-            endif
-            let sp_idx = 0
-            for pspec in pspecs
-                let sp_cfg = s:sp_cfg[pspec.idx]
-                " Make a copy for mutation.
-                let files = pspec.files[:]
-                " Design Decision: Without an error message, the `(i of N)'
-                " message in the status area looks a bit bare...
-                call map(files, 'v:val . "|" . v:val')
-                " Move to the directory to which files in pspec are relative;
-                " note that Vim remembers the directory that was current when
-                " qf/ll was updated, and will keep the qf/ll list in sync as
-                " cwd is subsequently changed.
-                " TODO: cd semantics make more sense than pushd in loop...
-                call sf.pushd(sp_cfg.rootdir)
-                " In manner analogous to grep, use the following, taking into
-                " account bang, the capitalized command name actually used, and
-                " whether this is first sp...
-                " cexpr, lexpr, caddexpr, laddexpr
-                " TODO: Understand implications: the add versions of [cl]expr
-                " don't support bang operator: they never jump...
-                let addcmd = (use_ll ? 'l' : 'c')
-                    \. (is_adding || sp_idx > 0 ? 'add' : '')
-                    \. 'expr' . (!is_adding ? '!' : '')
-                exe 'silent ' . addcmd . ' files'
-                "echomsg addcmd . ' files'
-                let sp_idx += 1
-            endfor
-            " TODO: Decide whether to echo a message indicating how many files
-            " were added. Without this, user gets no feedback for a
-            " non-jumping command; moreover, even with jump, we may see
-            " something like (1 of 10) with no 'message' following.
-            if !is_adding
-                " Jump to first match.
-                exe use_ll ? 'lcc' : 'cc'
-            endif
+        " Extract some parameters from command name.
+        let use_ll = a:cmd =~? '^l'
+        let is_adding = a:cmd[-3:] == 'add'
+        let win_cmd = a:cmd =~? '^[l]\?s' ? 'new' : a:cmd =~? '^[l]\?tab' ? 'tabnew' : ''
+        " TODO: Consider whether to make the 'errorformat' set local to
+        " the window for commands that create a new window. Weigh against
+        " benefits of consistency with common case of using an existing
+        " window.
+        call sf.setopt('errorformat', '%f|%m')
+        if win_cmd != ''
+            " Open new window in manner determined by command
+            exe win_cmd
         endif
-    " Note: Intentionally letting Vim exceptions go uncaught.
+        " Loop over subprojects
+        let file_cnt = 0
+        let sp_idx = 0
+        for pspec in pspecs
+            let sp_cfg = s:sp_cfg[pspec.idx]
+            " Make a copy for mutation.
+            let files = pspec.files[:]
+            " Design Decision: Without an error message, the `(i of N)'
+            " message in the status area looks a bit bare...
+            call map(files, 'v:val . "|" . v:val')
+            " Move to the directory to which files in pspec are relative.
+            " Rationale: Vim remembers the directory that was current when
+            " qf/ll was updated, and will keep the qf/ll list in sync as
+            " cwd is subsequently changed.
+            " TODO: cd semantics make more sense than pushd in loop...
+            call sf.pushd(sp_cfg.rootdir)
+            " Use one of the following to add files: cexpr!, lexpr!, caddexpr, laddexpr
+            " Note: Use bang (if supported) to inhibit jump, and silent to suppress its output.
+            " Rationale: Both jump and output will be handled in command
+            " appropriate way at conclusion of loop.
+            let addcmd = (use_ll ? 'l' : 'c')
+                \. (is_adding || sp_idx > 0 ? 'add' : '')
+                \. 'expr' . (!is_adding ? '!' : '')
+            exe 'silent ' . addcmd . ' l:files'
+            "echomsg addcmd . ' files'
+            let file_cnt += len(files)
+            let sp_idx += 1
+        endfor
+        if !a:bang
+            " Jump to *current* match (for add variants, this will be whatever
+            " was current before the command).
+            exe use_ll ? 'll' : 'cc'
+        else
+            " Without this, user gets no feedback.
+            echomsg "Added " . file_cnt . " files to " . (use_ll ? 'location' : 'quickfix') . " list"
+        endif
     catch /Vim(echoerr)/
+        " Note: Intentionally letting Vim exceptions go uncaught here.
+        " Design Decision: If we don't catch our echoerrs/throws, they'll
+        " propagate like Vim internal errors, but the error display will be
+        " several lines, one of which displays the line on which error was
+        " generated; this is not really what we want for something like "No
+        " matches", which isn't really an error...
         call s:err(v:exception, 1)
     finally
         call sf.destroy()
@@ -1978,8 +1979,16 @@ com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Lfind call s:fi
 com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Lsfind call s:find('Lsfind', <q-bang>, <f-args>)
 com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Ltabfind call s:find('Ltabfind', <q-bang>, <f-args>)
 
-com!-nargs=+ -complete=customlist,<SID>complete_filenames Findadd call s:find('Findadd', 0, <f-args>)
-com!-nargs=+ -complete=customlist,<SID>complete_filenames Lfindadd call s:find('Lfindadd', 0, <f-args>)
+" Design Decision: Don't support window-creating/adding variants.
+" Rationale: Not much use case for it: location list isn't even copied to new
+" window, so adding would be difficult. Moreover, you typically use a
+" window-creating variant to avoid jumping for a new qf/ll list, but with
+" adding variants, the only type of jump that occurs is to what was *current*
+" entry prior to the command (which often means no jump at all).
+" Bottom Line: The complexity engendered by window-creating/adding variants
+" would not be justified by the expected use case.
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Findadd call s:find('Findadd', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Lfindadd call s:find('Lfindadd', <q-bang>, <f-args>)
 
 
 com! -nargs=* -complete=customlist,<SID>complete_filenames Spq call FA(<q-args>)
