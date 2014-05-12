@@ -1458,6 +1458,82 @@ fu! s:get_unconstrained_pspecs()
     endfor
     return ret
 endfu
+fu! s:grep2(cmd, bang, ...)
+    let sf = s:sf_create()
+    try
+        " Parse cmdline into an array of specs and trailing args (which will
+        " be supplied to grepprg)
+        let [pspecs, args] = s:parse_grep_cmdline(a:000)
+        " Turn the array of args into escaped string.
+        let grepargs = s:convert_arg_list_to_string(args, 0)
+        if empty(pspecs)
+            " No specs provided: search all files in all subprojects...
+            " Note: This is different from non-empty pspecs that contain no
+            " files (handled later)...
+            let pspecs = s:get_unconstrained_pspecs()
+        endif
+        " TODO: Where to configure max len? Also, calculate fixlen
+        " Note: xargify_pspecs handles sorting, combining, and uniquifying.
+        let pspecs = s:xargify_pspecs(pspecs, 100)
+        " Assumption: Matchless subprojects were culled by xargify_pspecs.
+        if empty(pspecs)
+            echoerr "No file(s) to grep."
+        endif
+        " Extract some parameters from command name.
+        let use_ll = a:cmd =~? '^l'
+        let is_adding = a:cmd[-3:] == 'add'
+        let win_cmd = a:cmd =~? '^[l]\?s' ? 'new' : a:cmd =~? '^[l]\?tab' ? 'tabnew' : ''
+        if win_cmd != ''
+            " Open new window in manner determined by command
+            exe win_cmd
+        endif
+        " Process each subproject in turn...
+        " Note: A subproject will be represented multiple times (in succession)
+        " in the pspecs array iff xargification constraints prevent the
+        " processing of all the subproject's files in a single grep.
+        let sp_idx_prev = -1
+        for pspec in pspecs
+            let sp_cfg = s:sp_cfg[pspec.idx]
+            let grepadd = ''
+            if pspec.idx != sp_idx_prev
+                " First encounter with this subproject
+                " Move to root of subproject.
+                call sf.pushd(sp_cfg.rootdir)
+                " Note: If user has not overridden grepprg and grepformat,
+                " keep current Vim setting.
+                let flags = {}
+                let grepprg = s:sp_opt[pspec.idx].get('grepprg', flags)
+                if flags.set | call sf.setopt('grepprg', grepprg) | endif
+                let grepformat = s:sp_opt[pspec.idx].get('grepformat', flags)
+                if flags.set | call sf.setopt('grepformat', grepformat) | endif
+            elseif sp_idx_prev != -1 && !is_adding
+                " This grep is overflow due to xargification, and the grep
+                " command isn't adding by nature: thus, append 'add' to the
+                " grep command's fiducial form.
+                let grepadd = 'add'
+            endif
+            
+            " TODO: Consider whether/how to use stuff like 'more' and
+            " 'silent', possibly making things configurable...
+            " Use one of the following to perform grep:
+            " grep!, lgrep!, grepadd!, lgrepadd!
+            " Note: Use bang unconditionally to defer any jumps.
+            " TODO: Append escaped, joined args...
+            exe 'silent ' . grepcmd . grepadd . a:bang . ' ' . grepargs . pspec.files
+            " TEMP DEBUG - May need to be ll instead...
+            let sp_idx_prev = pspec.idx
+        endfor
+        " TEMP DEBUG ONLY: Need to use either cc or ll as function of command
+        " if I stick with this approach.
+        cc
+    " TODO: What's the rationale for catching only Vim(echoerr) here? What
+    " about Vim internal errors?
+    catch /Vim(echoerr)/
+        echohl ErrorMsg|echomsg v:exception|echohl None
+    finally
+        call sf.destroy()
+    endtry
+endfu
 fu! s:grep(cmd, bang, ...)
     let sf = s:sf_create()
     try
@@ -1544,8 +1620,6 @@ fu! s:grep(cmd, bang, ...)
         call sf.destroy()
     endtry
 endfu
-" UNDER CONSTRUCTION!!!!!
-" TODO: Get rid of s:edit() and rename this one when it's complete...
 fu! s:find(cmd, bang, ...)
     let sf = s:sf_create()
     try
@@ -1602,8 +1676,11 @@ fu! s:find(cmd, bang, ...)
             call sf.pushd(sp_cfg.rootdir)
             " Use one of the following to add files: cexpr!, lexpr!, caddexpr, laddexpr
             " Note: Use bang (if supported) to inhibit jump, and silent to suppress its output.
-            " Rationale: Both jump and output will be handled in command
+            " Rationale: Both jump and output will be handled in command-
             " appropriate way at conclusion of loop.
+            " Rationale: cexpr and grep command variants handle bang/inhibit
+            " differently, but we need them to work the same for Find and
+            " Grep.
             let addcmd = (use_ll ? 'l' : 'c')
                 \. (is_adding || sp_idx > 0 ? 'add' : '')
                 \. 'expr' . (!is_adding ? '!' : '')
@@ -1936,6 +2013,8 @@ endfu
 " which the args are escaped in manner suitable for use in either internal
 " (vim) or external (shell) command line.
 fu! s:convert_arg_list_to_string(args, external)
+    " TODO: Any reason to set shellescape's optional special arg? Think about
+    " stuff like # and % on command line. Where/when is it processed?
     let mapexpr = a:external ? 'shellescape(v:val)' : 'escape(v:val, '' \'')'
     let args = map(copy(a:args), mapexpr)
     return join(args, " ")
@@ -1991,13 +2070,8 @@ com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Lfindadd call s
 
 " Edit commands (UNDER CONSTRUCTION)
 com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Split call s:edit('Split', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Lsplit call s:edit('Lsplit', <q-bang>, <f-args>)
 com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Edit call s:edit('Edit', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Ledit call s:edit('Ledit', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Splitadd call s:edit('Splitadd', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Lsplitadd call s:edit('Lsplitadd', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Editadd call s:edit('Editadd', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Leditadd call s:edit('Leditadd', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Tabedit call s:edit('Tabedit', <q-bang>, <f-args>)
 
 
 com! -nargs=* -complete=customlist,<SID>complete_filenames Spq call FA(<q-args>)
