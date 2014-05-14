@@ -1539,6 +1539,7 @@ fu! s:grep(cmd, bang, ...)
     try
         " Parse cmdline into an array of specs and trailing args (which will
         " be supplied to grepprg)
+        "echomsg 'a:000: ' . a:000[0] . '::' . a:000[1]
         let [pspecs, args] = s:parse_grep_cmdline(a:000)
         " Turn the array of args into escaped string.
         let grepargs = s:convert_arg_list_to_string(args, 0)
@@ -2013,8 +2014,16 @@ endfu
 " which the args are escaped in manner suitable for use in either internal
 " (vim) or external (shell) command line.
 fu! s:convert_arg_list_to_string(args, external)
+    "echomsg "Args: " . string(a:args)
     " TODO: Any reason to set shellescape's optional special arg? Think about
     " stuff like # and % on command line. Where/when is it processed?
+    " TODO: I'm thinking I need to add a layer of escaping on `|' here.
+    " Rationale: Since my commands don't have the -bar arg, a `|' will be
+    " included in args, *but* the string we return is going to be :execute'd
+    " (as a grep or whatever), and at that point, we need the bar escaped.
+    " Bit TODO: Investigate :! and shellescape() using args.sh and FA command...
+    " TODO: Consider -nargs=1 so I can get raw command line and process it all
+    " myself...
     let mapexpr = a:external ? 'shellescape(v:val)' : 'escape(v:val, '' \'')'
     let args = map(copy(a:args), mapexpr)
     return join(args, " ")
@@ -2077,8 +2086,34 @@ com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Tabedit call s:
 com! -nargs=* -complete=customlist,<SID>complete_filenames Spq call FA(<q-args>)
 " Quoted args play...
 com! -nargs=* QA FA <q-args>
-com! -nargs=* FA call FA(<f-args>)
+com! -nargs=+ FA call FA(<f-args>)
 com! -nargs=1 FA1 call FA(<f-args>)
+com! -nargs=1 Eg call Eg(<f-args>)
+com! -nargs=1 Egr call Egr(<f-args>)
+com! -nargs=* CLR call CLR(<f-args>)
+com! -nargs=* CLG call CLG(<f-args>)
+fu! s:escape_args(args)
+    let s = ''
+    for arg in a:args
+        let s .= ' ' . shellescape(arg)
+    endfor
+    return s
+endfu
+fu! CLR(...)
+    echomsg 'Args: ' . s:escape_args(a:000)
+    exe '!C:/Users/stahlmanb/tmp/args.sh' . s:escape_args(a:000)
+endfu
+fu! CLG(...)
+    echomsg 'Args: ' . s:escape_args(a:000)
+    let gp_save = &l:grepprg
+    let &l:grepprg = 'C:/Users/stahlmanb/tmp/args.sh -n $* /dev/null'
+    exe 'grep ' . s:escape_args(a:000)
+    let &l:grepprg = gp_save
+endfu
+fu! Egr(cl)
+    exe '!C:/Users/stahlmanb/tmp/args.sh ' . a:cl
+endfu
+
 fu! FA(...)
     for s in a:000
         echon "|" . s . "|"
