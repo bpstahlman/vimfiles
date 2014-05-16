@@ -1081,6 +1081,47 @@ fu! s:parse_refresh_cmdline(cmdline)
     return {'opts': s:extract_opts(optstr), 'rem': remstr}
 endfu
 
+" Break input command line into 2 pieces:
+" 1. a List of specs
+" 2. everything else
+" Returns: a Dictionary with the following keys:
+"   specs:
+"     List of specs
+"   rest
+"     command line remaining after spec removal
+" Note: This function is not responsible for validating the specs; at this
+" point, if something looks as though it could be a spec, we'll treat it as
+" such. It's quite possible that one of the specs will subsequently fail
+" validation.
+" Rules: A spec begins with one of the following...
+"     --<non-ws>
+"      -<non-ws>
+"      :<non-ws>
+" ...and consumes everything till unescaped whitespace or end of string.
+" Aside: As with GNU grep, a bare -- or - is not considered to be an option:
+" e.g., `grep - foo.c' looks for a dash in foo.c. Of course, a bare -- is
+" neither an option nor a pattern, but a marker signaling end of options.
+" Since a bare `:' is pointless as a spec, I treat it like `--' and `-': i.e.,
+" not a spec but part of the 'rest'.
+" When there are no more specs, discard any optional separator of the
+" following form...
+"     [<ws>] [--] [<ws>]
+" ...and take whatever follows (if anything) as the 'rest' parameter.
+fu! s:parse_raw_cmdline(cmdline)
+    " Note: The \@> backtracking-inhibit ensures that a -- can't look like
+    " short option `-'.
+    let m = matchlist(a:cmdline,
+        \'^\s*\(\%(\%(--\|-\|:\)\@>\%(\\.\|\S\)\+\)\%(\s\+\%(\%(--\|-\|:\)\@>\%(\\.\|\S\)\+\)\)*\)\?'
+        \.'\%(\s*\%(--\)\?\s*\)\?'
+        \.'\(.*\)')
+    let [specstr, rest] = m[1:2]
+    " Break the specs into List at unescaped whitespace.
+    let specs = split(specstr, '\%(^\|[^\\]\)\%(\\\\\)*\zs\s\+\ze')
+    " Remove only the backslashes that are escaping whitespace.
+    call map(specs, 'substitute(v:val, ''\%(^\|[^\\]\)\%(\\\\\)*\zs\(\\\)\ze\s\+'', '''', ''g'')')
+    return {'specs': specs, 'rest': rest}
+endfu
+
 " Parse input spec designating subproject(s) and glob.
 " Input spec format:
 " [-<sopts>][--<lopt>[,<lopt>]...][:<glob>]
@@ -1182,9 +1223,6 @@ fu! s:get_files_for_spec(spec, partial, throw)
     endfor
     return ret
 endfu
-" TODO: Could probably combine with parse_refresh_cmdline with a bit of
-" refactoring.
-" TODO: Decide whether to keep separate ones, or use same for both...
 fu! s:parse_grep_cmdline(args)
     let argidx = 0 " Will point to first non-plugin arg at loop termination
     " Command line can contain multiple specs; simply concatenate the arrays
@@ -1400,16 +1438,15 @@ fu! Test_sort_and_combine_pspecs()
     echo pspecs
 endfu
 " Return an array of the following form:
-" [{idx: <sp_idx>, files: escaped_file_list}]
-" Form is similar to that returned by get_files_for_spec, except that files is
-" a single command line escaped string, rather than a list of files. Also note
-" that the pspecs in the input list will be transformed to ensure that the
-" following constraints are met:
-" -Each subproject represented only once unless maxgrepsize constraint forces
-"  processing single subproject with multiple greps.
-" -Files are sorted within subproject
-" -Files are unique within subproject
-" -Subprojects are in fiducial order
+" [{idx: <sp_idx>, files: <files>}]
+" Note: Form of list elements is similar to that returned by
+" get_files_for_spec, but with following differences:
+" -Subprojects may be broken up to ensure that maxgrepsize constraints are not
+"  violated.
+" -List of files is converted to a string list, with escaping suitable either
+"  for use with user's shell.
+"  Note: Currently, shellescape is used unconditionally (i.e., no 'shell'
+"  input arg), because xargification is required only for external commands.
 fu! s:xargify_pspecs(pspecs, fixlen)
     let pspecs = s:sort_and_combine_pspecs(a:pspecs)
     if empty(pspecs)
@@ -1429,7 +1466,7 @@ fu! s:xargify_pspecs(pspecs, fixlen)
         " Accumulate as many files as possible without exceeding maxgrepsize
         for f in pspec.files
             " Escape and prepend space before length test.
-            let f = ' ' . fnameescape(f)
+            let f = ' ' . shellescape(f)
             let len_f = strlen(f)
             " Decision: Always accumulate at least one file regardless of
             " maxgrepsize constraint.
@@ -1449,6 +1486,21 @@ fu! s:xargify_pspecs(pspecs, fixlen)
     endif
     return _pspecs
 endfu
+" Prepare list of files for use in command line by converting list to a single
+" string, in which each filename is properly escaped, either for use on Vim
+" command line, or if shell arg is set, for user's shell.
+" Important Note: This is a mutator method: list is modified in place.
+fu! s:convert_file_list_to_string(pspecs, shell)
+    for pspec in pspecs
+        let fs = ''
+        for f in pspec.files
+            let fs .= ' ' . a:shell ? shellescape(f) : fnameescape(f)
+        endfor
+        " Replace the list with the accumulated string.
+        " Note: Confirmed that Vim permits changing Dictionary value type
+        let pspec.files = fs
+    endfor
+endfu
 fu! s:get_unconstrained_pspecs()
     let sp_idx = 0
     let ret = []
@@ -1458,158 +1510,94 @@ fu! s:get_unconstrained_pspecs()
     endfor
     return ret
 endfu
-fu! s:grep2(cmd, bang, ...)
+
+fu! s:do_ext_grep(pspecs, is_adding)
+    " Process each subproject in turn...
+    " Note: A subproject will be represented multiple times (in succession)
+    " in the pspecs array iff xargification constraints prevent the
+    " processing of all the subproject's files in a single grep.
+    let sp_idx_prev = -1
+    " UNDER CONSTRUCTION!!!!!!
+    " TODO: Build tempfile script such that xargified overflow simply goes on
+    " separate lines... May need to restructure loop slightly...
+    for pspec in pspecs
+        let sp_cfg = s:sp_cfg[pspec.idx]
+        let grepadd = ''
+        if pspec.idx != sp_idx_prev
+            " First encounter with this subproject
+            " Move to root of subproject.
+            call sf.pushd(sp_cfg.rootdir)
+            " Note: If user has not overridden grepprg and grepformat,
+            " keep current Vim setting.
+            let flags = {}
+            let grepprg = s:sp_opt[pspec.idx].get('grepprg', flags)
+            if flags.set | call sf.setopt('grepprg', grepprg) | endif
+            let grepformat = s:sp_opt[pspec.idx].get('grepformat', flags)
+            if flags.set | call sf.setopt('grepformat', grepformat) | endif
+        elseif sp_idx_prev != -1 && !a:is_adding
+            " This grep is overflow due to xargification, and the grep
+            " command isn't adding by nature: thus, append 'add' to the
+            " grep command's fiducial form.
+            let grepadd = 'add'
+        endif
+        
+        " TODO: Consider whether/how to use stuff like 'more' and
+        " 'silent', possibly making things configurable...
+        " Use one of the following to perform grep:
+        " grep!, lgrep!, grepadd!, lgrepadd!
+        " Note: Use bang unconditionally to defer any jumps.
+        " TODO: Append escaped, joined args...
+        exe 'silent ' . grepcmd . grepadd . a:bang . ' ' . grepargs . pspec.files
+        " TEMP DEBUG - May need to be ll instead...
+        let sp_idx_prev = pspec.idx
+    endfor
+endfu
+
+fu! s:grep(cmd, bang, cmdline)
     let sf = s:sf_create()
     try
-        " Parse cmdline into an array of specs and trailing args (which will
-        " be supplied to grepprg)
-        let [pspecs, args] = s:parse_grep_cmdline(a:000)
-        " Turn the array of args into escaped string.
-        let grepargs = s:convert_arg_list_to_string(args, 0)
+        " Parse cmdline into an array of specs and everything else.
+        let [pspecs, args] = s:parse_raw_cmdline(a:cmdline)
         if empty(pspecs)
             " No specs provided: search all files in all subprojects...
             " Note: This is different from non-empty pspecs that contain no
             " files (handled later)...
             let pspecs = s:get_unconstrained_pspecs()
         endif
-        " TODO: Where to configure max len? Also, calculate fixlen
-        " Note: xargify_pspecs handles sorting, combining, and uniquifying.
-        let pspecs = s:xargify_pspecs(pspecs, 100)
-        " Assumption: Matchless subprojects were culled by xargify_pspecs.
-        if empty(pspecs)
-            echoerr "No file(s) to grep."
+        if empty(args)
+            echoerr "Must specify at least 1 pattern for grep."
         endif
         " Extract some parameters from command name.
         let use_ll = a:cmd =~? '^l'
         let is_adding = a:cmd[-3:] == 'add'
         let win_cmd = a:cmd =~? '^[l]\?s' ? 'new' : a:cmd =~? '^[l]\?tab' ? 'tabnew' : ''
+        let external = a:cmd !~? 'vgrep'
+        " Prepare pspec list by sorting, combining and uniquifying.
+        let pspecs = s:sort_and_combine_pspecs(pspecs)
+        if external
+            " TODO: Where to configure max len? Also, calculate fixlen
+            " Note: xargify_pspecs handles sorting, combining, and uniquifying.
+            let pspecs = s:xargify_pspecs(pspecs, 100)
+        else
+            " No xargification required for internal command; however, we will
+            " need to convert file lists to strings suitable for use on Vim
+            " command line.
+            call s:convert_file_list_to_string(pspecs, 0)
+        endif
+        " Assumption: Matchless subprojects were culled by
+        " sort_and_combine_pspecs.
+        if empty(pspecs)
+            echoerr "No file(s) to grep."
+        endif
         if win_cmd != ''
             " Open new window in manner determined by command
             exe win_cmd
         endif
-        " Process each subproject in turn...
-        " Note: A subproject will be represented multiple times (in succession)
-        " in the pspecs array iff xargification constraints prevent the
-        " processing of all the subproject's files in a single grep.
-        let sp_idx_prev = -1
-        for pspec in pspecs
-            let sp_cfg = s:sp_cfg[pspec.idx]
-            let grepadd = ''
-            if pspec.idx != sp_idx_prev
-                " First encounter with this subproject
-                " Move to root of subproject.
-                call sf.pushd(sp_cfg.rootdir)
-                " Note: If user has not overridden grepprg and grepformat,
-                " keep current Vim setting.
-                let flags = {}
-                let grepprg = s:sp_opt[pspec.idx].get('grepprg', flags)
-                if flags.set | call sf.setopt('grepprg', grepprg) | endif
-                let grepformat = s:sp_opt[pspec.idx].get('grepformat', flags)
-                if flags.set | call sf.setopt('grepformat', grepformat) | endif
-            elseif sp_idx_prev != -1 && !is_adding
-                " This grep is overflow due to xargification, and the grep
-                " command isn't adding by nature: thus, append 'add' to the
-                " grep command's fiducial form.
-                let grepadd = 'add'
-            endif
-            
-            " TODO: Consider whether/how to use stuff like 'more' and
-            " 'silent', possibly making things configurable...
-            " Use one of the following to perform grep:
-            " grep!, lgrep!, grepadd!, lgrepadd!
-            " Note: Use bang unconditionally to defer any jumps.
-            " TODO: Append escaped, joined args...
-            exe 'silent ' . grepcmd . grepadd . a:bang . ' ' . grepargs . pspec.files
-            " TEMP DEBUG - May need to be ll instead...
-            let sp_idx_prev = pspec.idx
-        endfor
-        " TEMP DEBUG ONLY: Need to use either cc or ll as function of command
-        " if I stick with this approach.
-        cc
-    " TODO: What's the rationale for catching only Vim(echoerr) here? What
-    " about Vim internal errors?
-    catch /Vim(echoerr)/
-        echohl ErrorMsg|echomsg v:exception|echohl None
-    finally
-        call sf.destroy()
-    endtry
-endfu
-fu! s:grep(cmd, bang, ...)
-    let sf = s:sf_create()
-    try
-        " Parse cmdline into an array of specs and trailing args (which will
-        " be supplied to grepprg)
-        "echomsg 'a:000: ' . a:000[0] . '::' . a:000[1]
-        let [pspecs, args] = s:parse_grep_cmdline(a:000)
-        " Turn the array of args into escaped string.
-        let grepargs = s:convert_arg_list_to_string(args, 0)
-        " Convert plugin grep command into Vim grep command in canonical form.
-        " TODO: I'm thinking this call is unnecessary: a:cmd will always be in
-        " canonical form.
-        let grepcmd = s:canonicalize_grep_cmd(a:cmd)
-        " Is this grep command naturally adding?
-        let isadd = grepcmd[-3 : ] == 'add'
-        if empty(pspecs)
-            " No specs provided: search all files in all subprojects...
-            " Note: This is different from non-empty pspecs that contain no
-            " files...
-            let pspecs = s:get_unconstrained_pspecs()
+        if external
+            call s:do_ext_grep(pspecs)
+        else
+            call s:do_int_grep(pspecs)
         endif
-        " TODO: Where to configure max len? Also, calculate fixlen
-        let pspecs = s:xargify_pspecs(pspecs, 100)
-
-        " TODO: Consider creating an object used to access options as function
-        " of project and subproject, which performs caching: e.g.,
-        " opt.get(sp_idx, opt) Note: This would be cleaner than accessing
-        " s:sp_cfg everywhere.
-
-        " Process each subproject in turn...
-        " Note: A subproject will be represented multiple times (in succession)
-        " in the pspecs array iff xargification constraints prevent the
-        " processing of all the subproject's files in a single grep.
-        let sp_idx_prev = -1
-        for pspec in pspecs
-            let cfg = s:sp_cfg[pspec.idx]
-            let grepadd = ''
-            if pspec.idx != sp_idx_prev
-                " First encounter with this subproject
-                " Move to root of subproject.
-                call sf.pushd(cfg.rootdir)
-                " Note: If user has not overridden grepprg and grepformat,
-                " keep current Vim setting.
-                let flags = {}
-                let grepprg = s:sp_opt[pspec.idx].get('grepprg', flags)
-                " TODO: Do we need to check 'vim' flag, or simply assume it's
-                " set if 'set' is false?
-                if flags.set | call sf.setopt('grepprg', grepprg) | endif
-                let grepformat = s:sp_opt[pspec.idx].get('grepformat', flags)
-                if flags.set | call sf.setopt('grepformat', grepformat) | endif
-            elseif sp_idx_prev != -1 && !isadd
-                " This grep is overflow due to xargification, and the grep
-                " command isn't adding by nature: thus, append 'add' to the
-                " grep command's fiducial form.
-                let grepadd = 'add'
-            endif
-            
-            " TODO: Possibly make 'more' a user-configurable option, but in
-            " any case, make sure that if 'more' is going to be set at all,
-            " it's set only for the final grep (when xargification has
-            " occurred).
-            " TODO: Also make silent configurable.
-            " Problem TODO: silent inhibits hit-enter prompt, which I'd like
-            " to see.
-            " Possible solution: Consider using cexpr et al. with system() in
-            " lieu of grep at al... This would prevent user seeing huge list
-            " of files, but would allow him to see the first error at the
-            " bottom...
-            " Another possible solution: Use silent, but then use :cc or :ll
-            " to have the first error displayed afterwards.
-            " Run [l]grep[add] with appropriate args.
-            " TODO: Append escaped, joined args...
-            exe 'silent ' . grepcmd . grepadd . a:bang . ' ' . grepargs . pspec.files
-            " TEMP DEBUG - May need to be ll instead...
-            let sp_idx_prev = pspec.idx
-        endfor
         " TEMP DEBUG ONLY: Need to use either cc or ll as function of command
         " if I stick with this approach.
         cc
@@ -2045,6 +2033,14 @@ com! FPSClose call s:close()
 com! -nargs=? Refresh call <SID>refresh(<q-args>)
 
 " Grep commands
+" Internal variants
+com! -bang -nargs=+ Vgrep call s:grep('Vgrep', <q-bang>, <f-args>)
+com! -bang -nargs=+ Svgrep call s:grep('Svgrep', <q-bang>, <f-args>)
+com! -bang -nargs=+ Tabvgrep call s:grep('Tabvgrep', <q-bang>, <f-args>)
+com! -bang -nargs=+ Lvgrep call s:grep('Lvgrep', <q-bang>, <f-args>)
+com! -bang -nargs=+ Lsvgrep call s:grep('Lsvgrep', <q-bang>, <f-args>)
+com! -bang -nargs=+ Ltabvgrep call s:grep('Ltabvgrep', <q-bang>, <f-args>)
+" External variants
 com! -bang -nargs=+ Grep call s:grep('Grep', <q-bang>, <f-args>)
 com! -bang -nargs=+ Sgrep call s:grep('Sgrep', <q-bang>, <f-args>)
 com! -bang -nargs=+ Tabgrep call s:grep('Tabgrep', <q-bang>, <f-args>)
@@ -2088,6 +2084,7 @@ com! -nargs=* -complete=customlist,<SID>complete_filenames Spq call FA(<q-args>)
 com! -nargs=* QA FA <q-args>
 com! -nargs=+ FA call FA(<f-args>)
 com! -nargs=1 FA1 call FA(<f-args>)
+com! -nargs=1 QA1 call FA(<q-args>)
 com! -nargs=1 Eg call Eg(<f-args>)
 com! -nargs=1 Egr call Egr(<f-args>)
 com! -nargs=* CLR call CLR(<f-args>)
