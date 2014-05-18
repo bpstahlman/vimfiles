@@ -1511,60 +1511,122 @@ fu! s:get_unconstrained_pspecs()
     return ret
 endfu
 
-fu! s:do_ext_grep(pspecs, is_adding)
-    " Process each subproject in turn...
-    " Note: A subproject will be represented multiple times (in succession)
-    " in the pspecs array iff xargification constraints prevent the
-    " processing of all the subproject's files in a single grep.
-    let sp_idx_prev = -1
-    " UNDER CONSTRUCTION!!!!!!
-    " TODO: Build tempfile script such that xargified overflow simply goes on
-    " separate lines... May need to restructure loop slightly...
-    for pspec in pspecs
-        let sp_cfg = s:sp_cfg[pspec.idx]
-        let grepadd = ''
-        if pspec.idx != sp_idx_prev
-            " First encounter with this subproject
-            " Move to root of subproject.
-            call sf.pushd(sp_cfg.rootdir)
-            " Note: If user has not overridden grepprg and grepformat,
-            " keep current Vim setting.
-            let flags = {}
-            let grepprg = s:sp_opt[pspec.idx].get('grepprg', flags)
-            if flags.set | call sf.setopt('grepprg', grepprg) | endif
-            let grepformat = s:sp_opt[pspec.idx].get('grepformat', flags)
-            if flags.set | call sf.setopt('grepformat', grepformat) | endif
-        elseif sp_idx_prev != -1 && !a:is_adding
-            " This grep is overflow due to xargification, and the grep
-            " command isn't adding by nature: thus, append 'add' to the
-            " grep command's fiducial form.
-            let grepadd = 'add'
+" TODO: Move this to util section, possibly wrapping in object to facilitate
+" cleanup.
+fu! s:get_tempfile()
+    let base = '.fpstmp'
+    let name = base
+    let i = 1
+    while glob(name)
+        if i > 100
+            throw "Can't find suitable name for temporary file in `" . getcwd() . "'"
         endif
-        
-        " TODO: Consider whether/how to use stuff like 'more' and
-        " 'silent', possibly making things configurable...
-        " Use one of the following to perform grep:
-        " grep!, lgrep!, grepadd!, lgrepadd!
-        " Note: Use bang unconditionally to defer any jumps.
-        " TODO: Append escaped, joined args...
-        exe 'silent ' . grepcmd . grepadd . a:bang . ' ' . grepargs . pspec.files
-        " TEMP DEBUG - May need to be ll instead...
-        let sp_idx_prev = pspec.idx
+        let name = base . printf("%03d", i)
+        let i += 1
+    endwhile
+    " Write a placeholder to make sure we can write here.
+    " Note: Subsequent calls to writefile will overwrite. Caller responsible
+    " for deleting.
+    if writefile([], name, 1)
+        throw "Can't write temporary file in `" . getcwd() . "'"
+    endif
+    return name
+endfu
+
+fu! s:do_ext_grep(pspecs, argstr, bang, use_ll, is_adding)
+    " Process each subproject in turn: in the root dir of each, build and run
+    " (with system()) a script that accomplishes the grep, catching the result
+    " to be fed into the applicable cexpr variant.
+    " Note: A subproject will be represented multiple times (in succession) in
+    " the pspecs array iff xargification constraints prevent the processing of
+    " all the subproject's files in a single grep. In such cases, the inner
+    " loop is used to put multiple command lines into a single script.
+    let idx = 0
+    let len = len(pspecs)
+    while idx < len
+        if idx == 0
+            " Boostrap
+            let pspec_next = pspecs[idx]
+        endif
+        let pspec = pspec_next
+        let scriptlines = []
+        while idx < len && pspec_next.idx == pspec.idx
+            " Accumulate another line for script
+            " TODO: Use grepprg option (parsing $* etc...)
+            call add(scriptlines, 'grep ' . a:args . ' ' . pspec_next.files)
+            " Safe because of pre-loop assignment to pspec_next
+            let idx += 1
+            if idx < len
+                let pspec_next = pspecs[idx]
+            endif
+        endwhile
+        " Ready to process all batches for current sp.
+        let sp_cfg = s:sp_cfg[pspec.idx]
+        " Note: If user has not overridden grepprg and grepformat,
+        " keep current Vim setting.
+        let flags = {}
+        let grepprg = s:sp_opt[pspec.idx].get('grepprg', flags)
+        if flags.set | call sf.setopt('grepprg', grepprg) | endif
+        " Note: Plugin option grepformat corresponds to Vim option
+        " 'errorformat' (because we're using cexpr et al.)
+        let grepformat = s:sp_opt[pspec.idx].get('grepformat', flags)
+        if flags.set | call sf.setopt('errorformat', grepformat) | endif
+        " Move to root of subproject and create the temporary script file.
+        " Rationale: Avoid potential cross-platform issues with absolute
+        " paths.
+        call sf.pushd(sp_cfg.rootdir)
+        " This try and associated 'finally' ensures cleanup of tempfile
+        " created in current dir.
+        " Note: Intentionally placing call to get_tempfile outside try.
+        " Rationale: Abnormal return from get_tempfile obviates need for
+        " cleanup.
+        let scriptname = s:get_tempfile()
+        try
+            call writefile(scriptlines, scriptname)
+            " TODO: Introduce plugin-specific shell/shellcmdflag options.
+            " Note: Ideally, would use stdin arg to system(), as this would
+            " obviate need for tempfile in current dir, but this would work
+            " only for shells that will parse stdin.
+            let result = system(&shell . ' ' . &shellcmdflag . ' ' . scriptname)
+            " Use one of the following to add files: cexpr!, lexpr!, caddexpr, laddexpr
+            " Note: Use bang (if supported) to inhibit jump, and silent to suppress its output.
+            " Rationale: Both jump and output will be handled in command-
+            " appropriate way at conclusion of loop.
+            " Rationale: cexpr and grep command variants handle bang/inhibit
+            " differently, but we need them to work the same for Find and
+            " Grep.
+            let addcmd = (use_ll ? 'l' : 'c')
+                \. (is_adding || idx > 0 ? 'add' : '')
+                \. 'expr' . (!is_adding && idx == 0 ? '!' : '')
+            exe 'silent ' . addcmd . ' l:result'
+        finally
+            " Design Decision: Could test for failure and report, but odds of
+            " failure are low, as is the cost (a file left in sp root).
+            call delete(scriptname)
+        endtry
     endfor
+    if !a:bang
+        " Jump to *current* match (for add variants, this will be whatever
+        " was current before the command).
+        exe use_ll ? 'll' : 'cc'
+    else
+        " Without this, user gets no feedback.
+        echomsg "Added " . file_cnt . " matches to " . (use_ll ? 'location' : 'quickfix') . " list"
+    endif
 endfu
 
 fu! s:grep(cmd, bang, cmdline)
     let sf = s:sf_create()
     try
         " Parse cmdline into an array of specs and everything else.
-        let [pspecs, args] = s:parse_raw_cmdline(a:cmdline)
+        let [pspecs, argstr] = s:parse_raw_cmdline(a:cmdline)
         if empty(pspecs)
             " No specs provided: search all files in all subprojects...
             " Note: This is different from non-empty pspecs that contain no
             " files (handled later)...
             let pspecs = s:get_unconstrained_pspecs()
         endif
-        if empty(args)
+        if empty(argstr)
             echoerr "Must specify at least 1 pattern for grep."
         endif
         " Extract some parameters from command name.
@@ -1574,6 +1636,11 @@ fu! s:grep(cmd, bang, cmdline)
         let external = a:cmd !~? 'vgrep'
         " Prepare pspec list by sorting, combining and uniquifying.
         let pspecs = s:sort_and_combine_pspecs(pspecs)
+        " Assumption: Matchless subprojects were culled by
+        " sort_and_combine_pspecs.
+        if empty(pspecs)
+            echoerr "No file(s) to grep."
+        endif
         if external
             " TODO: Where to configure max len? Also, calculate fixlen
             " Note: xargify_pspecs handles sorting, combining, and uniquifying.
@@ -1584,23 +1651,15 @@ fu! s:grep(cmd, bang, cmdline)
             " command line.
             call s:convert_file_list_to_string(pspecs, 0)
         endif
-        " Assumption: Matchless subprojects were culled by
-        " sort_and_combine_pspecs.
-        if empty(pspecs)
-            echoerr "No file(s) to grep."
-        endif
         if win_cmd != ''
             " Open new window in manner determined by command
             exe win_cmd
         endif
         if external
-            call s:do_ext_grep(pspecs)
+            call s:do_ext_grep(pspecs, argstr, a:bang, use_ll, is_adding)
         else
-            call s:do_int_grep(pspecs)
+            call s:do_int_grep(pspecs, argstr, a:bang, use_ll, is_adding)
         endif
-        " TEMP DEBUG ONLY: Need to use either cc or ll as function of command
-        " if I stick with this approach.
-        cc
     " TODO: What's the rationale for catching only Vim(echoerr) here? What
     " about Vim internal errors?
     catch /Vim(echoerr)/
@@ -1672,7 +1731,7 @@ fu! s:find(cmd, bang, ...)
             " Grep.
             let addcmd = (use_ll ? 'l' : 'c')
                 \. (is_adding || sp_idx > 0 ? 'add' : '')
-                \. 'expr' . (!is_adding ? '!' : '')
+                \. 'expr' . (!is_adding && sp_idx == 0 ? '!' : '')
             exe 'silent ' . addcmd . ' l:files'
             "echomsg addcmd . ' files'
             let file_cnt += len(files)
