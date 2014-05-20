@@ -1084,11 +1084,9 @@ endfu
 " Break input command line into 2 pieces:
 " 1. a List of specs
 " 2. everything else
-" Returns: a Dictionary with the following keys:
-"   specs:
-"     List of specs
-"   rest
-"     command line remaining after spec removal
+" Returns: a List with the following elements:
+"   0: List of specs
+"   1: string representing command line remaining after spec removal
 " Note: This function is not responsible for validating the specs; at this
 " point, if something looks as though it could be a spec, we'll treat it as
 " such. It's quite possible that one of the specs will subsequently fail
@@ -1119,7 +1117,7 @@ fu! s:parse_raw_cmdline(cmdline)
     let specs = split(specstr, '\%(^\|[^\\]\)\%(\\\\\)*\zs\s\+\ze')
     " Remove only the backslashes that are escaping whitespace.
     call map(specs, 'substitute(v:val, ''\%(^\|[^\\]\)\%(\\\\\)*\zs\(\\\)\ze\s\+'', '''', ''g'')')
-    return {'specs': specs, 'rest': rest}
+    return [specs, rest]
 endfu
 
 " Parse input spec designating subproject(s) and glob.
@@ -1223,29 +1221,21 @@ fu! s:get_files_for_spec(spec, partial, throw)
     endfor
     return ret
 endfu
-fu! s:parse_grep_cmdline(args)
-    let argidx = 0 " Will point to first non-plugin arg at loop termination
+fu! s:parse_grep_cmdline(cmdline)
+    " Parse cmdline into an array of specs and everything else.
+    let [specs, argstr] = s:parse_raw_cmdline(a:cmdline)
     " Command line can contain multiple specs; simply concatenate the arrays
     " returned by each call to get_files_for_spec(), each of which corresponds
     " to a different spec, with each spec potentially involving multiple
     " subprojects).
-    let sps = []
-    for arg in a:args
-        if arg == '--'
-            let argidx += 1
-            break
-        elseif arg[0] != '-' && arg[0] != ':'
-            break
-        else
-            " TODO: Decide about partial
-            call extend(sps, s:get_files_for_spec(arg, 1, 1))
-        endif
-        let argidx += 1
+    let pspecs = []
+    for spec in specs
+        " TODO: Decide about partial
+        call extend(pspecs, s:get_files_for_spec(spec, 1, 1))
     endfor
-    " Return a dict containing array of parsed specs and array of non-plugin
-    " args.
-    "return {'pspecs' => sps, 'args' => a:args[argidx:]}
-    return [sps, a:args[argidx :]]
+    " Return a List containing array of parsed specs and a string representing
+    " the non-plugin args.
+    return [pspecs, argstr]
 endfu
 " This one is only for :Edit, :Split, et al.
 " It's fundamentally different from parse_grep_cmdline and
@@ -1514,7 +1504,7 @@ endfu
 " TODO: Move this to util section, possibly wrapping in object to facilitate
 " cleanup.
 fu! s:get_tempfile()
-    let base = '.fpstmp'
+    let base = 'fpstmp'
     let name = base
     let i = 1
     while glob(name)
@@ -1533,7 +1523,7 @@ fu! s:get_tempfile()
     return name
 endfu
 
-fu! s:do_ext_grep(pspecs, argstr, bang, use_ll, is_adding)
+fu! s:do_ext_grep(sf, pspecs, argstr, bang, use_ll, is_adding)
     " Process each subproject in turn: in the root dir of each, build and run
     " (with system()) a script that accomplishes the grep, catching the result
     " to be fed into the applicable cexpr variant.
@@ -1542,22 +1532,26 @@ fu! s:do_ext_grep(pspecs, argstr, bang, use_ll, is_adding)
     " all the subproject's files in a single grep. In such cases, the inner
     " loop is used to put multiple command lines into a single script.
     let idx = 0
-    let len = len(pspecs)
+    let len = len(a:pspecs)
+    " TODO: Perhaps refactor the inner loop, then use idx instead of force_add.
+    " Rationale: The inner loop is complicated unnecessarily because of
+    " reluctance to use a lookahead index, and this is silly optimization...
+    let force_add = 0
     while idx < len
         if idx == 0
             " Boostrap
-            let pspec_next = pspecs[idx]
+            let pspec_next = a:pspecs[0]
         endif
         let pspec = pspec_next
         let scriptlines = []
         while idx < len && pspec_next.idx == pspec.idx
             " Accumulate another line for script
             " TODO: Use grepprg option (parsing $* etc...)
-            call add(scriptlines, 'grep ' . a:args . ' ' . pspec_next.files)
+            call add(scriptlines, 'grep -n ' . a:argstr . ' ' . pspec_next.files)
             " Safe because of pre-loop assignment to pspec_next
             let idx += 1
             if idx < len
-                let pspec_next = pspecs[idx]
+                let pspec_next = a:pspecs[idx]
             endif
         endwhile
         " Ready to process all batches for current sp.
@@ -1566,15 +1560,15 @@ fu! s:do_ext_grep(pspecs, argstr, bang, use_ll, is_adding)
         " keep current Vim setting.
         let flags = {}
         let grepprg = s:sp_opt[pspec.idx].get('grepprg', flags)
-        if flags.set | call sf.setopt('grepprg', grepprg) | endif
+        if flags.set | call a:sf.setopt('grepprg', grepprg) | endif
         " Note: Plugin option grepformat corresponds to Vim option
         " 'errorformat' (because we're using cexpr et al.)
         let grepformat = s:sp_opt[pspec.idx].get('grepformat', flags)
-        if flags.set | call sf.setopt('errorformat', grepformat) | endif
+        if flags.set | call a:sf.setopt('errorformat', grepformat) | endif
         " Move to root of subproject and create the temporary script file.
         " Rationale: Avoid potential cross-platform issues with absolute
         " paths.
-        call sf.pushd(sp_cfg.rootdir)
+        call a:sf.pushd(sp_cfg.rootdir)
         " This try and associated 'finally' ensures cleanup of tempfile
         " created in current dir.
         " Note: Intentionally placing call to get_tempfile outside try.
@@ -1587,7 +1581,11 @@ fu! s:do_ext_grep(pspecs, argstr, bang, use_ll, is_adding)
             " Note: Ideally, would use stdin arg to system(), as this would
             " obviate need for tempfile in current dir, but this would work
             " only for shells that will parse stdin.
-            let result = system(&shell . ' ' . &shellcmdflag . ' ' . scriptname)
+            " Caveat: Some shells won't have ./ in PATH, so we can't simply
+            " use bare tempfile name.
+            " TODO: Don't hardcode the ./ - allow user to override with an
+            " option.
+            let result = system(&shell . ' ' . &shellcmdflag . ' ./' . scriptname)
             " Use one of the following to add files: cexpr!, lexpr!, caddexpr, laddexpr
             " Note: Use bang (if supported) to inhibit jump, and silent to suppress its output.
             " Rationale: Both jump and output will be handled in command-
@@ -1595,31 +1593,32 @@ fu! s:do_ext_grep(pspecs, argstr, bang, use_ll, is_adding)
             " Rationale: cexpr and grep command variants handle bang/inhibit
             " differently, but we need them to work the same for Find and
             " Grep.
-            let addcmd = (use_ll ? 'l' : 'c')
-                \. (is_adding || idx > 0 ? 'add' : '')
-                \. 'expr' . (!is_adding && idx == 0 ? '!' : '')
+            let addcmd = (a:use_ll ? 'l' : 'c')
+                \. (a:is_adding || force_add ? 'add' : '')
+                \. 'expr' . (!a:is_adding && idx == 0 ? '!' : '')
             exe 'silent ' . addcmd . ' l:result'
         finally
             " Design Decision: Could test for failure and report, but odds of
             " failure are low, as is the cost (a file left in sp root).
             call delete(scriptname)
         endtry
-    endfor
+        let force_add = 1
+    endwhile
     if !a:bang
         " Jump to *current* match (for add variants, this will be whatever
         " was current before the command).
-        exe use_ll ? 'll' : 'cc'
+        exe a:use_ll ? 'll' : 'cc'
     else
         " Without this, user gets no feedback.
-        echomsg "Added " . file_cnt . " matches to " . (use_ll ? 'location' : 'quickfix') . " list"
+        echomsg "Added " . file_cnt . " matches to " . (a:use_ll ? 'location' : 'quickfix') . " list"
     endif
 endfu
 
 fu! s:grep(cmd, bang, cmdline)
     let sf = s:sf_create()
     try
-        " Parse cmdline into an array of specs and everything else.
-        let [pspecs, argstr] = s:parse_raw_cmdline(a:cmdline)
+        " Parse cmdline into an array of parsed specs and everything else.
+        let [pspecs, argstr] = s:parse_grep_cmdline(a:cmdline)
         if empty(pspecs)
             " No specs provided: search all files in all subprojects...
             " Note: This is different from non-empty pspecs that contain no
@@ -1656,9 +1655,9 @@ fu! s:grep(cmd, bang, cmdline)
             exe win_cmd
         endif
         if external
-            call s:do_ext_grep(pspecs, argstr, a:bang, use_ll, is_adding)
+            call s:do_ext_grep(sf, pspecs, argstr, a:bang, use_ll, is_adding)
         else
-            call s:do_int_grep(pspecs, argstr, a:bang, use_ll, is_adding)
+            call s:do_int_grep(sf, pspecs, argstr, a:bang, use_ll, is_adding)
         endif
     " TODO: What's the rationale for catching only Vim(echoerr) here? What
     " about Vim internal errors?
@@ -2093,19 +2092,19 @@ com! -nargs=? Refresh call <SID>refresh(<q-args>)
 
 " Grep commands
 " Internal variants
-com! -bang -nargs=+ Vgrep call s:grep('Vgrep', <q-bang>, <f-args>)
-com! -bang -nargs=+ Svgrep call s:grep('Svgrep', <q-bang>, <f-args>)
-com! -bang -nargs=+ Tabvgrep call s:grep('Tabvgrep', <q-bang>, <f-args>)
-com! -bang -nargs=+ Lvgrep call s:grep('Lvgrep', <q-bang>, <f-args>)
-com! -bang -nargs=+ Lsvgrep call s:grep('Lsvgrep', <q-bang>, <f-args>)
-com! -bang -nargs=+ Ltabvgrep call s:grep('Ltabvgrep', <q-bang>, <f-args>)
+com! -bang -nargs=1 Vgrep call s:grep('Vgrep', <q-bang>, <f-args>)
+com! -bang -nargs=1 Svgrep call s:grep('Svgrep', <q-bang>, <f-args>)
+com! -bang -nargs=1 Tabvgrep call s:grep('Tabvgrep', <q-bang>, <f-args>)
+com! -bang -nargs=1 Lvgrep call s:grep('Lvgrep', <q-bang>, <f-args>)
+com! -bang -nargs=1 Lsvgrep call s:grep('Lsvgrep', <q-bang>, <f-args>)
+com! -bang -nargs=1 Ltabvgrep call s:grep('Ltabvgrep', <q-bang>, <f-args>)
 " External variants
-com! -bang -nargs=+ Grep call s:grep('Grep', <q-bang>, <f-args>)
-com! -bang -nargs=+ Sgrep call s:grep('Sgrep', <q-bang>, <f-args>)
-com! -bang -nargs=+ Tabgrep call s:grep('Tabgrep', <q-bang>, <f-args>)
-com! -bang -nargs=+ Lgrep call s:grep('Lgrep', <q-bang>, <f-args>)
-com! -bang -nargs=+ Lsgrep call s:grep('Lsgrep', <q-bang>, <f-args>)
-com! -bang -nargs=+ Ltabgrep call s:grep('Ltabgrep', <q-bang>, <f-args>)
+com! -bang -nargs=1 Grep call s:grep('Grep', <q-bang>, <f-args>)
+com! -bang -nargs=1 Sgrep call s:grep('Sgrep', <q-bang>, <f-args>)
+com! -bang -nargs=1 Tabgrep call s:grep('Tabgrep', <q-bang>, <f-args>)
+com! -bang -nargs=1 Lgrep call s:grep('Lgrep', <q-bang>, <f-args>)
+com! -bang -nargs=1 Lsgrep call s:grep('Lsgrep', <q-bang>, <f-args>)
+com! -bang -nargs=1 Ltabgrep call s:grep('Ltabgrep', <q-bang>, <f-args>)
 
 " Grep add variants
 " Design Decision: Don't support window-creating/adding variants.
@@ -2116,8 +2115,8 @@ com! -bang -nargs=+ Ltabgrep call s:grep('Ltabgrep', <q-bang>, <f-args>)
 " entry prior to the command (which often means no jump at all).
 " Bottom Line: The complexity engendered by window-creating/adding variants
 " would not be justified by the expected use case.
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Grepadd call s:grep('Grepadd', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Lgrepadd call s:grep('Lgrepadd', <q-bang>, <f-args>)
+com! -bang -nargs=1 Grepadd call s:grep('Grepadd', <q-bang>, <f-args>)
+com! -bang -nargs=1 Lgrepadd call s:grep('Lgrepadd', <q-bang>, <f-args>)
 
 " Find commands
 com! -bang -nargs=+ Find call s:find('Find', <q-bang>, <f-args>)
