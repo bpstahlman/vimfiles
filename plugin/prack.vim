@@ -1481,10 +1481,10 @@ endfu
 " command line, or if shell arg is set, for user's shell.
 " Important Note: This is a mutator method: list is modified in place.
 fu! s:convert_file_list_to_string(pspecs, shell)
-    for pspec in pspecs
+    for pspec in a:pspecs
         let fs = ''
         for f in pspec.files
-            let fs .= ' ' . a:shell ? shellescape(f) : fnameescape(f)
+            let fs .= ' ' . (a:shell ? shellescape(f) : fnameescape(f))
         endfor
         " Replace the list with the accumulated string.
         " Note: Confirmed that Vim permits changing Dictionary value type
@@ -1521,6 +1521,33 @@ fu! s:get_tempfile()
         throw "Can't write temporary file in `" . getcwd() . "'"
     endif
     return name
+endfu
+
+fu! s:do_int_grep(sf, pspecs, argstr, bang, use_ll, is_adding)
+    let add = a:is_adding ? 'add' : ''
+    for pspec in a:pspecs
+        let sp_cfg = s:sp_cfg[pspec.idx]
+        " TODO: Decide on this: caller has used convert_file_list_to_string to
+        " mutate the files member of sp_cfg. Is that best way? (Keep in mind
+        " that the mutated structure is not part of s:cfg, but something
+        " derived from it.
+        "let files = ''
+        "for file in sp_cfg.files
+        "    let files .= ' ' . fnameescape(file)
+        "endfor
+        " Move to root of subproject and create the temporary script file.
+        " Rationale: Avoid potential cross-platform issues with absolute
+        " paths.
+        call a:sf.pushd(sp_cfg.rootdir)
+
+        " TODO: Echo a status line here (perhaps truncated version of the full
+        " one) since we're using silent. Hmm... Unless Vim truncates - that
+        " would be better...
+        " Note: Always inhibit jump here, as that's handled by caller.
+        exe 'noautocmd ' . (a:use_ll ? 'l' : '') . 'vimgrep' . add . ' /' . a:argstr . '/j' . pspec.files
+        " Make sure we create at most 1 list.
+        let add = 'add'
+    endfor
 endfu
 
 fu! s:do_ext_grep(sf, pspecs, argstr, bang, use_ll, is_adding)
@@ -1586,6 +1613,7 @@ fu! s:do_ext_grep(sf, pspecs, argstr, bang, use_ll, is_adding)
             " TODO: Don't hardcode the ./ - allow user to override with an
             " option.
             let result = system(&shell . ' ' . &shellcmdflag . ' ./' . scriptname)
+            "echomsg '|' . result . '|'
             " Use one of the following to add files: cexpr!, lexpr!, caddexpr, laddexpr
             " Note: Use bang (if supported) to inhibit jump, and silent to suppress its output.
             " Rationale: Both jump and output will be handled in command-
@@ -1604,14 +1632,6 @@ fu! s:do_ext_grep(sf, pspecs, argstr, bang, use_ll, is_adding)
         endtry
         let force_add = 1
     endwhile
-    if !a:bang
-        " Jump to *current* match (for add variants, this will be whatever
-        " was current before the command).
-        exe a:use_ll ? 'll' : 'cc'
-    else
-        " Without this, user gets no feedback.
-        echomsg "Added " . file_cnt . " matches to " . (a:use_ll ? 'location' : 'quickfix') . " list"
-    endif
 endfu
 
 fu! s:grep(cmd, bang, cmdline)
@@ -1658,6 +1678,16 @@ fu! s:grep(cmd, bang, cmdline)
             call s:do_ext_grep(sf, pspecs, argstr, a:bang, use_ll, is_adding)
         else
             call s:do_int_grep(sf, pspecs, argstr, a:bang, use_ll, is_adding)
+        endif
+        if !a:bang
+            " Jump to *current* match (for add variants, this will be whatever
+            " was current before the command).
+            exe use_ll ? 'll' : 'cc'
+        else
+            " Without this, user gets no feedback.
+            " TODO: How/whether to get file count. If expensive/complex, perhaps
+            " don't bother.
+            echomsg "Added " . '?' . " matches to " . (use_ll ? 'location' : 'quickfix') . " list"
         endif
     " TODO: What's the rationale for catching only Vim(echoerr) here? What
     " about Vim internal errors?
@@ -2090,6 +2120,17 @@ com! FPSClose call s:close()
 " it too soon.
 com! -nargs=? Refresh call <SID>refresh(<q-args>)
 
+" TODO: Consider putting the Tab and S first, and either changing Tab to T
+" (for brevity) or S to Sp (for consistency).
+" Tgrep
+" Tlgrep
+" Tlvgrep
+" Sgrep
+" Slgrep
+" Slvgrep
+" Lgrep
+" Lvgrep
+"
 " Grep commands
 " Internal variants
 com! -bang -nargs=1 Vgrep call s:grep('Vgrep', <q-bang>, <f-args>)
@@ -2107,7 +2148,8 @@ com! -bang -nargs=1 Lsgrep call s:grep('Lsgrep', <q-bang>, <f-args>)
 com! -bang -nargs=1 Ltabgrep call s:grep('Ltabgrep', <q-bang>, <f-args>)
 
 " Grep add variants
-" Design Decision: Don't support window-creating/adding variants.
+" Design Decision: Don't support window-creating/adding variants - definitely
+" not for location list - possible not for qf list.
 " Rationale: Not much use case for it: location list isn't even copied to new
 " window, so adding would be difficult. Moreover, you typically use a
 " window-creating variant to avoid jumping for a new qf/ll list, but with
@@ -2117,6 +2159,8 @@ com! -bang -nargs=1 Ltabgrep call s:grep('Ltabgrep', <q-bang>, <f-args>)
 " would not be justified by the expected use case.
 com! -bang -nargs=1 Grepadd call s:grep('Grepadd', <q-bang>, <f-args>)
 com! -bang -nargs=1 Lgrepadd call s:grep('Lgrepadd', <q-bang>, <f-args>)
+com! -bang -nargs=1 Vgrepadd call s:grep('Vgrepadd', <q-bang>, <f-args>)
+com! -bang -nargs=1 Lvgrepadd call s:grep('Lvgrepadd', <q-bang>, <f-args>)
 
 " Find commands
 com! -bang -nargs=+ Find call s:find('Find', <q-bang>, <f-args>)
