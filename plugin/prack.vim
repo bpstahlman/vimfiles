@@ -19,7 +19,7 @@ let g:fps_config = {
                     \'shortname': 'j',
                     \'root': ['src/public', ';asec'],
                     \'find': 'find . \( \( '
-                        \.' -path ./resources/js -o -path ./shared/extjs -o -path ./help/transition/jquery.js \) '
+                        \.' -path ./shared/extjs -o -path ./help/transition/jquery.js \) '
                         \.' -prune -false \) -o -iname ''*.js'''
                 \}
             \}
@@ -1529,8 +1529,7 @@ fu! s:do_int_grep(sf, pspecs, argstr, bang, use_ll, is_adding)
         let sp_cfg = s:sp_cfg[pspec.idx]
         " TODO: Decide on this: caller has used convert_file_list_to_string to
         " mutate the files member of sp_cfg. Is that best way? (Keep in mind
-        " that the mutated structure is not part of s:cfg, but something
-        " derived from it.
+        " that the mutated structure is not part of s:cfg, but a derivative.
         "let files = ''
         "for file in sp_cfg.files
         "    let files .= ' ' . fnameescape(file)
@@ -1540,10 +1539,9 @@ fu! s:do_int_grep(sf, pspecs, argstr, bang, use_ll, is_adding)
         " paths.
         call a:sf.pushd(sp_cfg.rootdir)
 
-        " TODO: Echo a status line here (perhaps truncated version of the full
-        " one) since we're using silent. Hmm... Unless Vim truncates - that
-        " would be better...
-        " Note: Always inhibit jump here, as that's handled by caller.
+        " Note: Always inhibit jump here, as that's handled by caller. Don't
+        " use 'silent', as we want to see the periodic progress indicator
+        " displayed by vimgrep.
         exe 'noautocmd ' . (a:use_ll ? 'l' : '') . 'vimgrep' . add . ' /' . a:argstr . '/j' . pspec.files
         " Make sure we create at most 1 list.
         let add = 'add'
@@ -1649,9 +1647,9 @@ fu! s:grep(cmd, bang, cmdline)
             echoerr "Must specify at least 1 pattern for grep."
         endif
         " Extract some parameters from command name.
-        let use_ll = a:cmd =~? '^l'
+        let use_ll = a:cmd =~? '^[st]\?l'
         let is_adding = a:cmd[-3:] == 'add'
-        let win_cmd = a:cmd =~? '^[l]\?s' ? 'new' : a:cmd =~? '^[l]\?tab' ? 'tabnew' : ''
+        let win_cmd = a:cmd =~? '^s' ? 'new' : a:cmd =~? '^t' ? 'tabnew' : ''
         let external = a:cmd !~? 'vgrep'
         " Prepare pspec list by sorting, combining and uniquifying.
         let pspecs = s:sort_and_combine_pspecs(pspecs)
@@ -1723,9 +1721,9 @@ fu! s:find(cmd, bang, ...)
             echoerr "No matching files"
         endif
         " Extract some parameters from command name.
-        let use_ll = a:cmd =~? '^l'
+        let use_ll = a:cmd =~? '^[st]\?l'
         let is_adding = a:cmd[-3:] == 'add'
-        let win_cmd = a:cmd =~? '^[l]\?s' ? 'new' : a:cmd =~? '^[l]\?tab' ? 'tabnew' : ''
+        let win_cmd = a:cmd =~? '^s' ? 'new' : a:cmd =~? '^t' ? 'tabnew' : ''
         " TODO: Consider whether to make the 'errorformat' set local to
         " the window for commands that create a new window. Weigh against
         " benefits of consistency with common case of using an existing
@@ -2120,55 +2118,52 @@ com! FPSClose call s:close()
 " it too soon.
 com! -nargs=? Refresh call <SID>refresh(<q-args>)
 
-" TODO: Consider putting the Tab and S first, and either changing Tab to T
-" (for brevity) or S to Sp (for consistency).
-" Tgrep
-" Tlgrep
-" Tlvgrep
-" Sgrep
-" Slgrep
-" Slvgrep
-" Lgrep
-" Lvgrep
-"
 " Grep commands
+" Grep non-adding variants
 " Internal variants
 com! -bang -nargs=1 Vgrep call s:grep('Vgrep', <q-bang>, <f-args>)
 com! -bang -nargs=1 Svgrep call s:grep('Svgrep', <q-bang>, <f-args>)
-com! -bang -nargs=1 Tabvgrep call s:grep('Tabvgrep', <q-bang>, <f-args>)
+com! -bang -nargs=1 Tvgrep call s:grep('Tvgrep', <q-bang>, <f-args>)
 com! -bang -nargs=1 Lvgrep call s:grep('Lvgrep', <q-bang>, <f-args>)
-com! -bang -nargs=1 Lsvgrep call s:grep('Lsvgrep', <q-bang>, <f-args>)
-com! -bang -nargs=1 Ltabvgrep call s:grep('Ltabvgrep', <q-bang>, <f-args>)
+com! -bang -nargs=1 Slvgrep call s:grep('Slvgrep', <q-bang>, <f-args>)
+com! -bang -nargs=1 Tlvgrep call s:grep('Tlvgrep', <q-bang>, <f-args>)
 " External variants
 com! -bang -nargs=1 Grep call s:grep('Grep', <q-bang>, <f-args>)
 com! -bang -nargs=1 Sgrep call s:grep('Sgrep', <q-bang>, <f-args>)
-com! -bang -nargs=1 Tabgrep call s:grep('Tabgrep', <q-bang>, <f-args>)
+com! -bang -nargs=1 Tgrep call s:grep('Tgrep', <q-bang>, <f-args>)
 com! -bang -nargs=1 Lgrep call s:grep('Lgrep', <q-bang>, <f-args>)
-com! -bang -nargs=1 Lsgrep call s:grep('Lsgrep', <q-bang>, <f-args>)
-com! -bang -nargs=1 Ltabgrep call s:grep('Ltabgrep', <q-bang>, <f-args>)
+com! -bang -nargs=1 Slgrep call s:grep('Slgrep', <q-bang>, <f-args>)
+com! -bang -nargs=1 Tlgrep call s:grep('Tlgrep', <q-bang>, <f-args>)
 
-" Grep add variants
-" Design Decision: Don't support window-creating/adding variants - definitely
-" not for location list - possible not for qf list.
+" Grep adding variants
+" Design Decision: Don't support window-creating/adding variants for location
+" list.
 " Rationale: Not much use case for it: location list isn't even copied to new
-" window, so adding would be difficult. Moreover, you typically use a
-" window-creating variant to avoid jumping for a new qf/ll list, but with
-" adding variants, the only type of jump that occurs is to what was *current*
-" entry prior to the command (which often means no jump at all).
-" Bottom Line: The complexity engendered by window-creating/adding variants
-" would not be justified by the expected use case.
-com! -bang -nargs=1 Grepadd call s:grep('Grepadd', <q-bang>, <f-args>)
-com! -bang -nargs=1 Lgrepadd call s:grep('Lgrepadd', <q-bang>, <f-args>)
+" window, so implementation would be difficult. Moreover, you typically use a
+" window-creating variant to avoid losing your place in the current window,
+" but with adding variants, the only type of jump that occurs is to what was
+" *current* entry prior to the command (which often means no movement at all).
+" Bottom Line: The complexity engendered by
+" window-creating/adding/location-list variants would not be justified by the
+" expected use case.
+" Internal variants
 com! -bang -nargs=1 Vgrepadd call s:grep('Vgrepadd', <q-bang>, <f-args>)
+com! -bang -nargs=1 Svgrepadd call s:grep('Svgrepadd', <q-bang>, <f-args>)
+com! -bang -nargs=1 Tvgrepadd call s:grep('Tvgrepadd', <q-bang>, <f-args>)
 com! -bang -nargs=1 Lvgrepadd call s:grep('Lvgrepadd', <q-bang>, <f-args>)
+" External variants
+com! -bang -nargs=1 Grepadd call s:grep('Grepadd', <q-bang>, <f-args>)
+com! -bang -nargs=1 Sgrepadd call s:grep('Sgrepadd', <q-bang>, <f-args>)
+com! -bang -nargs=1 Tgrepadd call s:grep('Tgrepadd', <q-bang>, <f-args>)
+com! -bang -nargs=1 Lgrepadd call s:grep('Lgrepadd', <q-bang>, <f-args>)
 
 " Find commands
-com! -bang -nargs=+ Find call s:find('Find', <q-bang>, <f-args>)
-com! -bang -nargs=+ Sfind call s:find('Sfind', <q-bang>, <f-args>)
-com! -bang -nargs=+ Tabfind call s:find('Tabfind', <q-bang>, <f-args>)
-com! -bang -nargs=+ Lfind call s:find('Lfind', <q-bang>, <f-args>)
-com! -bang -nargs=+ Lsfind call s:find('Lsfind', <q-bang>, <f-args>)
-com! -bang -nargs=+ Ltabfind call s:find('Ltabfind', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Find call s:find('Find', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Sfind call s:find('Sfind', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Tfind call s:find('Tfind', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Lfind call s:find('Lfind', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Slfind call s:find('Slfind', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Tlfind call s:find('Tlfind', <q-bang>, <f-args>)
 
 " Find add variants
 " Design Decision: See note on Grep add variants.
@@ -2176,6 +2171,10 @@ com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Findadd call s:
 com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Lfindadd call s:find('Lfindadd', <q-bang>, <f-args>)
 
 " Edit commands (UNDER CONSTRUCTION)
+" TODO: Should the commands be Sedit, Tedit and Edit (intra-plugin
+" consistency) or Split, Edit, Tabedit (Vim consistency)?
+" Note: I sort of like intra-plugin consistency; also, I've always found 'tab'
+" to be annoyingly long to type in Vim...
 com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Split call s:edit('Split', <q-bang>, <f-args>)
 com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Edit call s:edit('Edit', <q-bang>, <f-args>)
 com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Tabedit call s:edit('Tabedit', <q-bang>, <f-args>)
