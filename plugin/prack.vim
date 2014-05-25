@@ -411,10 +411,11 @@ fu! s:get_cfg_idx(opt)
     else
         " Look for name in s:longnames (array of {'name', ..., 're': ..., 'idx': ...})
         for lname in s:longnames
-            if name <# lname.name
-                break
-            elseif name ==# lname.name || name =~# lname.re
+            if name ==# lname.name || name =~# lname.re
                 return lname.idx
+            elseif name <# lname.name
+                " We've past the last possible match.
+                break
             endif
         endfor
         " Not found!
@@ -1184,6 +1185,8 @@ fu! s:parse_spec(opt, throw)
             " TODO: How to handle invalid specs? For now, just skipping, but
             " perhaps, in accordance with Design Decision above, we should
             " abort...
+            " Yes! Need to abort, to prevent this seeming like unconstrained
+            " search!
             if cfg_idx < 0
                 call s:warn("Invalid subproject spec: " . (is_short ? '-' : '--') . opt)
                 continue
