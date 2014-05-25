@@ -39,15 +39,329 @@ let g:fps_config = {
 " files
 "   List of file paths in canonicial form (possibly sorted)
 
-" Note: This one probably won't be part of the structure.
-" file_filter
-"   Array in which each element is a 2 element array as follows:
-"   0: index into s:files
-"   1: byte offset into indexed path in s:files
+" >>> Functions related to project/subproject object representations
+fu! s:pcfg_create(p_name, ...)
+    let sp_filts = a:0 > 0 ? a:1 : []
+    " Create dictionary to encapsulate the project config
+    let pcfg = {'name': a:p_name, 'spsel': {}, 'spcfg': {}}
+    " Convert a short or long partial name to corresponding subproject
+    fu! pcfg.get_sp(name) dict
+        " TEMP DEBUG
+        return self.spsel.get_name(a:name)
+    endfu
+    let pcfg.spsel = s:spsel_create(a:p_name, sp_filts)
+    return pcfg
+endfu
+fu! s:spsel_create(p_name, ...)
+    let sp_filts = a:0 > 0 ? a:1 : []
+    let spsel = {'longnames': [], 'longpats': [], 'shortnames': {}, 'disabled': {}, 'iter_idx': 0}
+    fu! spsel.disable(name)
+        let self.disabled[a:name] = 1
+    endfu
+    fu! spsel.enable(name) dict
+        " TODO: Perhaps delete...
+        let self.disabled[a:name] = 0
+    endfu
+    fu! spsel.is_disabled(name) dict
+        return has_key(self.disabled, a:name) && self.disabled[a:name]
+    endfu
+    fu! spsel.get_name(spec) dict
+        let [is_short, name] = [a:spec[0] == 's', a:spec[2:]]
+        if is_short
+            if has_key(self.shortnames, name)
+                return self.shortnames[name]
+            endif
+        else
+            " Look for name in self.longpats
+            for lpat in self.longpats
+                if name ==# lpat.name || name =~# lpat.re
+                    return lpat.name
+                elseif name <# lpat.name
+                    " We've passed the last possible match.
+                    break
+                endif
+            endfor
+        endif
+        " Not found!
+        " TODO: Throw exception?
+        return ''
+    endfu
+    " Iterator methods used to iterate the longnames in order.
+    fu! spsel.iter_init(...) dict
+        " Bootstrap by setting next to what should be curr, then invoking
+        " iter_next() before anyone can call iter_curr().
+        let [dis, i, next, len] = [a:0 > 0 ? a:1 : 0, -1, -1, len(self.longnames)]
+        while i < len - 1
+            let i += 1
+            if dis || !self.is_disabled(self.longnames[i])
+                " Set next, which will become curr on first call to iter_next()
+                let next = i
+                break
+            endif
+        endwhile
+        " Note: If next is -1, nothing to iterate.
+        let self.iter = {'inc_dis': dis, 'curr': -2, 'next': -1}
+        " Use iter_next() to advance, throwing away return value.
+        call self.iter_next()
+    endfu
+    fu! spsel.iter_curr() dict
+        return self.iter.curr < 0 ? '' : self.longnames[self.iter.curr]
+    endfu
+    fu! spsel.iter_next() dict
+        if self.iter.next < 0
+            return ''
+        endif
+        " Is there a next element?
+        let i = self.iter.next
+        let self.iter.curr = i
+        let [dis, next, len] = [self.iter.inc_dis, -1, len(self.longnames)]
+        while i < len - 1
+            let i += 1
+            if inc_dis || !self.is_disabled(self.longnames[i])
+                let next = i
+                break
+            endif
+            let i += 1
+        endwhile
+        " Save next, which may be -1.
+        let self.iter.next = next
+        return self.longnames[self.iter.curr]
+    endfu
+    fu! spsel.iter_done() dict
+        return self.iter.curr < 0
+    endfu
 
-" >>> Functions used to start/stop the plugin
-" TODO: Perhaps change start to open.
-fu! s:open(p_name)
+    fu! spsel.rewind() dict
+        let self.iter_idx = 0
+    endfu
+    fu! spsel.get_next(...) dict
+        let inc_dis = a:0 > 0 ? a:1 : 0
+        while self.iter_idx < len(self.longnames)
+            if inc_dis || !self.is_disabled(self.longnames[self.iter_idx])
+                let self.iter_idx += 1
+                return self.longnames[self.iter_idx]
+            endif
+            let self.iter_idx += 1
+        endwhile
+        " Signal iteration complete.
+        return ''
+    endfu
+    " Extract information from global plugin config.
+    fu! spsel.init(p_name, ...) dict
+        let sp_filts = a:0 > 0 ? a:1 : []
+        " Make sure there's at least 1 project
+        if !has_key(g:fps_config, 'projects')
+            throw "No projects defined."
+        endif
+        if type(g:fps_config.projects) != 4
+            throw "Invalid project definition. Must be Dictionary."
+        endif
+        " Does the named project exist?
+        if !has_key(g:fps_config.projects, a:p_name)
+            throw "No configuration found. :help TODO fps_config???"
+        endif
+        " TODO: build_opts will throw on (eg) missing required args - handle
+        " somehow...
+        let p_raw = g:fps_config.projects[a:p_name]
+        " Make sure there's at least 1 subproject
+        if !has_key(p_raw, 'subprojects')
+            throw "No subprojects defined for project " . a:p_name
+        endif
+        if type(p_raw.subprojects) != 4
+            throw "Invalid subprojects definition for project " . a:p_name . ". Must be Dictionary."
+        endif
+
+        " Short (single-char) names stored in a hash
+        " Long names stored in sorted array of patterns employing \%[...]
+        let shortnames = {}
+        let longnames = []
+        let lname_to_index = {}
+        for [sp_name, sp_raw] in items(p_raw.subprojects)
+            try
+                " TODO: Don't hardcode these patterns...
+                if (sp_name !~ '^[a-zA-Z0-9_]\+$')
+                    throw "Ignoring invalid subproject name `" . sp_name
+                        \. "': must be sequence of characters matching [a-zA-Z0-9_]."
+                else
+                    if !has_key(lname_to_index, sp_name)
+                        let lname_to_index[sp_name] = sp_name
+                        call add(longnames, sp_name)
+                    else
+                        call s:warn("Warning: Name " . sp_name . " used multiple times. All but first usage ignored.")
+                    endif
+                endif
+                if has_key(sp_raw, 'shortname')
+                    if (sp_raw.shortname !~ '^[a-zA-Z0-9_]$')
+                        call s:warn("Ignoring invalid shortname `" . sp_raw.shortname
+                            \. "': must be single character matching [a-zA-Z0-9_].")
+                    else
+                        if !has_key(shortnames, sp_raw.shortname)
+                            let shortnames[sp_raw.shortname] = sp_name
+                        else
+                            call s:warn("Warning: Name " . sp_raw.shortname . " used multiple times. All but first usage ignored.")
+                        endif
+                    endif
+                endif
+            catch
+                " Invalid subproject
+                call s:warn("Warning: Skipping invalid subproject config `" . sp_name . "': " . v:exception)
+            endtry
+        endfor
+        " If no valid subprojects, no point in continuing...
+        if empty(longnames)
+            throw "No valid subprojects. :help fps-config"
+        endif
+        " Mapping of short names to long.
+        let self.shortnames = shortnames
+        " Array defining enumeration order.
+        let self.longnames = longnames
+        " Array of dicts used to perform longname matching.
+        let self.longpats = Process_longnames(longnames)
+        if !empty(sp_filts)
+            " Constrain project to subset of subprojects.
+            self.apply_sp_filter(sp_filts)
+        endif
+    endfu
+    " Input: List of strings of following form:
+    " ['s:shortopt1', 'l:longopt1', 'l:longopt2', 's:shortopt2']
+    fu! spsel.apply_sp_filter(sp_filts) dict
+        if empty(a:sp_filts)
+            return
+        endif
+        " Build existence hash from input opts.
+        let sel_names = {}
+        for sp_filt in a:sp_filts
+            let [is_short, name] = [sp_filt[0] == 's', sp_filt[2:]]
+            if is_short && has_key(self.shortnames, name)
+                let sel_names[self.shortnames[name]] = 1
+            else
+                " Get full long name.
+                let longname = self.get_name(name)
+                if longname == ''
+                    " TODO: Right way to handle?
+                    throw "Invalid subproject specification: " . name
+                else
+                    " Set key corresponding to *full* longname.
+                    let sel_names[name] = 1
+                endif
+            endif
+        endfor
+        " Use sel_names existence hash to cull entries from
+        " shortnames Dict and longnames List.
+        for [shortname, longname] in items(self.shortnames)
+            if !has_key(longname, sel_names)
+                call remove(self.shortnames, shortname)
+            endif
+        endfor
+        " Loop over longpats from end to simplify removal.
+        let i = len(self.longpats) - 1
+        while i >= 0
+            if !has_key(sel_names, self.longpats[i].name)
+                call remove(self.longpats, i)
+            endif
+            let i -= 1
+        endwhile
+        " Loop over longnames from end to simplify removal.
+        let i = len(self.longnames) - 1
+        while i >= 0
+            if !has_key(sel_names, self.longnames[i])
+                call remove(self.longnames, i)
+            endif
+            let i -= 1
+        endwhile
+    endfu
+    " Private utility function
+    " Take raw input array of longnames and return array of the following:
+    " {'name': <longname>, 're': <regex>}
+    fu! Process_longnames(longnames)
+        " Process the long options to determine the portions required for
+        " uniqueness.
+        call sort(a:longnames)
+        let ln = len(a:longnames)
+        let i = 1
+        let reqs = [matchstr(a:longnames[0], '^.')]
+        while i < ln
+            " Get common portion + 1 char (if possible)
+            let ml = matchlist(a:longnames[i], '\(\%[' . a:longnames[i-1] . ']\)\(.\)\?')
+            let [cmn, nxt] = ml[1:2]
+            " Is it possible we need to lengthen previous req?
+            if len(cmn) >= len(reqs[i-1])
+                " Can we lengthen previous req?
+                if len(reqs[i-1]) < len(a:longnames[i-1])
+                    " Set to common portion + 1 char (if possible)
+                    let reqs[i-1] = matchstr(a:longnames[i-1], cmn . '.\?')
+                endif
+            endif
+            " Take only as much of current as is required for uniqueness:
+            " namely, common portion + 1 char.
+            call add(reqs, cmn . nxt)
+            let i = i + 1
+        endwhile
+        " Build an array of patterns and corresponding indices.
+        " Note: Arrays reqs and longnames are parallel.
+        let longnames = []
+        let i = 0
+        while i < ln
+            let re = reqs[i]
+            " Is the long name longer than the required portion?
+            if len(a:longnames[i]) > len(reqs[i])
+                " Append the optional part within \%[...]
+                let re .= '\%[' . a:longnames[i][len(reqs[i]):] . ']'
+            endif
+            call add(longnames, {'name': a:longnames[i], 're': re})
+            let i = i + 1
+        endwhile
+        return longnames
+    endfu
+    " Initialize.
+    call spsel.init(a:p_name, sp_filts)
+    return spsel
+endfu
+
+fu! Test_p_obj()
+    let prj = s:pcfg_create('asec')
+    echo prj.get_sp('l:p')
+    echo prj.get_sp('l:ph')
+    echo prj.get_sp('s:j')
+    let spsel = prj.spsel
+    call spsel.rewind()
+    let p_name = spsel.get_next()
+    while !empty(p_name)
+        echo p_name
+        let p_name = spsel.get_next()
+    endwhile
+endfu
+
+"<<<
+
+" >>> Functions used to start/stop/refresh the plugin
+" Inputs:
+"   p_name
+"     project name
+"   sp_names
+"     List of subproject (long) names representing a subset of the project to
+"     load.
+fu! s:open(bang, p_name, ...)
+    " TODO: Store name of open project in s:p_name
+    if exists('s:p_name')
+        " Subsequent open implies close.
+        call s:close()
+    endif
+    let sp_names = a:000[:]
+    try
+        call s:process_cfg(a:p_name, sp_names)
+        " Now that we know initialization was successful...
+        let s:p_name = p_name
+    catch
+        echoerr "Cannot open project `" . a:p_name . "': " . v:exception
+        " TODO: Is this necessary? We haven't done any setup yet... We may
+        " have set some static vars (e.g., s:longnames/s:shortnames), but
+        " they'd be set next time...
+        call s:close()
+    endtry
+endfu
+" TODO: Remove this one...
+fu! s:open_orig(p_name)
     " TODO: Probably change s:started to s:opened and have it store name of
     " project.
     if exists('s:started')
@@ -414,7 +728,7 @@ fu! s:get_cfg_idx(opt)
             if name ==# lname.name || name =~# lname.re
                 return lname.idx
             elseif name <# lname.name
-                " We've past the last possible match.
+                " We've passed the last possible match.
                 break
             endif
         endfor
@@ -1121,6 +1435,22 @@ fu! s:parse_raw_cmdline(cmdline)
     return [specs, rest]
 endfu
 
+" Cmdline Format: The portion after the command name looks like this:
+"     p_name [sp_name...]
+" Note: Since no spaces are permitted in project/subproject names, it should
+" be safe to split the command line at whitespace for processing.
+" Returns: Array of the following form:
+" [p_name, [sp_name, ...]]
+" Note: List of sp names could be empty.
+fu! s:parse_open_cmdline(cmdline)
+    let args = split(a:cmdline)
+    " Pop p_name from end.
+    " Assumption: Command definition ensures existence.
+    let p_name = remove(args, -1)
+    let sp_names = args
+    return [p_name, sp_names]
+endfu
+
 " Parse input spec designating subproject(s) and glob.
 " Input spec format:
 " [-<sopts>][--<lopt>[,<lopt>]...][:<glob>]
@@ -1148,6 +1478,11 @@ endfu
 " On a filesystem that allows `:' in a filename, is the `:' part of the glob,
 " or is it an explicit (albeit unnecessary) separator between (omitted)
 " subproject spec and glob `foo'?
+" Refactor_TODO: In order to be able to use this for new FPSOpen and variants
+" (which need to get list of sp names up front), refactor to remove the part
+" that checks long/short opt names. I'm thinking instead of a list of indices,
+" have it return a list of s:<short-opt> and l:<long-opt> strings, or a list
+" of lists or dicts.
 fu! s:parse_spec(opt, throw)
     let oc = '[a-zA-Z0-9_]' " chars that can appear in option
     "                  <sopts>              <lopts>                            <glob>
@@ -2107,19 +2442,20 @@ fu! s:convert_arg_list_to_string(args, external)
 endfu
 " <<<
 " >>> Commands
-" -- Notes --
-" Refresh builds list file(s) specified by command line options
-" [L]Grf and [LGrd] ignore listfiles, anchoring their search from the
-" current file's dir and the cwd, respectively.
 "
 " TODO: -bang for refresh and add completion maybe... Hmmm... Maybe not,
 " because this would entail reading some config at Vim startup...
-com! -nargs=1 FPSOpen call s:open(<f-args>)
-com! FPSClose call s:close()
 " TODO: Move all but load command into load function.
 " Avoid: Better for Grep et al. not to exist than to get errors trying to run
 " it too soon.
-com! -nargs=? Refresh call <SID>refresh(<q-args>)
+com! FPSClose call s:close()
+com! -bang -nargs=+ FPSOpen call s:open(<q-bang>, <f-args>)
+" TODO: Decide how to implement the save of options used on open for use with
+" re-open. E.g., should we save actual command line, and re-execute, possibly
+" ensuring presence of a bang arg?
+com! -bang -nargs=1 FPSReopen call s:open(<q-bang>)
+com! -nargs=1 FPSRefresh call s:refresh(<f-args>)
+"com! -nargs=? Refresh call <SID>refresh(<q-args>)
 
 " Grep commands
 " Grep non-adding variants
