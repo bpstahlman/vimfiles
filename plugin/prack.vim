@@ -9,6 +9,7 @@ let g:fps_config = {
         \'asec': {
             \'subprojects': {
                 \'php': {
+                    \'name': 'php',
                     \'shortname': 'p',
                     \'root': ['src/private', ';asec'],
                     \'find': 'find . \( \( '
@@ -17,6 +18,27 @@ let g:fps_config = {
                 \},
                 \'js': {
                     \'shortname': 'j',
+                    \'root': ['src/public', ';asec'],
+                    \'find': 'find . \( \( '
+                        \.' -path ./shared/extjs -o -path ./help/transition/jquery.js \) '
+                        \.' -prune -false \) -o -iname ''*.js'''
+                \},
+                \'foo': {
+                    \'shortname': 'f',
+                    \'root': ['src/public', ';asec'],
+                    \'find': 'find . \( \( '
+                        \.' -path ./shared/extjs -o -path ./help/transition/jquery.js \) '
+                        \.' -prune -false \) -o -iname ''*.js'''
+                \},
+                \'boo': {
+                    \'shortname': 'b',
+                    \'root': ['src/public', ';asec'],
+                    \'find': 'find . \( \( '
+                        \.' -path ./shared/extjs -o -path ./help/transition/jquery.js \) '
+                        \.' -prune -false \) -o -iname ''*.js'''
+                \},
+                \'baz': {
+                    \'shortname': 'z',
                     \'root': ['src/public', ';asec'],
                     \'find': 'find . \( \( '
                         \.' -path ./shared/extjs -o -path ./help/transition/jquery.js \) '
@@ -88,63 +110,33 @@ fu! s:spsel_create(p_name, ...)
     endfu
     " Iterator methods used to iterate the longnames in order.
     fu! spsel.iter_init(...) dict
-        " Bootstrap by setting next to what should be curr, then invoking
-        " iter_next() before anyone can call iter_curr().
-        let [dis, i, next, len] = [a:0 > 0 ? a:1 : 0, -1, -1, len(self.longnames)]
-        while i < len - 1
-            let i += 1
-            if dis || !self.is_disabled(self.longnames[i])
-                " Set next, which will become curr on first call to iter_next()
-                let next = i
-                break
-            endif
-        endwhile
-        " Note: If next is -1, nothing to iterate.
-        let self.iter = {'inc_dis': dis, 'curr': -2, 'next': -1}
+        let self.iter = {'inc_dis': a:0 > 0 ? a:1 : 0, 'idx': -1}
         " Use iter_next() to advance, throwing away return value.
         call self.iter_next()
     endfu
-    fu! spsel.iter_curr() dict
-        return self.iter.curr < 0 ? '' : self.longnames[self.iter.curr]
+    fu! spsel.iter_current() dict
+        return self.iter.idx == -2 ? '' : self.longnames[self.iter.idx]
     endfu
     fu! spsel.iter_next() dict
-        if self.iter.next < 0
-            return ''
+        if self.iter.idx == -2
+            " Already passed end.
+            return 0
         endif
         " Is there a next element?
-        let i = self.iter.next
-        let self.iter.curr = i
-        let [dis, next, len] = [self.iter.inc_dis, -1, len(self.longnames)]
+        let [inc_dis, i, next, len] = [self.iter.inc_dis, self.iter.idx, -2, len(self.longnames)]
         while i < len - 1
-            let i += 1
+            let i += 1 " pre-increment
             if inc_dis || !self.is_disabled(self.longnames[i])
                 let next = i
                 break
             endif
-            let i += 1
         endwhile
-        " Save next, which may be -1.
-        let self.iter.next = next
-        return self.longnames[self.iter.curr]
+        " Save next, which may be -2, signifying iteration complete.
+        let self.iter.idx = next
+        return next != -2
     endfu
-    fu! spsel.iter_done() dict
-        return self.iter.curr < 0
-    endfu
-
-    fu! spsel.rewind() dict
-        let self.iter_idx = 0
-    endfu
-    fu! spsel.get_next(...) dict
-        let inc_dis = a:0 > 0 ? a:1 : 0
-        while self.iter_idx < len(self.longnames)
-            if inc_dis || !self.is_disabled(self.longnames[self.iter_idx])
-                let self.iter_idx += 1
-                return self.longnames[self.iter_idx]
-            endif
-            let self.iter_idx += 1
-        endwhile
-        " Signal iteration complete.
-        return ''
+    fu! spsel.iter_valid() dict
+        return self.iter.idx != -2
     endfu
     " Extract information from global plugin config.
     fu! spsel.init(p_name, ...) dict
@@ -176,6 +168,10 @@ fu! s:spsel_create(p_name, ...)
         let shortnames = {}
         let longnames = []
         let lname_to_index = {}
+        " TODO: I'm thinking perhaps I want subprojects to be ordered: i.e.,
+        " in List of dicts with mandatory name property.
+        " Rationale: As it is now, user can't control order in which sp's are
+        " searched.
         for [sp_name, sp_raw] in items(p_raw.subprojects)
             try
                 " TODO: Don't hardcode these patterns...
@@ -219,12 +215,13 @@ fu! s:spsel_create(p_name, ...)
         let self.longpats = Process_longnames(longnames)
         if !empty(sp_filts)
             " Constrain project to subset of subprojects.
-            self.apply_sp_filter(sp_filts)
+            call self.apply_sp_filter(sp_filts)
         endif
     endfu
     " Input: List of strings of following form:
     " ['s:shortopt1', 'l:longopt1', 'l:longopt2', 's:shortopt2']
     fu! spsel.apply_sp_filter(sp_filts) dict
+        echo self
         if empty(a:sp_filts)
             return
         endif
@@ -233,10 +230,11 @@ fu! s:spsel_create(p_name, ...)
         for sp_filt in a:sp_filts
             let [is_short, name] = [sp_filt[0] == 's', sp_filt[2:]]
             if is_short && has_key(self.shortnames, name)
+                " Set key corresponding to longname.
                 let sel_names[self.shortnames[name]] = 1
             else
                 " Get full long name.
-                let longname = self.get_name(name)
+                let longname = self.get_name(sp_filt)
                 if longname == ''
                     " TODO: Right way to handle?
                     throw "Invalid subproject specification: " . name
@@ -249,7 +247,7 @@ fu! s:spsel_create(p_name, ...)
         " Use sel_names existence hash to cull entries from
         " shortnames Dict and longnames List.
         for [shortname, longname] in items(self.shortnames)
-            if !has_key(longname, sel_names)
+            if !has_key(sel_names, longname)
                 call remove(self.shortnames, shortname)
             endif
         endfor
@@ -271,25 +269,27 @@ fu! s:spsel_create(p_name, ...)
         endwhile
     endfu
     " Private utility function
+    " Process the long options to determine the portions required for
+    " uniqueness.
     " Take raw input array of longnames and return array of the following:
     " {'name': <longname>, 're': <regex>}
     fu! Process_longnames(longnames)
-        " Process the long options to determine the portions required for
-        " uniqueness.
-        call sort(a:longnames)
-        let ln = len(a:longnames)
+        " Caveat: Copy the input array before destructive sort.
+        let longnames = a:longnames[:]
+        call sort(longnames)
+        let ln = len(longnames)
         let i = 1
-        let reqs = [matchstr(a:longnames[0], '^.')]
+        let reqs = [matchstr(longnames[0], '^.')]
         while i < ln
             " Get common portion + 1 char (if possible)
-            let ml = matchlist(a:longnames[i], '\(\%[' . a:longnames[i-1] . ']\)\(.\)\?')
+            let ml = matchlist(longnames[i], '\(\%[' . longnames[i-1] . ']\)\(.\)\?')
             let [cmn, nxt] = ml[1:2]
             " Is it possible we need to lengthen previous req?
             if len(cmn) >= len(reqs[i-1])
                 " Can we lengthen previous req?
-                if len(reqs[i-1]) < len(a:longnames[i-1])
+                if len(reqs[i-1]) < len(longnames[i-1])
                     " Set to common portion + 1 char (if possible)
-                    let reqs[i-1] = matchstr(a:longnames[i-1], cmn . '.\?')
+                    let reqs[i-1] = matchstr(longnames[i-1], cmn . '.\?')
                 endif
             endif
             " Take only as much of current as is required for uniqueness:
@@ -299,19 +299,19 @@ fu! s:spsel_create(p_name, ...)
         endwhile
         " Build an array of patterns and corresponding indices.
         " Note: Arrays reqs and longnames are parallel.
-        let longnames = []
+        let longpats = []
         let i = 0
         while i < ln
             let re = reqs[i]
             " Is the long name longer than the required portion?
-            if len(a:longnames[i]) > len(reqs[i])
+            if len(longnames[i]) > len(reqs[i])
                 " Append the optional part within \%[...]
-                let re .= '\%[' . a:longnames[i][len(reqs[i]):] . ']'
+                let re .= '\%[' . longnames[i][len(reqs[i]):] . ']'
             endif
-            call add(longnames, {'name': a:longnames[i], 're': re})
+            call add(longpats, {'name': longnames[i], 're': re})
             let i = i + 1
         endwhile
-        return longnames
+        return longpats
     endfu
     " Initialize.
     call spsel.init(a:p_name, sp_filts)
@@ -319,16 +319,21 @@ fu! s:spsel_create(p_name, ...)
 endfu
 
 fu! Test_p_obj()
-    let prj = s:pcfg_create('asec')
-    echo prj.get_sp('l:p')
-    echo prj.get_sp('l:ph')
-    echo prj.get_sp('s:j')
+    let prj = s:pcfg_create('asec', ['l:php', 's:f', 'l:boo', 's:z'])
     let spsel = prj.spsel
-    call spsel.rewind()
-    let p_name = spsel.get_next()
-    while !empty(p_name)
-        echo p_name
-        let p_name = spsel.get_next()
+    " Dynamically disable one.
+    call spsel.disable('php')
+    echomsg "Iterating normally..."
+    call spsel.iter_init()
+    while spsel.iter_valid()
+        echo spsel.iter_current()
+        call spsel.iter_next()
+    endwhile
+    echomsg "Iterating all..."
+    call spsel.iter_init(1)
+    while spsel.iter_valid()
+        echo spsel.iter_current()
+        call spsel.iter_next()
     endwhile
 endfu
 
