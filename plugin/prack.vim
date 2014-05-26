@@ -7,44 +7,44 @@ let g:fps_config = {
     \'grepformat': '%f:%l:%m,%f:%l%m,%f  %l%m',
     \'projects': {
         \'asec': {
-            \'subprojects': {
-                \'php': {
+            \'subprojects': [
+                \{
                     \'name': 'php',
                     \'shortname': 'p',
                     \'root': ['src/private', ';asec'],
                     \'find': 'find . \( \( '
                         \.' -path ./extensions -o -path ./framework -o -path ./gii -o -path ./tests -o -path ./vendors \) '
                         \.' -prune -false \) -o -iname ''*.php'''
-                \},
-                \'js': {
+                \},{
+					\'name': 'js',
                     \'shortname': 'j',
                     \'root': ['src/public', ';asec'],
                     \'find': 'find . \( \( '
                         \.' -path ./shared/extjs -o -path ./help/transition/jquery.js \) '
                         \.' -prune -false \) -o -iname ''*.js'''
-                \},
-                \'foo': {
+                \},{
+					\'name': 'foo',
                     \'shortname': 'f',
                     \'root': ['src/public', ';asec'],
                     \'find': 'find . \( \( '
                         \.' -path ./shared/extjs -o -path ./help/transition/jquery.js \) '
                         \.' -prune -false \) -o -iname ''*.js'''
-                \},
-                \'boo': {
+                \},{
+					\'name': 'boo',
                     \'shortname': 'b',
                     \'root': ['src/public', ';asec'],
                     \'find': 'find . \( \( '
                         \.' -path ./shared/extjs -o -path ./help/transition/jquery.js \) '
                         \.' -prune -false \) -o -iname ''*.js'''
-                \},
-                \'baz': {
+                \},{
+					\'name': 'baz',
                     \'shortname': 'z',
                     \'root': ['src/public', ';asec'],
                     \'find': 'find . \( \( '
                         \.' -path ./shared/extjs -o -path ./help/transition/jquery.js \) '
                         \.' -prune -false \) -o -iname ''*.js'''
                 \}
-            \}
+            \]
         \}
     \}
 \}
@@ -62,17 +62,83 @@ let g:fps_config = {
 "   List of file paths in canonicial form (possibly sorted)
 
 " >>> Functions related to project/subproject object representations
-fu! s:pcfg_create(p_name, ...)
+fu! s:prj_create(p_name, ...)
     let sp_filts = a:0 > 0 ? a:1 : []
     " Create dictionary to encapsulate the project config
-    let pcfg = {'name': a:p_name, 'spsel': {}, 'spcfg': {}}
+    " spsel - Object facilitating access to individual sp's.
+    " sprjs - Dict containing the following
+    "   rootdir
+    "   files
+    "   opt
+    let prj = {'name': a:p_name, 'spsel': {}, 'sprjs': {}}
     " Convert a short or long partial name to corresponding subproject
-    fu! pcfg.get_sp(name) dict
+    " TODO: This should return an element of sprjs.
+    fu! prj.get_sp(name) dict
         " TEMP DEBUG
         return self.spsel.get_name(a:name)
     endfu
-    let pcfg.spsel = s:spsel_create(a:p_name, sp_filts)
-    return pcfg
+    " Builds sp map.
+    fu! prj.init() dict
+        let p_raw = g:fps_config.projects[self.name]
+        " TODO: UNDER CONSTRUCTION - rework all this... (This is old
+        " process_cfg.)
+        " Note: We don't need to preserve g_opt with s:var, as it will be
+        " accessible via prototype of project-level opt.
+        let g_opt = s:build_opts(g:fps_config, 0, {}) " TODO: No need to pass global...
+        let p_opt = s:build_opts(p_raw, 1, g_opt)
+
+        " Note: Iterate spsel directly, as sprjs hasn't been built yet.
+        call self.spsel.iter_init()
+        while self.spsel.iter_valid()
+            try
+                let sp_name = self.spsel.current()
+                let sp_raw = p_raw.subprojects[sp_name]
+                let sp_opt = s:build_opts(sp_raw, 2, s:p_opt)
+                " Don't commit to adding to s:sp_cfg[] yet...
+                let sprj = {}
+                let sprj.name = sp_name
+                let sprj.rootdir = call('finddir', sp_opt.get('root'))
+                if sprj.rootdir == ''
+                    throw "Warning: Skipping subproject `" . sp_name . " due to invalid config: Couldn't locate project base. Make sure your cwd is within the project."
+                endif
+                " Convert rootdir to full path.
+                let sprj.rootdir = s:canonicalize_path(sprj.rootdir, '')
+                " Build cache, but don't force refresh. (TODO - Unless bang?)
+                call s:cache_listfile(sprj, sp_opt, 0)
+                " Associate the options object.
+                let sprj.opt
+                " Accumulate the valid subproject.
+                let self.sprjs[sp_name] = sprj
+                call add(s:sp_opt, sp_opt)
+                let cfg_idx = cfg_idx + 1 " Keep up with sp_idx
+            catch
+                " Invalid subproject
+                call s:warn("Warning: Skipping subproject `" . sp_name . " due to error: " . v:exception)
+                call self.spsel.disable(sp_name)
+            finally
+                let i = i + 1 " Keep up with original idx
+            endtry
+            call self.spsel.iter_next()
+        endwhile
+        " If no valid subprojects, no point in continuing...
+        if empty(self.sprjs)
+            throw "No valid subprojects. :help fps-config"
+        endif
+    endfu
+    " Iterator methods are mostly pass-throughs.
+    fu! prj.iter_init(...) | call call(self.spsel.iter_init, a:000, spsel) | endfu
+    fu! prj.iter_current()
+        return self.sprjs[self.spsel.current()]
+    endfu
+    fu! prj.iter_valid() | return self.spsel.valid() | endfu
+    fu! prj.iter_next() | call self.spsel.next() | endfu
+    " Create the object that facilitates access to subprojects by name and via
+    " iterator.
+    let prj.spsel = s:spsel_create(a:p_name, sp_filts)
+    " Initialize the project (or subset thereof).
+    call prj.init()
+
+    return prj
 endfu
 fu! s:spsel_create(p_name, ...)
     let sp_filts = a:0 > 0 ? a:1 : []
@@ -159,8 +225,8 @@ fu! s:spsel_create(p_name, ...)
         if !has_key(p_raw, 'subprojects')
             throw "No subprojects defined for project " . a:p_name
         endif
-        if type(p_raw.subprojects) != 4
-            throw "Invalid subprojects definition for project " . a:p_name . ". Must be Dictionary."
+        if type(p_raw.subprojects) != 3
+            throw "Invalid subprojects definition for project " . a:p_name . ". Must be List."
         endif
 
         " Short (single-char) names stored in a hash
@@ -172,11 +238,15 @@ fu! s:spsel_create(p_name, ...)
         " in List of dicts with mandatory name property.
         " Rationale: As it is now, user can't control order in which sp's are
         " searched.
-        for [sp_name, sp_raw] in items(p_raw.subprojects)
+        for sp_raw in p_raw.subprojects
             try
+                if !has_key(sp_raw, 'name')
+                    throw "Subproject missing name property."
+                endif
+                let sp_name = sp_raw.name
                 " TODO: Don't hardcode these patterns...
                 if (sp_name !~ '^[a-zA-Z0-9_]\+$')
-                    throw "Ignoring invalid subproject name `" . sp_name
+                    throw "Invalid subproject name `" . sp_name
                         \. "': must be sequence of characters matching [a-zA-Z0-9_]."
                 else
                     if !has_key(lname_to_index, sp_name)
@@ -212,7 +282,7 @@ fu! s:spsel_create(p_name, ...)
         " Array defining enumeration order.
         let self.longnames = longnames
         " Array of dicts used to perform longname matching.
-        let self.longpats = Process_longnames(longnames)
+        let self.longpats = self.process_longnames(longnames)
         if !empty(sp_filts)
             " Constrain project to subset of subprojects.
             call self.apply_sp_filter(sp_filts)
@@ -273,7 +343,7 @@ fu! s:spsel_create(p_name, ...)
     " uniqueness.
     " Take raw input array of longnames and return array of the following:
     " {'name': <longname>, 're': <regex>}
-    fu! Process_longnames(longnames)
+    fu! spsel.process_longnames(longnames) dict
         " Caveat: Copy the input array before destructive sort.
         let longnames = a:longnames[:]
         call sort(longnames)
@@ -319,7 +389,7 @@ fu! s:spsel_create(p_name, ...)
 endfu
 
 fu! Test_p_obj()
-    let prj = s:pcfg_create('asec', ['l:php', 's:f', 'l:boo', 's:z'])
+    let prj = s:prj_create('asec', ['l:php', 's:f', 'l:boo', 's:z'])
     let spsel = prj.spsel
     " Dynamically disable one.
     call spsel.disable('php')
@@ -611,6 +681,8 @@ fu! s:process_cfg(p_name)
     let lname_to_index = {}
     let i = 0
     let cfg_idx = 0 " index into s:sp_cfg (i.e., valid configs only)
+    " TODO: This dictionary loop is no longer valid. This function is going
+    " away... See changes in the new project and sp objects.
     for [sp_name, sp_raw] in items(p_raw.subprojects)
         try
             let sp_opt = s:build_opts(sp_raw, 2, s:p_opt)
