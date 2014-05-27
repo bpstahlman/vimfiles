@@ -74,11 +74,18 @@ fu! s:prj_create(p_name, ...)
     " Convert a short or long partial name to corresponding subproject
     " TODO: This should return an element of sprjs.
     fu! prj.get_sp(name) dict
-        " TEMP DEBUG
-        return self.spsel.get_name(a:name)
+        let sp_name = self.spsel.get_name(a:name)
+        if sp_name != ''
+            return self.sprjs[sp_name]
+        else
+            " TODO: Throw or return something empty?
+            throw "Invalid subproject specification: `" . a:name . "'"
+        endif
     endfu
     " Builds sp map.
     fu! prj.init() dict
+        " Assumption: spsel member has already been created and initialized;
+        " thus, we've validated basic structure of g:fps_config.
         let p_raw = g:fps_config.projects[self.name]
         " TODO: UNDER CONSTRUCTION - rework all this... (This is old
         " process_cfg.)
@@ -106,17 +113,13 @@ fu! s:prj_create(p_name, ...)
                 " Build cache, but don't force refresh. (TODO - Unless bang?)
                 call s:cache_listfile(sprj, sp_opt, 0)
                 " Associate the options object.
-                let sprj.opt
+                let sprj.opt = sp_opt
                 " Accumulate the valid subproject.
                 let self.sprjs[sp_name] = sprj
-                call add(s:sp_opt, sp_opt)
-                let cfg_idx = cfg_idx + 1 " Keep up with sp_idx
             catch
                 " Invalid subproject
                 call s:warn("Warning: Skipping subproject `" . sp_name . " due to error: " . v:exception)
                 call self.spsel.disable(sp_name)
-            finally
-                let i = i + 1 " Keep up with original idx
             endtry
             call self.spsel.iter_next()
         endwhile
@@ -126,12 +129,18 @@ fu! s:prj_create(p_name, ...)
         endif
     endfu
     " Iterator methods are mostly pass-throughs.
-    fu! prj.iter_init(...) | call call(self.spsel.iter_init, a:000, spsel) | endfu
-    fu! prj.iter_current()
-        return self.sprjs[self.spsel.current()]
+    fu! prj.iter_init(...) dict
+        call call(self.spsel.iter_init, a:000, self.spsel)
     endfu
-    fu! prj.iter_valid() | return self.spsel.valid() | endfu
-    fu! prj.iter_next() | call self.spsel.next() | endfu
+    fu! prj.iter_current() dict
+        return self.sprjs[self.spsel.iter_current()]
+    endfu
+    fu! prj.iter_valid() dict
+        return self.spsel.iter_valid()
+    endfu
+    fu! prj.iter_next() dict
+        call self.spsel.iter_next()
+    endfu
     " Create the object that facilitates access to subprojects by name and via
     " iterator.
     let prj.spsel = s:spsel_create(a:p_name, sp_filts)
@@ -411,28 +420,23 @@ endfu
 
 " >>> Functions used to start/stop/refresh the plugin
 " Inputs:
-"   p_name
-"     project name
-"   sp_names
-"     List of subproject (long) names representing a subset of the project to
-"     load.
-fu! s:open(bang, p_name, ...)
-    " TODO: Store name of open project in s:p_name
-    if exists('s:p_name')
-        " Subsequent open implies close.
-        call s:close()
+"   [<sp_spec>...] <p_name>
+fu! s:open(bang, ...)
+    " Close any currently open project.
+    if exists('s:prj')
+        call s:prj.close()
     endif
-    let sp_names = a:000[:]
     try
-        call s:process_cfg(a:p_name, sp_names)
-        " Now that we know initialization was successful...
-        let s:p_name = p_name
+        let s:prj = s:prj_create(a:000[-1], a:000[0, -2])
+        "call s:process_cfg(a:p_name, sp_names)
     catch
-        echoerr "Cannot open project `" . a:p_name . "': " . v:exception
+        echoerr "Cannot open project `" . a:000[-1] . "': " . v:exception
         " TODO: Is this necessary? We haven't done any setup yet... We may
         " have set some static vars (e.g., s:longnames/s:shortnames), but
         " they'd be set next time...
-        call s:close()
+        if exists('s:prj') && !empty(s:prj)
+            call s:prj.close()
+        endif
     endtry
 endfu
 " TODO: Remove this one...
@@ -2530,6 +2534,7 @@ com! -bang -nargs=+ FPSOpen call s:open(<q-bang>, <f-args>)
 " TODO: Decide how to implement the save of options used on open for use with
 " re-open. E.g., should we save actual command line, and re-execute, possibly
 " ensuring presence of a bang arg?
+" TODO: FPSReopen and FPSRefresh may become redundant...
 com! -bang -nargs=1 FPSReopen call s:open(<q-bang>)
 com! -nargs=1 FPSRefresh call s:refresh(<f-args>)
 "com! -nargs=? Refresh call <SID>refresh(<q-args>)
