@@ -82,8 +82,21 @@ fu! s:prj_create(p_name, ...)
             throw "Invalid subproject specification: `" . a:name . "'"
         endif
     endfu
+    fu! prj.get_all_sps(...) dict
+        let inc_dis = a:0 > 0 ? a:1 : 0
+        let sprjs = []
+        call self.spsel.iter_init(inc_dis)
+        while self.spsel.iter_valid()
+            call add(sprjs, self.sprjs[self.spsel.iter_current()])
+            call self.spsel.iter_next()
+        endwhile
+        return sprjs
+    endfu
+    fu! prj.close() dict
+        " TODO
+    endfu
     " Builds sp map.
-    fu! prj.init() dict
+    fu! prj.open() dict
         " Assumption: spsel member has already been created and initialized;
         " thus, we've validated basic structure of g:fps_config.
         let p_raw = g:fps_config.projects[self.name]
@@ -93,14 +106,13 @@ fu! s:prj_create(p_name, ...)
         " accessible via prototype of project-level opt.
         let g_opt = s:build_opts(g:fps_config, 0, {}) " TODO: No need to pass global...
         let p_opt = s:build_opts(p_raw, 1, g_opt)
-
         " Note: Iterate spsel directly, as sprjs hasn't been built yet.
         call self.spsel.iter_init()
         while self.spsel.iter_valid()
             try
-                let sp_name = self.spsel.current()
+                let sp_name = self.spsel.iter_current()
                 let sp_raw = p_raw.subprojects[sp_name]
-                let sp_opt = s:build_opts(sp_raw, 2, s:p_opt)
+                let sp_opt = s:build_opts(sp_raw, 2, p_opt)
                 " Don't commit to adding to s:sp_cfg[] yet...
                 let sprj = {}
                 let sprj.name = sp_name
@@ -145,7 +157,7 @@ fu! s:prj_create(p_name, ...)
     " iterator.
     let prj.spsel = s:spsel_create(a:p_name, sp_filts)
     " Initialize the project (or subset thereof).
-    call prj.init()
+    call prj.open()
 
     return prj
 endfu
@@ -423,47 +435,30 @@ endfu
 "   [<sp_spec>...] <p_name>
 fu! s:open(bang, ...)
     " Close any currently open project.
-    if exists('s:prj')
+    if exists('s:prj') && !empty(s:prj)
         call s:prj.close()
     endif
-    try
-        let s:prj = s:prj_create(a:000[-1], a:000[0, -2])
+    "try
+        let s:prj = s:prj_create(a:000[-1], a:000[0:-2])
         "call s:process_cfg(a:p_name, sp_names)
-    catch
-        echoerr "Cannot open project `" . a:000[-1] . "': " . v:exception
-        " TODO: Is this necessary? We haven't done any setup yet... We may
+    "catch
+        "throw "Cannot open project `" . a:000[-1] . "': " . v:exception
+        " TODO: Is this necessary, given that s:prj hasn't been set? We may
         " have set some static vars (e.g., s:longnames/s:shortnames), but
         " they'd be set next time...
         if exists('s:prj') && !empty(s:prj)
             call s:prj.close()
         endif
-    endtry
-endfu
-" TODO: Remove this one...
-fu! s:open_orig(p_name)
-    " TODO: Probably change s:started to s:opened and have it store name of
-    " project.
-    if exists('s:started')
-        " Subsequent start implies stop.
-        call s:close()
-    endif
-    try
-        call s:process_cfg(a:p_name)
-        " TODO: Do caching here...
-        " Only now that we know initialization was successful...
-        let s:started = 1
-    catch
-        echoerr "Cannot open project `" . a:p_name . "': " . v:exception
-        " TODO: Is this necessary? We haven't done any setup yet... We may
-        " have set some static vars (e.g., s:longnames/s:shortnames), but
-        " they'd be set next time...
-        call s:close()
-    endtry
+    "endtry
 endfu
 
 fu! s:close()
-    unlet! s:started
-    " TODO: General cleanup. E.g., delete commands.
+    if exists('s:prj') && !empty(s:prj)
+        call s:prj.close()
+        unlet! s:prj
+        " TODO: General cleanup. E.g., delete commands (though this might be
+        " handled by prj.close()).
+    endif
 endfu
 " <<<
 " >>> Static data used to process options
@@ -475,6 +470,8 @@ endfu
 "  of others: e.g., 'default', 'vim'
 " TODO: I believe required and default are redundant: i.e., all options are
 " required unless they have a default...
+" TODO: Consider removing 'vim' and adding ability to specify conversion
+" function (for converting raw value to opt value).
 let s:opt_cfg = {
     \'listfile': {
         \'minlvl': 0,
@@ -819,6 +816,7 @@ fu! s:get_cfg_idx(opt)
 endfu
 
 " Try various ways to get a subproject-specific value for specified option.
+" TODO: Remove if this approach remains unused.
 fu! s:get_opt(sp_idx, opt, default_to_vim)
     if has_key(s:sp_cfg[a:sp_idx], a:opt)
         return s:sp_cfg[a:sp_idx][a:opt]
@@ -1212,7 +1210,7 @@ fu! s:get_matching_files_match(patt_info, files)
     return matches
 endfu
 
-fu! s:get_matching_files(cfg, glob, partial)
+fu! s:get_matching_files(sprj, glob, partial)
     let matches = []
     let sf = s:sf_create()
     try
@@ -1228,11 +1226,11 @@ fu! s:get_matching_files(cfg, glob, partial)
         let glob = a:glob
         if glob =~ '^\.//'
             " Use fnamemodify to ensure trailing slash.
-            let anchor_dir = s:canonicalize_path(getcwd(), a:cfg.rootdir)
+            let anchor_dir = s:canonicalize_path(getcwd(), sprj.rootdir)
             let glob = anchor_dir . glob[3:] " strip .//
         elseif a:glob =~ '^\./'
             " Note: This will default to same as .// if no current file.
-            let anchor_dir = s:canonicalize_path(expand('%:h'), a:cfg.rootdir)
+            let anchor_dir = s:canonicalize_path(expand('%:h'), sprj.rootdir)
             let glob = anchor_dir . glob[2:] " strip ./
         endif
         " Convert * and ** in glob, and extract fixed string constraints into
@@ -1244,7 +1242,7 @@ fu! s:get_matching_files(cfg, glob, partial)
         let patt_info = s:glob_to_patt(glob, a:partial)
         "echo "patt_info: "
         "echo patt_info
-        let matches = s:get_matching_files_match(patt_info, a:cfg.files)
+        let matches = s:get_matching_files_match(patt_info, sprj.files)
     catch
         " TODO: What error?
         echohl ErrorMsg|echomsg v:exception|echohl None
@@ -1541,7 +1539,7 @@ endfu
 " appearing in filenames.
 " Returns: An object representation of the input spec, containing the
 " following keys:
-"   idxs: array of indices corresponding to selected subprojects, -1 if
+"   sps:  List of sprj objects corresponding to selected subprojects, -1 if
 "         unconstrained (i.e., subproject spec omitted)
 "   glob: file glob as string, '' if glob omitted
 "         Note: Omitted glob effectively selects all files in selected
@@ -1583,43 +1581,44 @@ fu! s:parse_spec(opt, throw)
     if empty(soptstr) && empty(loptstr)
         " Special case: Nothing before the `:' means no subproject
         " constraints.
-        let sels = -1
+        " TODO: Decide whether we could use [] to represent this...
+        let sprjs = -1
     else
-        let sels = []
+        let dup = {}
+        let sprjs = []
         let sopts = split(soptstr, '\zs') "split chars
         let lopts = split(loptstr, ',')
         " Create a single array for looping, but remember dividing point.
         let num_short_opts = len(sopts)
         let opts = sopts + lopts
-        let i = 0
         " Get list of config indices.
         " Design Decision: Abort on bad option, even if multiple specified.
         " TODO: Refactor to make this part of command line parsing, since it's used in several places.
         for opt in opts
             let is_short = i < num_short_opts
-            let cfg_idx = s:get_cfg_idx((is_short ? 's:' : 'l:') . opt)
-            " TODO: How to handle invalid specs? For now, just skipping, but
+            let sprj = s:prj.get_sp((is_short ? 's:' : 'l:') . opt)
+            " TODO: How to handle invalid specs? Originally, just skipped, but
             " perhaps, in accordance with Design Decision above, we should
             " abort...
             " Yes! Need to abort, to prevent this seeming like unconstrained
             " search!
-            if cfg_idx < 0
+            if empty(sprj)
                 call s:warn("Invalid subproject spec: " . (is_short ? '-' : '--') . opt)
                 continue
             endif
-            " Add index to list if not already added.
-            if (-1 == index(sels, cfg_idx))
-                call add(sels, cfg_idx)
+            " Add sp to list if not already added.
+            if (!has_key(dup, sp.name))
+                call add(sprjs, sp)
+                let dup[sp.name] = 1
             endif
-            let i += 1
         endfor
     endif
-    " Note: sels will be either a list of cfg_idx's or -1 for unconstrained.
-    return {'idxs': sels, 'glob': glob}
+    " Note: sprjs will be either a list of sprj objects or -1 for unconstrained.
+    return {'sprjs': sprjs, 'glob': glob}
 endfu
 " Convert input spec to corresponding list of files.
 " TODO: More complete docs... E.g., document format somewhere.
-" [{sp_idx: <idx>, files: [<path>, ...]}, ...]
+" [{sprj: <sprj>, files: [<path>, ...]}, ...]
 fu! s:get_files_for_spec(spec, partial, throw)
     let ret = []
     let opt = s:parse_spec(a:spec, a:throw)
@@ -1627,21 +1626,22 @@ fu! s:get_files_for_spec(spec, partial, throw)
         echoerr "Bad spec: " . a:spec
         return []
     endif
-    if type(opt.idxs) == 3 " List
-        let sp_idxs = opt.idxs
+    if type(opt.sprjs) == 3 " List
+        let sprjs = opt.sprjs
     else
         " No subproject constraints
-        let sp_idxs = range(len(s:sp_cfg))
+        " TODO: Better way to handle unconstrained. Perhaps just empty list?
+        let sprjs = s:prj.get_all_sps()
     endif
-    for sp_idx in sp_idxs
-        let fs = s:get_matching_files(s:sp_cfg[sp_idx], opt.glob, a:partial)
+    for sprj in sprjs
+        let files = s:get_matching_files(sprj, opt.glob, a:partial)
         " Accumulate subproject-specific object.
-        call add(ret, {'idx': sp_idx, 'files': fs})
+        call add(ret, {'sprj': sprj, 'files': files})
     endfor
     return ret
 endfu
 fu! s:parse_grep_cmdline(cmdline)
-    " Parse cmdline into an array of specs and everything else.
+    " Parse cmdline into an array of raw specs and everything else.
     let [specs, argstr] = s:parse_raw_cmdline(a:cmdline)
     " Command line can contain multiple specs; simply concatenate the arrays
     " returned by each call to get_files_for_spec(), each of which corresponds
@@ -1650,6 +1650,8 @@ fu! s:parse_grep_cmdline(cmdline)
     let pspecs = []
     for spec in specs
         " TODO: Decide about partial
+        " TODO: Decide whether I want to separate spec parsing from file
+        " matching.
         call extend(pspecs, s:get_files_for_spec(spec, 1, 1))
     endfor
     " Return a List containing array of parsed specs and a string representing
@@ -1739,12 +1741,13 @@ endfu
 " --js:./file2.js
 " --cpp:.//**/file3.cpp
 fu! s:complete_filenames(arg_lead, cmd_line, cursor_pos)
-    let sps = s:get_files_for_spec(a:arg_lead, 1, 1)
+    " Get matching file sets, each of which is represented by an sprj and a
+    " List containing a subset of its files.
+    let fsets = s:get_files_for_spec(a:arg_lead, 1, 1)
     let files = []
-    for sp in sps
-        let sp_idx = sp.idx
-        let sp_name = s:sp_cfg[sp_idx].name
-        let sp_files = sp.files
+    for fset in fsets
+        let sp_name = fset.sprj.name
+        let sp_files = fset.files
         call map(sp_files, '"--" . l:sp_name . ":" . v:val')
         call extend(files, sp_files)
     endfor
@@ -1910,13 +1913,16 @@ fu! s:convert_file_list_to_string(pspecs, shell)
         let pspec.files = fs
     endfor
 endfu
+" TODO: Rework this.
 fu! s:get_unconstrained_pspecs()
-    let sp_idx = 0
     let ret = []
-    for cfg in s:sp_cfg
-        call add(ret, {'idx': sp_idx, 'files': cfg.files})
-        let sp_idx += 1
-    endfor
+    call s:prj.iter_init()
+    while s:prj.iter_valid()
+        let sprj = s:prj.iter_current()
+        " TODO: Make copy of files? Better way to handle unconstrained?
+        call add(ret, {'sprj': sprj, 'files': sprj.files[:]})
+        call s:prj.iter_next()
+    endwhile
     return ret
 endfu
 
@@ -1945,7 +1951,6 @@ endfu
 fu! s:do_int_grep(sf, pspecs, argstr, bang, use_ll, is_adding)
     let add = a:is_adding ? 'add' : ''
     for pspec in a:pspecs
-        let sp_cfg = s:sp_cfg[pspec.idx]
         " TODO: Decide on this: caller has used convert_file_list_to_string to
         " mutate the files member of sp_cfg. Is that best way? (Keep in mind
         " that the mutated structure is not part of s:cfg, but a derivative.
@@ -1956,7 +1961,7 @@ fu! s:do_int_grep(sf, pspecs, argstr, bang, use_ll, is_adding)
         " Move to root of subproject and create the temporary script file.
         " Rationale: Avoid potential cross-platform issues with absolute
         " paths.
-        call a:sf.pushd(sp_cfg.rootdir)
+        call a:sf.pushd(pspec.sprj.rootdir)
 
         " Note: Always inhibit jump here, as that's handled by caller. Don't
         " use 'silent', as we want to see the periodic progress indicator
@@ -2537,7 +2542,6 @@ com! -bang -nargs=+ FPSOpen call s:open(<q-bang>, <f-args>)
 " TODO: FPSReopen and FPSRefresh may become redundant...
 com! -bang -nargs=1 FPSReopen call s:open(<q-bang>)
 com! -nargs=1 FPSRefresh call s:refresh(<f-args>)
-"com! -nargs=? Refresh call <SID>refresh(<q-args>)
 
 " Grep commands
 " Grep non-adding variants
