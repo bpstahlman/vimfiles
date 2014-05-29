@@ -107,11 +107,23 @@ fu! s:prj_create(p_name, ...)
         let g_opt = s:build_opts(g:fps_config, 0, {}) " TODO: No need to pass global...
         let p_opt = s:build_opts(p_raw, 1, g_opt)
         " Note: Iterate spsel directly, as sprjs hasn't been built yet.
+        " While iterating, keep up with index into global subprojects list, of
+        " which the list processed by the iterator may be only a subset.
+        " Rationale: Making subprojects a Dictionary in global config would
+        " simplify implementation, but I want user to be able to order the
+        " subprojects, and specifying a List is the easiest way for him to do
+        " so.
         call self.spsel.iter_init()
+        let sp_idx = 0
         while self.spsel.iter_valid()
             try
                 let sp_name = self.spsel.iter_current()
-                let sp_raw = p_raw.subprojects[sp_name]
+                " Determine index into global subprojects list, of which the
+                " list processed by the iterator may be only a subset.
+                while p_raw.subprojects[sp_idx].name != sp_name
+                    let sp_idx += 1
+                endwhile
+                let sp_raw = p_raw.subprojects[sp_idx]
                 let sp_opt = s:build_opts(sp_raw, 2, p_opt)
                 " Don't commit to adding to s:sp_cfg[] yet...
                 let sprj = {}
@@ -132,8 +144,10 @@ fu! s:prj_create(p_name, ...)
                 " Invalid subproject
                 call s:warn("Warning: Skipping subproject `" . sp_name . " due to error: " . v:exception)
                 call self.spsel.disable(sp_name)
+            finally
+                call self.spsel.iter_next()
+                let sp_idx += 1
             endtry
-            call self.spsel.iter_next()
         endwhile
         " If no valid subprojects, no point in continuing...
         if empty(self.sprjs)
@@ -1226,11 +1240,11 @@ fu! s:get_matching_files(sprj, glob, partial)
         let glob = a:glob
         if glob =~ '^\.//'
             " Use fnamemodify to ensure trailing slash.
-            let anchor_dir = s:canonicalize_path(getcwd(), sprj.rootdir)
+            let anchor_dir = s:canonicalize_path(getcwd(), a:sprj.rootdir)
             let glob = anchor_dir . glob[3:] " strip .//
         elseif a:glob =~ '^\./'
             " Note: This will default to same as .// if no current file.
-            let anchor_dir = s:canonicalize_path(expand('%:h'), sprj.rootdir)
+            let anchor_dir = s:canonicalize_path(expand('%:h'), a:sprj.rootdir)
             let glob = anchor_dir . glob[2:] " strip ./
         endif
         " Convert * and ** in glob, and extract fixed string constraints into
@@ -1242,7 +1256,7 @@ fu! s:get_matching_files(sprj, glob, partial)
         let patt_info = s:glob_to_patt(glob, a:partial)
         "echo "patt_info: "
         "echo patt_info
-        let matches = s:get_matching_files_match(patt_info, sprj.files)
+        let matches = s:get_matching_files_match(patt_info, a:sprj.files)
     catch
         " TODO: What error?
         echohl ErrorMsg|echomsg v:exception|echohl None
@@ -1594,6 +1608,7 @@ fu! s:parse_spec(opt, throw)
         " Get list of config indices.
         " Design Decision: Abort on bad option, even if multiple specified.
         " TODO: Refactor to make this part of command line parsing, since it's used in several places.
+        let i = 0
         for opt in opts
             let is_short = i < num_short_opts
             let sprj = s:prj.get_sp((is_short ? 's:' : 'l:') . opt)
@@ -1606,10 +1621,10 @@ fu! s:parse_spec(opt, throw)
                 call s:warn("Invalid subproject spec: " . (is_short ? '-' : '--') . opt)
                 continue
             endif
-            " Add sp to list if not already added.
-            if (!has_key(dup, sp.name))
-                call add(sprjs, sp)
-                let dup[sp.name] = 1
+            " Add sprj to list if not already added.
+            if (!has_key(dup, sprj.name))
+                call add(sprjs, sprj)
+                let dup[sprj.name] = 1
             endif
         endfor
     endif
@@ -1793,19 +1808,22 @@ fu! s:refresh(opts)
 endfu
 
 " Input: List in following form...
-" [{idx: <sp_idx>, files: <files>}, ...]
-" ...in which the sp_idx's are unordered and non-unique, with the same files
-" potentially appearing under multiple subprojects.
+" [{sprj: <sprj>, files: <files>}, ...]
+" ...in which the sprj's are unordered and non-unique, with the same files
+" potentially appearing multiple times for a single subproject.
 " Output: Equivalent list, but with each subproject represented only once (and
 " only if it contains files), in fiducial order, with files sorted and unique
-" within subproject
+" *within* subproject.
+" Design Decision: Don't try to uniquify across subprojects - expense not
+" justified by expected use case.
 fu! s:sort_and_combine_pspecs(pspecs)
     let pspec_map = {}
     for pspec in a:pspecs
-        if !has_key(pspec_map, pspec.idx)
-            let pspec_map[pspec.idx] = []
+        let sp_name = pspec.sprj.name
+        if !has_key(pspec_map, sp_name)
+            let pspec_map[sp_name] = []
         endif
-        let files = pspec_map[pspec.idx]
+        let files = pspec_map[sp_name]
         " Interleave current pspec.files with all previously-encountered files
         " for same subproject.
         let ins_idx = 0 " position in tgt list
@@ -1828,15 +1846,20 @@ fu! s:sort_and_combine_pspecs(pspecs)
             let idx += 1
         endfor
     endfor
-    " Iterate the arrays stored in pspec_map in sp_idx order to build return
-    " array.
+    " Convert pspec_map to a List for output, using prj's iterator to ensure
+    " proper sp order.
     let _pspecs = []
-    for sp_idx in sort(keys(pspec_map))
-        " Discard empty subprojects.
-        if !empty(pspec_map[sp_idx])
-            call add(_pspecs, {'idx': sp_idx, 'files': pspec_map[sp_idx]})
+    call s:prj.iter_init()
+    while s:prj.iter_valid()
+        let sprj = s:prj.iter_current()
+        if has_key(pspec_map, sprj.name)
+            " Discard empty subprojects.
+            if !empty(pspec_map[sprj.name])
+                call add(_pspecs, {'sprj': sprj, 'files': pspec_map[sprj.name]})
+            endif
         endif
-    endfor
+        call s:prj.iter_next()
+    endwhile
     return _pspecs
 endfu
 " TODO: Test only
@@ -1850,7 +1873,7 @@ fu! Test_sort_and_combine_pspecs()
     echo pspecs
 endfu
 " Return an array of the following form:
-" [{idx: <sp_idx>, files: <files>}]
+" [{sprj: <sprj>, files: <files>}]
 " Note: Form of list elements is similar to that returned by
 " get_files_for_spec, but with following differences:
 " -Subprojects may be broken up to ensure that maxgrepsize constraints are not
@@ -1866,15 +1889,16 @@ fu! s:xargify_pspecs(pspecs, fixlen)
     endif
     let _pspecs = [] " transformed pspec list
     for pspec in pspecs
-        if !exists('l:_pspec') || _pspec.idx != pspec.idx
+        if !exists('l:_pspec') || _pspec.sprj isnot pspec.sprj
             if exists('l:_pspec')
                 " Accumulate
                 call add(_pspecs, _pspec)
             endif
-            let _pspec = {'idx': pspec.idx, 'files': ''}
+            let _pspec = {'sprj': pspec.sprj, 'files': ''}
             let cumlen = a:fixlen
         endif
-        let maxgrepsize = s:sp_opt[pspec.idx].get('maxgrepsize')
+        " TODO: Pick up here...
+        let maxgrepsize = s:sp_opt[pspec.sprj].get('maxgrepsize')
         " Accumulate as many files as possible without exceeding maxgrepsize
         for f in pspec.files
             " Escape and prepend space before length test.
@@ -1885,7 +1909,7 @@ fu! s:xargify_pspecs(pspecs, fixlen)
             if len(_pspec.files) && len_f + cumlen > maxgrepsize
                 " Accumulate early.
                 call add(_pspecs, _pspec)
-                let _pspec = {'idx': pspec.idx, 'files': ''}
+                let _pspec = {'sprj': pspec.sprj, 'files': ''}
                 let cumlen = a:fixlen
             endif
             let _pspec.files .= f
@@ -2113,7 +2137,7 @@ fu! s:grep(cmd, bang, cmdline)
         endif
     " TODO: What's the rationale for catching only Vim(echoerr) here? What
     " about Vim internal errors?
-    catch /Vim(echoerr)/
+    "catch /Vim(echoerr)/
         echohl ErrorMsg|echomsg v:exception|echohl None
     finally
         call sf.destroy()
