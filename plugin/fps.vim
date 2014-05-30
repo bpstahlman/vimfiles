@@ -1655,13 +1655,12 @@ fu! s:get_files_for_spec(spec, partial, throw)
     endfor
     return ret
 endfu
-fu! s:parse_grep_cmdline(cmdline)
+fu! s:parse_cmdline(cmdline)
     " Parse cmdline into an array of raw specs and everything else.
     let [specs, argstr] = s:parse_raw_cmdline(a:cmdline)
-    " Command line can contain multiple specs; simply concatenate the arrays
-    " returned by each call to get_files_for_spec(), each of which corresponds
-    " to a different spec, with each spec potentially involving multiple
-    " subprojects).
+    " Command line can contain multiple specs, and each spec can comprise
+    " multiple subprojects; simply concatenate the arrays returned by each
+    " call to get_files_for_spec() to produce a flattened list of sp's.
     let pspecs = []
     for spec in specs
         " TODO: Decide about partial
@@ -1674,7 +1673,7 @@ fu! s:parse_grep_cmdline(cmdline)
     return [pspecs, argstr]
 endfu
 " This one is only for :Edit, :Split, et al.
-" It's fundamentally different from parse_grep_cmdline and
+" It's fundamentally different from parse_cmdline and
 " parse_refresh_cmdline in that the option format is more rigid.
 " Note: Currently, command is defined as taking only 1 arg, which means
 " multiple args will be treated as 1; if I defined it as taking any number
@@ -2084,7 +2083,7 @@ fu! s:grep(cmd, bang, cmdline)
     let sf = s:sf_create()
     try
         " Parse cmdline into an array of parsed specs and everything else.
-        let [pspecs, argstr] = s:parse_grep_cmdline(a:cmdline)
+        let [pspecs, argstr] = s:parse_cmdline(a:cmdline)
         if empty(pspecs)
             " No specs provided: search all files in all subprojects...
             " Note: This is different from non-empty pspecs that contain no
@@ -2137,6 +2136,7 @@ fu! s:grep(cmd, bang, cmdline)
         endif
     " TODO: What's the rationale for catching only Vim(echoerr) here? What
     " about Vim internal errors?
+    " TODO: Decide where to catch errors to ensure we see line numbers...
     "catch /Vim(echoerr)/
         echohl ErrorMsg|echomsg v:exception|echohl None
     finally
@@ -2146,11 +2146,10 @@ endfu
 fu! s:find(cmd, bang, ...)
     let sf = s:sf_create()
     try
-        " Parse cmdline into an array of specs
-        " TODO: Decide whether to use cmdline parser for both grep and edit
-        " cases?
-        let [pspecs, args] = s:parse_grep_cmdline(a:000)
+        " Parse cmdline into an array of specs (and hopefully, nothing else).
+        let [pspecs, args] = s:parse_cmdline(a:000)
         if !empty(args)
+            " Find commands don't accept any non-spec args!
             echoerr "Non pspec arg supplied to " . a:cmd . " command."
         endif
         " TODO: Question: Is it possible for pspecs to be empty at this point
@@ -2185,7 +2184,7 @@ fu! s:find(cmd, bang, ...)
         let file_cnt = 0
         let sp_idx = 0
         for pspec in pspecs
-            let sp_cfg = s:sp_cfg[pspec.idx]
+            let sprj = pspec.sprj
             " Make a copy for mutation.
             let files = pspec.files[:]
             " Design Decision: Without an error message, the `(i of N)'
@@ -2196,7 +2195,7 @@ fu! s:find(cmd, bang, ...)
             " qf/ll was updated, and will keep the qf/ll list in sync as
             " cwd is subsequently changed.
             " TODO: cd semantics make more sense than pushd in loop...
-            call sf.pushd(sp_cfg.rootdir)
+            call sf.pushd(sprj.rootdir)
             " Use one of the following to add files: cexpr!, lexpr!, caddexpr, laddexpr
             " Note: Use bang (if supported) to inhibit jump, and silent to suppress its output.
             " Rationale: Both jump and output will be handled in command-
@@ -2220,7 +2219,8 @@ fu! s:find(cmd, bang, ...)
             " Without this, user gets no feedback.
             echomsg "Added " . file_cnt . " files to " . (use_ll ? 'location' : 'quickfix') . " list"
         endif
-    catch /Vim(echoerr)/
+    " TODO: See note on grep catch...
+    "catch /Vim(echoerr)/
         " Note: Intentionally letting Vim exceptions go uncaught here.
         " Design Decision: If we don't catch our echoerrs/throws, they'll
         " propagate like Vim internal errors, but the error display will be
@@ -2239,7 +2239,7 @@ fu! s:edit(cmd, bang, ...)
         " Parse cmdline into an array of specs
         " TODO: Decide whether to use cmdline parser for both grep and edit
         " cases?
-        let [pspecs, args] = s:parse_grep_cmdline(a:000)
+        let [pspecs, args] = s:parse_cmdline(a:000)
         if !empty(args)
             throw "Non pspec arg supplied to " . a:cmd . " command."
         endif
@@ -2615,8 +2615,11 @@ com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Slfind call s:f
 com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Tlfind call s:find('Tlfind', <q-bang>, <f-args>)
 
 " Find add variants
-" Design Decision: See note on Grep add variants.
+" Design Decision: See note on Grep add variants for rationale regarding
+" omission of window-creating location-list variants.
 com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Findadd call s:find('Findadd', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Sfindadd call s:find('Sfindadd', <q-bang>, <f-args>)
+com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Tfindadd call s:find('Tfindadd', <q-bang>, <f-args>)
 com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Lfindadd call s:find('Lfindadd', <q-bang>, <f-args>)
 
 " Edit commands (UNDER CONSTRUCTION)
