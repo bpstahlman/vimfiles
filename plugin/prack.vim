@@ -1891,14 +1891,14 @@ fu! s:xargify_pspecs(pspecs, fixlen)
     for pspec in pspecs
         if !exists('l:_pspec') || _pspec.sprj isnot pspec.sprj
             if exists('l:_pspec')
-                " Accumulate
+                " Accumulate old.
                 call add(_pspecs, _pspec)
             endif
+            " First time we've seen this sprj.
             let _pspec = {'sprj': pspec.sprj, 'files': ''}
             let cumlen = a:fixlen
         endif
-        " TODO: Pick up here...
-        let maxgrepsize = s:sp_opt[pspec.sprj].get('maxgrepsize')
+        let maxgrepsize = pspec.sprj.opt.get('maxgrepsize')
         " Accumulate as many files as possible without exceeding maxgrepsize
         for f in pspec.files
             " Escape and prepend space before length test.
@@ -1977,14 +1977,13 @@ fu! s:do_int_grep(sf, pspecs, argstr, bang, use_ll, is_adding)
     for pspec in a:pspecs
         " TODO: Decide on this: caller has used convert_file_list_to_string to
         " mutate the files member of sp_cfg. Is that best way? (Keep in mind
-        " that the mutated structure is not part of s:cfg, but a derivative.
+        " that the mutated structure is not part of s:cfg, but a derivative.)
         "let files = ''
         "for file in sp_cfg.files
         "    let files .= ' ' . fnameescape(file)
         "endfor
-        " Move to root of subproject and create the temporary script file.
-        " Rationale: Avoid potential cross-platform issues with absolute
-        " paths.
+        " Move to root of subproject to perform grep.
+        " Rationale: File paths are relative to this directory.
         call a:sf.pushd(pspec.sprj.rootdir)
 
         " Note: Always inhibit jump here, as that's handled by caller. Don't
@@ -2015,33 +2014,34 @@ fu! s:do_ext_grep(sf, pspecs, argstr, bang, use_ll, is_adding)
             " Boostrap
             let pspec_next = a:pspecs[0]
         endif
+        " Note: pspec represents the first of the set of commands destined for
+        " the current script.
         let pspec = pspec_next
         let scriptlines = []
-        while idx < len && pspec_next.idx == pspec.idx
+        while idx < len && pspec_next.sprj is pspec.sprj
             " Accumulate another line for script
             " TODO: Use grepprg option (parsing $* etc...)
             call add(scriptlines, 'grep -n ' . a:argstr . ' ' . pspec_next.files)
-            " Safe because of pre-loop assignment to pspec_next
             let idx += 1
             if idx < len
                 let pspec_next = a:pspecs[idx]
             endif
         endwhile
         " Ready to process all batches for current sp.
-        let sp_cfg = s:sp_cfg[pspec.idx]
+        let sprj = pspec.sprj
         " Note: If user has not overridden grepprg and grepformat,
         " keep current Vim setting.
         let flags = {}
-        let grepprg = s:sp_opt[pspec.idx].get('grepprg', flags)
+        let grepprg = sprj.opt.get('grepprg', flags)
         if flags.set | call a:sf.setopt('grepprg', grepprg) | endif
         " Note: Plugin option grepformat corresponds to Vim option
         " 'errorformat' (because we're using cexpr et al.)
-        let grepformat = s:sp_opt[pspec.idx].get('grepformat', flags)
+        let grepformat = sprj.opt.get('grepformat', flags)
         if flags.set | call a:sf.setopt('errorformat', grepformat) | endif
         " Move to root of subproject and create the temporary script file.
         " Rationale: Avoid potential cross-platform issues with absolute
         " paths.
-        call a:sf.pushd(sp_cfg.rootdir)
+        call a:sf.pushd(sprj.rootdir)
         " This try and associated 'finally' ensures cleanup of tempfile
         " created in current dir.
         " Note: Intentionally placing call to get_tempfile outside try.
