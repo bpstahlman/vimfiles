@@ -62,7 +62,7 @@ let g:fps_config = {
 "   List of file paths in canonicial form (possibly sorted)
 
 " >>> Functions related to project/subproject object representations
-fu! s:prj_create(p_name, ...)
+fu! s:prj_create(force_refresh, p_name, ...)
     let sp_filts = a:0 > 0 ? a:1 : []
     " Create dictionary to encapsulate the project config
     " spsel - Object facilitating access to individual sp's.
@@ -96,7 +96,7 @@ fu! s:prj_create(p_name, ...)
         " TODO
     endfu
     " Builds sp map.
-    fu! prj.open() dict
+    fu! prj.open(force_refresh) dict
         " Assumption: spsel member has already been created and initialized;
         " thus, we've validated basic structure of g:fps_config.
         let p_raw = g:fps_config.projects[self.name]
@@ -135,7 +135,7 @@ fu! s:prj_create(p_name, ...)
                 " Convert rootdir to full path.
                 let sprj.rootdir = s:canonicalize_path(sprj.rootdir, '')
                 " Build cache, but don't force refresh. (TODO - Unless bang?)
-                call s:cache_listfile(sprj, sp_opt, 0)
+                call s:cache_listfile(sprj, sp_opt, a:force_refresh)
                 " Associate the options object.
                 let sprj.opt = sp_opt
                 " Accumulate the valid subproject.
@@ -171,7 +171,7 @@ fu! s:prj_create(p_name, ...)
     " iterator.
     let prj.spsel = s:spsel_create(a:p_name, sp_filts)
     " Initialize the project (or subset thereof).
-    call prj.open()
+    call prj.open(a:force_refresh)
 
     return prj
 endfu
@@ -326,7 +326,6 @@ fu! s:spsel_create(p_name, ...)
     " Input: List of strings of following form:
     " ['s:shortopt1', 'l:longopt1', 'l:longopt2', 's:shortopt2']
     fu! spsel.apply_sp_filter(sp_filts) dict
-        echo self
         if empty(a:sp_filts)
             return
         endif
@@ -453,7 +452,7 @@ fu! s:open(bang, ...)
         call s:prj.close()
     endif
     "try
-        let s:prj = s:prj_create(a:000[-1], a:000[0:-2])
+        let s:prj = s:prj_create(a:bang == '!', a:000[-1], a:000[0:-2])
         "call s:process_cfg(a:p_name, sp_names)
     "catch
         "throw "Cannot open project `" . a:000[-1] . "': " . v:exception
@@ -464,6 +463,24 @@ fu! s:open(bang, ...)
             call s:prj.close()
         endif
     "endtry
+endfu
+
+fu! s:reopen(bang)
+    " Close any currently open project.
+    if !exists('s:prj') || empty(s:prj)
+        throw "No open project. :help FPSOpen"
+    endif
+    let args = [a:bang]
+    " Note: Pass true for 'include disabled' flag to ensure that an sp
+    " disabled due to error will be enabled if error has been fixed.
+    call extend(args, map(s:prj.get_all_sps(1), '"--" . v:val.name'))
+    call add(args, s:prj.name)
+    " Invoke open.
+    " TODO: Could have prj keep up with whether it was invoked with a filter,
+    " and if not, avoid passing a filter consisting of all sp's. Would be
+    " difference without distinction unless user had added sp's to global
+    " config since prior open...
+    call call('s:open', args)
 endfu
 
 fu! s:close()
@@ -2559,13 +2576,15 @@ endfu
 " Avoid: Better for Grep et al. not to exist than to get errors trying to run
 " it too soon.
 com! FPSClose call s:close()
+" Open project (or subset thereof if sp specs are given), forcing file refresh
+" iff bang supplied.
 com! -bang -nargs=+ FPSOpen call s:open(<q-bang>, <f-args>)
-" TODO: Decide how to implement the save of options used on open for use with
-" re-open. E.g., should we save actual command line, and re-execute, possibly
-" ensuring presence of a bang arg?
-" TODO: FPSReopen and FPSRefresh may become redundant...
-com! -bang -nargs=1 FPSReopen call s:open(<q-bang>)
-com! -nargs=1 FPSRefresh call s:refresh(<f-args>)
+" Reopen current project (taking into account any subset specified in
+" FPSOpen), forcing file refresh iff bang supplied.
+com! -bang -nargs=0 FPSReopen call s:reopen(<q-bang>)
+" Force file refresh for specified subprojects (defaults to all in active
+" subset).
+com! -nargs=* FPSRefresh call s:refresh(<f-args>)
 
 " Grep commands
 " Grep non-adding variants
