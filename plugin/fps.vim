@@ -1271,8 +1271,6 @@ fu! s:get_matching_files(sprj, glob, partial)
         " cannot exist. Limiting search to this region can speed things up
         " considerably.
         let patt_info = s:glob_to_patt(glob, a:partial)
-        "echo "patt_info: "
-        "echo patt_info
         let matches = s:get_matching_files_match(patt_info, a:sprj.files)
     catch
         " TODO: What error?
@@ -1477,34 +1475,6 @@ fu! s:extract_opts(optstr)
     endfor
     return opts
 endfu
-" Break input command line into 2 pieces: 1) a string containing the fps
-" options, and 2) everything else.
-" Returns a Dictionary with the following keys:
-"   opt
-"     List of all short and long options, in which long options are
-"     represented as 'l:loptname', and short options as 's:soptname'.
-"   rem
-"     command line remaining after fps option removal
-fu! s:parse_refresh_cmdline(cmdline)
-    " Example valid forms: (Note that Cmd will already have been stripped.)
-    "   Cmd --
-    "   Cmd --abcd -efg
-    "   Cmd --abcd -efg --
-    "   Cmd --abcd -efg -- --ack --options
-    "   Cmd --abcd -efg non fps options
-    "   Cmd non fps options
-    " 3 part regex, 2 of them capturing:
-    "   1. Sequence of long/short fps opts (optional, captured)
-    "   2. `--' Separating fps opts from anything that follows (optional)
-    "   3. Everything else (possibly empty, captured)
-    " Test Note: Tested on 28Dec2013
-    " TODO: Bug in new Vim regex engine precludes use. Need to force old,
-    " either with \%#=1 or using option.
-    "                                      (---------------------------1---------------------------)  <--------------2-------------->     (-3--)
-    let m = matchlist(a:cmdline, '\%#=1^\s*\(\%(--\?[^-[:space:]]\+\)\%(\s\+--\?[^-[:space:]]\+\)*\)\?\%(\%(^\|\s\+\)--\%(\s\+\|$\)\)\?\s*\(.*\)$')
-    let [optstr, remstr] = m[1:2]
-    return {'opts': s:extract_opts(optstr), 'rem': remstr}
-endfu
 
 " Break input command line into 2 pieces:
 " 1. a List of specs
@@ -1533,6 +1503,9 @@ endfu
 fu! s:parse_raw_cmdline(cmdline)
     " Note: The \@> backtracking-inhibit ensures that a -- can't look like
     " short option `-'.
+    " TODO: Bug in new Vim regex engine precluded use on a similar pattern.
+    " Had to force use of old, either with \%#=1 or using option. Does this
+    " bug affect this pattern?
     let m = matchlist(a:cmdline,
         \'^\s*\(\%(\%(--\|-\|:\)\@>\%(\\.\|\S\)\+\)\%(\s\+\%(\%(--\|-\|:\)\@>\%(\\.\|\S\)\+\)\)*\)\?'
         \.'\%(\s*\%(--\)\?\s*\)\?'
@@ -1545,22 +1518,6 @@ fu! s:parse_raw_cmdline(cmdline)
     return [specs, rest]
 endfu
 
-" Cmdline Format: The portion after the command name looks like this:
-"     p_name [sp_name...]
-" Note: Since no spaces are permitted in project/subproject names, it should
-" be safe to split the command line at whitespace for processing.
-" Returns: Array of the following form:
-" [p_name, [sp_name, ...]]
-" Note: List of sp names could be empty.
-fu! s:parse_open_cmdline(cmdline)
-    let args = split(a:cmdline)
-    " Pop p_name from end.
-    " Assumption: Command definition ensures existence.
-    let p_name = remove(args, -1)
-    let sp_names = args
-    return [p_name, sp_names]
-endfu
-
 " Parse input spec designating subproject(s) and glob.
 " Input spec format:
 " [-<sopts>][--<lopt>[,<lopt>]...][:<glob>]
@@ -1570,11 +1527,11 @@ endfu
 " appearing in filenames.
 " Returns: An object representation of the input spec, containing the
 " following keys:
-"   sps:  List of sprj objects corresponding to selected subprojects, -1 if
-"         unconstrained (i.e., subproject spec omitted)
-"   glob: file glob as string, '' if glob omitted
-"         Note: Omitted glob effectively selects all files in selected
-"         subproject(s).
+"   sprjs:  List of sprj objects corresponding to selected subprojects, -1 if
+"           unconstrained (i.e., subproject spec omitted)
+"   glob:   file glob as string, '' if glob omitted
+"           Note: Omitted glob effectively selects all files in selected
+"           subproject(s).
 " Rationale: Here are some specs that would be ambiguous if the `:' were not
 " mandatory...
 " Ambiguous spec #1:
@@ -1648,11 +1605,15 @@ fu! s:parse_spec(opt, throw)
     " Note: sprjs will be either a list of sprj objects or -1 for unconstrained.
     return {'sprjs': sprjs, 'glob': glob}
 endfu
-" Convert input spec to corresponding list of files.
-" TODO: More complete docs... E.g., document format somewhere.
-" [{sprj: <sprj>, files: [<path>, ...]}, ...]
-fu! s:get_files_for_spec(spec, partial, throw)
-    let ret = []
+" Process input spec, returning list of subprojects, and (if has_glob is set)
+" a list of matching files.
+" Return: Format depends upon has_glob input flag:
+" true: 
+"     [{sprj: <sprj>, files: [<path>, ...]}, ...]
+" false:
+"     [<sprj>...]
+" TODO: Consider whether to dispense with all the 'throw' args...
+fu! s:process_spec(spec, has_glob, partial, throw)
     let opt = s:parse_spec(a:spec, a:throw)
     if type(opt) != 4 " Dict
         echoerr "Bad spec: " . a:spec
@@ -1665,94 +1626,34 @@ fu! s:get_files_for_spec(spec, partial, throw)
         " TODO: Better way to handle unconstrained. Perhaps just empty list?
         let sprjs = s:prj.get_all_sps()
     endif
-    for sprj in sprjs
-        let files = s:get_matching_files(sprj, opt.glob, a:partial)
-        " Accumulate subproject-specific object.
-        call add(ret, {'sprj': sprj, 'files': files})
-    endfor
-    return ret
+    if !a:has_glob
+        return sprjs
+    else
+        let ret = []
+        for sprj in sprjs
+            let files = s:get_matching_files(sprj, opt.glob, a:partial)
+            " Accumulate subproject-specific object.
+            call add(ret, {'sprj': sprj, 'files': files})
+        endfor
+        return ret
+    endif
 endfu
-fu! s:parse_cmdline(cmdline)
+" Return: List containing 2 elements:
+" 1. List of parsed specs (see s:process_spec header for 2 possible formats)
+" 2. String representing everything else
+fu! s:parse_cmdline(cmdline, has_glob)
     " Parse cmdline into an array of raw specs and everything else.
     let [specs, argstr] = s:parse_raw_cmdline(a:cmdline)
     " Command line can contain multiple specs, and each spec can comprise
-    " multiple subprojects; simply concatenate the arrays returned by each
-    " call to get_files_for_spec() to produce a flattened list of sp's.
+    " multiple subprojects; concatenate the arrays returned by each call to
+    " process_spec() to produce a flattened list of sp's.
     let pspecs = []
     for spec in specs
         " TODO: Decide about partial
-        " TODO: Decide whether I want to separate spec parsing from file
-        " matching.
-        call extend(pspecs, s:get_files_for_spec(spec, 1, 1))
+        let pspec = s:process_spec(spec, a:has_glob, 1, 1)
+        call extend(pspecs, pspec)
     endfor
-    " Return a List containing array of parsed specs and a string representing
-    " the non-plugin args.
     return [pspecs, argstr]
-endfu
-" This one is only for :Edit, :Split, et al.
-" It's fundamentally different from parse_cmdline and
-" parse_refresh_cmdline in that the option format is more rigid.
-" Note: Currently, command is defined as taking only 1 arg, which means
-" multiple args will be treated as 1; if I defined it as taking any number
-" (like grep commands), I could probably commonize the basic command line
-" parsing, with a post-parse step that checks for correct # of args.
-fu! s:parse_edit_cmdline(cmd, bang, filespec)
-    let sf = s:sf_create()
-    try
-        " UNDER CONSTRUCTION!!!!!
-        " TODO: I'm thinking we need to have get_files_for_spec return a more
-        " complex structure, which has subproject index broken out...
-        let sps = s:get_files_for_spec(a:filespec, 1, 1)
-        " 3 cases: 0 files, 1 file, multiple files
-        let num_sps = len(sps)
-        if num_sps > 1
-            " Note: Don't bother looping over sps to determine exact number; all
-            " that matters is it's more than 1.
-            let cnt = 2
-        elseif num_sps == 1
-            " How many files in one and only matching sp?
-            let cnt = len(sps[0].files)
-        else
-            let cnt = 0
-        endif
-        if cnt == 0
-            echoerr "Can't find file matching " . a:filespec
-        elseif cnt > 1
-            echoerr "Too many files matching " . a:filespec
-        endif
-        " If error not raised by now, we have a single file to open; move to
-        " its subproject to execute the applicable open command, then restore
-        " cwd (by destroying stack frame).
-        let sp_cfg = s:sp_cfg[sps[0].idx]
-        call sf.pushd(sp_cfg.rootdir)
-        " Note: For each of the plugin editing commands, there's a Vim
-        " equivalent whose name is identical except for capitalization.
-        exe tolower(a:cmd) . a:bang . ' ' . fnameescape(sp_cfg.files[0])
-
-    catch /Vim(echoerr)/
-        echohl ErrorMsg|echomsg v:exception|echohl None
-    finally
-        call sf.destroy()
-    endtry
-endfu
-" Convert potentially abbreviated plugin command name to canonical version of
-" the Vim equivalent: e.g.,
-" Grepa => grepadd
-" Lg => lgrep
-" Lgrepa => lgrepadd
-" TODO: I'm thinking this isn't needed, since we always pass canonical form
-" from command to implementing function.
-fu! s:canonicalize_grep_cmd(cmd)
-    if a:cmd =~ '\<Gr\%[ep]\>'
-        return 'grep'
-    elseif a:cmd =~ '\<Grepa\%[dd]\>'
-        return 'grepadd'
-    elseif a:cmd =~ '\<Lgr\%[ep]\>'
-        return 'lgrep'
-    elseif a:cmd =~ '\<Lgrepa\%[dd]\>'
-        return 'lgrepadd'
-    endif
-    throw "Internal error: Unknown grep command: " . a:cmd
 endfu
 
 " <<<
@@ -1774,7 +1675,7 @@ endfu
 fu! s:complete_filenames(arg_lead, cmd_line, cursor_pos)
     " Get matching file sets, each of which is represented by an sprj and a
     " List containing a subset of its files.
-    let fsets = s:get_files_for_spec(a:arg_lead, 1, 1)
+    let fsets = s:process_spec(a:arg_lead, 1, 1, 1)
     let files = []
     for fset in fsets
         let sp_name = fset.sprj.name
@@ -1786,38 +1687,28 @@ fu! s:complete_filenames(arg_lead, cmd_line, cursor_pos)
 endfu
 " <<<
 " >>> Functions invoked by commands
-fu! s:refresh(opts)
+fu! s:refresh(cmdline)
+    " Parse cmdline into an array of specs (and hopefully, nothing else).
+    let [sprjs, argstr] = s:parse_cmdline(a:cmdline, 0)
+    if !empty(argstr)
+        " Refresh command doesn't accept any non-spec args!
+        echoerr "Non pspec args not accepted by this command: " . argstr
+    endif
     let sf = s:sf_create()
     try
-        let pcl = s:parse_refresh_cmdline(a:opts)
-        if pcl.rem != ''
-            echoerr "Invalid arguments specified in Refresh command: `" . pcl.rem . "'"
-        endif
-        " Get list of config indices.
-        " Design Decision: Abort on bad option, even if multiple specified.
-        let sp_idxs = []
-        for opt in pcl.opts
-            let sp_idx = s:get_cfg_idx(opt)
-            if sp_idx == -1
-                echoerr "Invalid subproject option: " . (opt[0] == 'l' ? '--' : '-') . opt[2:]
-            endif
-            call add(sp_idxs, sp_idx)
-        endfor
-        " Process the selected configs.
-        for sp_idx in sp_idxs
-            let [sp_cfg, sp_opt] = [s:sp_cfg[sp_idx], s:sp_opt[sp_idx]]
-            let rootdir = call('finddir', sp_opt.get('root'))
+        for sprj in sprjs
+            let rootdir = call('finddir', sprj.opt.get('root'))
             if rootdir == ''
                 throw "Couldn't locate project base. Make sure your cwd is within the project."
             endif
             let rootdir = s:canonicalize_path(rootdir, '')
             " Note: An sf.cd (TODO) would make more sense here than pushd...
             call sf.pushd(rootdir)
-            let sp_cfg.rootdir = rootdir
-            call s:cache_listfile(sp_cfg, sp_opt, 1)
+            let sprj.rootdir = rootdir
+            call s:cache_listfile(sprj, sprj.opt, 1)
         endfor
-    catch /Vim(echoerr)/
-        echohl ErrorMsg|echomsg v:exception|echohl None
+    "catch /Vim(echoerr)/
+        "echohl ErrorMsg|echomsg v:exception|echohl None
     finally
         call sf.destroy()
     endtry
@@ -1891,7 +1782,7 @@ endfu
 " Return an array of the following form:
 " [{sprj: <sprj>, files: <files>}]
 " Note: Form of list elements is similar to that returned by
-" get_files_for_spec, but with following differences:
+" process_spec, but with following differences:
 " -Subprojects may be broken up to ensure that maxgrepsize constraints are not
 "  violated.
 " -List of files is converted to a string list, with escaping suitable either
@@ -2100,7 +1991,7 @@ fu! s:grep(cmd, bang, cmdline)
     let sf = s:sf_create()
     try
         " Parse cmdline into an array of parsed specs and everything else.
-        let [pspecs, argstr] = s:parse_cmdline(a:cmdline)
+        let [pspecs, argstr] = s:parse_cmdline(a:cmdline, 1)
         if empty(pspecs)
             " No specs provided: search all files in all subprojects...
             " Note: This is different from non-empty pspecs that contain no
@@ -2155,7 +2046,7 @@ fu! s:grep(cmd, bang, cmdline)
     " about Vim internal errors?
     " TODO: Decide where to catch errors to ensure we see line numbers...
     "catch /Vim(echoerr)/
-        echohl ErrorMsg|echomsg v:exception|echohl None
+        "echohl ErrorMsg|echomsg v:exception|echohl None
     finally
         call sf.destroy()
     endtry
@@ -2164,7 +2055,7 @@ fu! s:find(cmd, bang, ...)
     let sf = s:sf_create()
     try
         " Parse cmdline into an array of specs (and hopefully, nothing else).
-        let [pspecs, args] = s:parse_cmdline(a:000)
+        let [pspecs, args] = s:parse_cmdline(a:000, 1)
         if !empty(args)
             " Find commands don't accept any non-spec args!
             echoerr "Non pspec arg supplied to " . a:cmd . " command."
@@ -2244,7 +2135,7 @@ fu! s:find(cmd, bang, ...)
         " several lines, one of which displays the line on which error was
         " generated; this is not really what we want for something like "No
         " matches", which isn't really an error...
-        call s:err(v:exception, 1)
+        "call s:err(v:exception, 1)
     finally
         call sf.destroy()
     endtry
@@ -2256,7 +2147,7 @@ fu! s:edit(cmd, bang, ...)
         " Parse cmdline into an array of specs
         " TODO: Decide whether to use cmdline parser for both grep and edit
         " cases?
-        let [pspecs, args] = s:parse_cmdline(a:000)
+        let [pspecs, args] = s:parse_cmdline(a:000, 1)
         if !empty(args)
             throw "Non pspec arg supplied to " . a:cmd . " command."
         endif
@@ -2584,7 +2475,7 @@ com! -bang -nargs=+ FPSOpen call s:open(<q-bang>, <f-args>)
 com! -bang -nargs=0 FPSReopen call s:reopen(<q-bang>)
 " Force file refresh for specified subprojects (defaults to all in active
 " subset).
-com! -nargs=* FPSRefresh call s:refresh(<f-args>)
+com! -nargs=1 FPSRefresh call s:refresh(<f-args>)
 
 " Grep commands
 " Grep non-adding variants
