@@ -1879,7 +1879,9 @@ fu! s:get_tempfile()
     return name
 endfu
 
+" Return: True iff matches found.
 fu! s:do_int_grep(sf, pspecs, argstr, bang, use_ll, is_adding)
+    let got_match = 0
     let add = a:is_adding ? 'add' : ''
     for pspec in a:pspecs
         " TODO: Decide on this: caller has used convert_file_list_to_string to
@@ -1896,12 +1898,25 @@ fu! s:do_int_grep(sf, pspecs, argstr, bang, use_ll, is_adding)
         " Note: Always inhibit jump here, as that's handled by caller. Don't
         " use 'silent', as we want to see the periodic progress indicator
         " displayed by vimgrep.
-        exe 'noautocmd ' . (a:use_ll ? 'l' : '') . 'vimgrep' . add . ' /' . a:argstr . '/j' . pspec.files
+        " Error Handling: Don't suppress errors, but catch 'error' E480 to
+        " avoid treating failed match as error.
+        try
+            exe 'noautocmd ' . (a:use_ll ? 'l' : '') . 'vimgrep' . add . ' /' . a:argstr . '/j' . pspec.files
+            let got_match = 1
+        catch /:E480/
+        endtry
         " Make sure we create at most 1 list.
         let add = 'add'
     endfor
+    " Vim Kludge: If we don't redraw status line after internal grep,
+    " subsequent attempts to display (e.g.) warnings fail: apparently, it has
+    " something to do with the automatic update of status line during vimgrep.
+    redrawstatus
+    return got_match
 endfu
 
+" Return: True iff we've added something to a qf/ll list (could be only
+" unparseable error text).
 fu! s:do_ext_grep(sf, pspecs, argstr, bang, use_ll, is_adding)
     " Process each subproject in turn: in the root dir of each, build and run
     " (with system()) a script that accomplishes the grep, catching the result
@@ -1916,6 +1931,7 @@ fu! s:do_ext_grep(sf, pspecs, argstr, bang, use_ll, is_adding)
     " Rationale: The inner loop is complicated unnecessarily because of
     " reluctance to use a lookahead index, and this is silly optimization...
     let force_add = 0
+    let got_match = 0
     while idx < len
         if idx == 0
             " Boostrap
@@ -1966,7 +1982,13 @@ fu! s:do_ext_grep(sf, pspecs, argstr, bang, use_ll, is_adding)
             " TODO: Don't hardcode the ./ - allow user to override with an
             " option.
             let result = system(&shell . ' ' . &shellcmdflag . ' ./' . scriptname)
-            "echomsg '|' . result . '|'
+            if !empty(result)
+                let got_match = 1
+            endif
+            " Design Decision: Perform the applicable add without regard to
+            " whether we got match.
+            " Rationale: Vim's grep commands always affect qf/ll, even when no
+            " matches; thus, mine should as well...
             " Use one of the following to add files: cexpr!, lexpr!, caddexpr, laddexpr
             " Note: Use bang (if supported) to inhibit jump, and silent to suppress its output.
             " Rationale: Both jump and output will be handled in command-
@@ -1985,6 +2007,18 @@ fu! s:do_ext_grep(sf, pspecs, argstr, bang, use_ll, is_adding)
         endtry
         let force_add = 1
     endwhile
+    " Explanation: With external grep, it's not obvious whether matches were
+    " found: the only way to tell whether text returned by system() represents
+    " grep matches or errors is to attempt to parse with cexpr et al and see
+    " what happens to the list. This would be messy, however, because
+    " getqflist() doesn't provide *efficient* access to the list (but actually
+    " builds the whole thing each time it's called). I could redirect and
+    " parse the output of clist/cc/etc..., but once again, messy...
+    " Solution: If none of the grep scripts returned anything, we know we
+    " couldn't have found matches, and can return indication of this so that
+    " caller can warn; otherwise, assume there *could* have been matches; user
+    " will be able to see any errors in the qf/ll list.
+    return got_match
 endfu
 
 fu! s:grep(cmd, bang, cmdline)
@@ -2028,25 +2062,32 @@ fu! s:grep(cmd, bang, cmdline)
             exe win_cmd
         endif
         if external
-            call s:do_ext_grep(sf, pspecs, argstr, a:bang, use_ll, is_adding)
+            let got_match = s:do_ext_grep(sf, pspecs, argstr, a:bang, use_ll, is_adding)
         else
-            call s:do_int_grep(sf, pspecs, argstr, a:bang, use_ll, is_adding)
+            let got_match = s:do_int_grep(sf, pspecs, argstr, a:bang, use_ll, is_adding)
         endif
+        if !got_match
+            " Note: If here, we know there were no matches (though absence of
+            " true matches doesn't ensure we'll get here).
+            call s:warn("No match found: " . argstr)
+        endif
+        " Design Decision: Could make this an elseif, but I'm thinking I
+        " should always do the cc/ll (ignoring any E42 since we've already
+        " warned if no match).
         if !a:bang
             " Jump to *current* match (for add variants, this will be whatever
             " was current before the command).
-            exe use_ll ? 'll' : 'cc'
+            " Note: Handle the E42 generated by ll/cc when list is empty.
+            try
+                exe use_ll ? 'll' : 'cc'
+            catch /:E42/
+            endtry
         else
             " Without this, user gets no feedback.
             " TODO: How/whether to get file count. If expensive/complex, perhaps
             " don't bother.
             echomsg "Added " . '?' . " matches to " . (use_ll ? 'location' : 'quickfix') . " list"
         endif
-    " TODO: What's the rationale for catching only Vim(echoerr) here? What
-    " about Vim internal errors?
-    " TODO: Decide where to catch errors to ensure we see line numbers...
-    "catch /Vim(echoerr)/
-        "echohl ErrorMsg|echomsg v:exception|echohl None
     finally
         call sf.destroy()
     endtry
