@@ -1999,6 +1999,8 @@ fu! s:do_ext_grep(sf, pspecs, argstr, bang, use_ll, is_adding)
             let addcmd = (a:use_ll ? 'l' : 'c')
                 \. (a:is_adding || force_add ? 'add' : '')
                 \. 'expr' . (!a:is_adding && idx == 0 ? '!' : '')
+            " TODO: Investigate why I get some sort of ATTENTION error when a
+            " swapfile exists for one of the files in result...
             exe 'silent ' . addcmd . ' l:result'
         finally
             " Design Decision: Could test for failure and report, but odds of
@@ -2092,34 +2094,55 @@ fu! s:grep(cmd, bang, cmdline)
         call sf.destroy()
     endtry
 endfu
-fu! s:find(cmd, bang, ...)
+fu! s:find(cmd, bang, cmdline)
     let sf = s:sf_create()
     try
         " Parse cmdline into an array of specs (and hopefully, nothing else).
-        let [pspecs, args] = s:parse_cmdline(a:000, 1)
+        let [pspecs, args] = s:parse_cmdline(a:cmdline, 1)
         if !empty(args)
             " Find commands don't accept any non-spec args!
             echoerr "Non pspec arg supplied to " . a:cmd . " command."
         endif
         " TODO: Question: Is it possible for pspecs to be empty at this point
-        " (i.e., given -nargs=+, and given that we apparently haven't aborted
+        " (i.e., given -nargs=1, and given that we apparently haven't aborted
         " on bad spec)?
         if empty(pspecs)
             echoerr "No file(s) found."
         endif
         " Combine, sort, uniquify, etc... the pspecs list.
+        " Assumption: The returned list contains no empty sp's.
         let pspecs = s:sort_and_combine_pspecs(pspecs)
         let sp_cnt = len(pspecs)
         " Determine whether we're in single or multi-file regime (bearing in
         " mind that we've already determined pspecs is non-empty).
-        let cnt = sp_cnt > 1 ? 2 : sp_cnt > 0 ? len(pspecs[0].files) : 0
-        if !cnt
-            echoerr "No matching files"
+        let mode = sp_cnt > 1 ? 'multi' : sp_cnt > 0 ? (len(pspecs[0].files) > 1 ? 'multi' : 'single') : 'none'
+        if mode == 'none'
+            " TODO: Decide how to handle. Originally, was affecting the qf/ll
+            " list, as Vim's grep commands do on failed match, but in light of
+            " Find's special treatment of single file match, I'm thinking
+            " perhaps zero file match should be special also. In particular,
+            " I'm thinking it doesn't make sense to create an empty qf/ll. For
+            " that matter, it may not make sense to do it for grep either...
+            call s:err("No matching files")
+            return
         endif
         " Extract some parameters from command name.
         let use_ll = a:cmd =~? '^[st]\?l'
         let is_adding = a:cmd[-3:] == 'add'
         let win_cmd = a:cmd =~? '^s' ? 'new' : a:cmd =~? '^t' ? 'tabnew' : ''
+        " Note: If only 1 match, the special logic in the following 'if' can
+        " short-circuit the rest of the function.
+        if mode == 'single' && !a:bang && !use_ll && !is_adding
+            let [files, sprj] = [pspecs[0].files, pspecs[0].sprj]
+            " Move temporarily to sp root to open file.
+            " Note: Unnecessary but safe if filename happens to be absolute.
+            call sf.pushd(sprj.rootdir)
+            " Run applicable file open command without bang to ensure safety.
+            exe (!empty(win_cmd) ? win_cmd : 'edit') . ' ' . fnameescape(files[0])
+            " Note: try-finally will handle state restoration.
+            return
+        endif
+        " If we get here, we're going to be updating qf/ll list.
         " TODO: Consider whether to make the 'errorformat' set local to
         " the window for commands that create a new window. Weigh against
         " benefits of consistency with common case of using an existing
@@ -2168,94 +2191,8 @@ fu! s:find(cmd, bang, ...)
             " Without this, user gets no feedback.
             echomsg "Added " . file_cnt . " files to " . (use_ll ? 'location' : 'quickfix') . " list"
         endif
-    " TODO: See note on grep catch...
-    "catch /Vim(echoerr)/
-        " Note: Intentionally letting Vim exceptions go uncaught here.
-        " Design Decision: If we don't catch our echoerrs/throws, they'll
-        " propagate like Vim internal errors, but the error display will be
-        " several lines, one of which displays the line on which error was
-        " generated; this is not really what we want for something like "No
-        " matches", which isn't really an error...
-        "call s:err(v:exception, 1)
-    finally
-        call sf.destroy()
-    endtry
-endfu
-fu! s:edit(cmd, bang, ...)
-    let cmd = tolower(a:cmd)
-    let sf = s:sf_create()
-    try
-        " Parse cmdline into an array of specs
-        " TODO: Decide whether to use cmdline parser for both grep and edit
-        " cases?
-        let [pspecs, args] = s:parse_cmdline(a:000, 1)
-        if !empty(args)
-            throw "Non pspec arg supplied to " . a:cmd . " command."
-        endif
-        " TODO: Question: Is it possible for pspecs to be empty at this point
-        " (i.e., given -nargs=+, and given that we apparently haven't aborted
-        " on bad spec)?
-        if empty(pspecs)
-            throw "No file(s) found."
-        endif
-        " Combine, sort, uniquify, etc... the pspecs list.
-        let pspecs = s:sort_and_combine_pspecs(pspecs)
-        let sp_cnt = len(pspecs)
-        " Determine whether we're in single or multi-file regime (bearing in
-        " mind that we've already determined pspecs is non-empty).
-        let cnt = sp_cnt > 1 ? 2 : len(pspecs[0].files)
-        " Will we be updating the qf/ll?
-        if cnt > 1 || a:bang
-            let use_ll = cmd[0] == 'l'
-            let is_adding = cmd[-3 : ] == 'add'
-            let first_iter = 1
-            call sf.setopt('errorformat', '%f')
-            for pspec in pspecs
-                let sp_cfg = s:sp_cfg[pspec.idx]
-                " Note: As long as we're not going to be mutating (e.g.,
-                " mapping line numbers onto end of filename), there's no realy
-                " reason to copy...
-                let files = pspec.files "pspec.files[:]
-                " UNDER CONSTRUCTION!!!!!!!!!!!!!!!!!!!!!!!!
-                " TODO: Would there be any advantage to using quickfix-directory-stack here?
-                " Move to the directory to which files in pspec are relative;
-                " note that Vim remembers the directory that was current when
-                " qf/ll was update, and will keep the qf/ll list in sync as
-                " cwd is subsequently changed.
-                call sf.pushd(sp_cfg.rootdir)
-                " In manner analogous to grep, use the following, taking into
-                " account bang, the capitalized command name actually used, and
-                " whether this is first sp...
-                " cexpr, lexpr, caddexpr, laddexpr
-                " TODO: Need to set 'errorformat' - note that I won't have a
-                " line number - use 1 or can I omit?
-                " TODO: Always use bang on the cexpr command to avoid jumping
-                " to file, which is handled later, if at all...
-                " TODO: Understand implications: the add versions of [cl]expr
-                " don't support bang operator: they never jump...
-                let addcmd = (use_ll ? 'l' : 'c') . (is_adding || !first_iter ? 'add' : '') . 'expr'
-                exe addcmd . ' files'
-                echomsg addcmd . ' files'
-                echomsg 'cwd: ' . getcwd()
-                echomsg "addcmd: " . addcmd
-                echomsg "efm: " . &efm
-                let first_iter = 0
-            endfor
-        endif
-        " Will we be jumping to first match?
-        " TODO: Revisit this - perhaps rely more on cexpr et al. Also, figure
-        " out why split commands are messing up cwd and how to fix...
-        if cnt == 1 || !a:bang
-            " splitadd
-            " Determine Vim edit command corresponding to plugin command.
-            let editcmd = substitute(cmd, 'l\?\(\%(\%(add\)\@!.\)\+\).*', '\1', '')
-            exe editcmd . ' ' . fnameescape(l:pspecs[0].files[0])
-        endif
-
-    " TODO: What's the rationale for catching only Vim(echoerr) here? What
-    " about Vim internal errors?
-    catch /Vim(echoerr)/
-        echohl ErrorMsg|echomsg v:exception|echohl None
+        " Exception Note: Unlike Grep commands, 'No matches' error not
+        " possible here: hence, no need for special catch.
     finally
         call sf.destroy()
     endtry
@@ -2504,10 +2441,9 @@ endfu
 "
 " TODO: -bang for refresh and add completion maybe... Hmmm... Maybe not,
 " because this would entail reading some config at Vim startup...
-" TODO: Move all but load command into load function.
+" TODO: Move all but load/open command into corresponding function.
 " Avoid: Better for Grep et al. not to exist than to get errors trying to run
 " it too soon.
-com! FPSClose call s:close()
 " Open project (or subset thereof if sp specs are given), forcing file refresh
 " iff bang supplied.
 com! -bang -nargs=+ FPSOpen call s:open(<q-bang>, <f-args>)
@@ -2517,6 +2453,7 @@ com! -bang -nargs=0 FPSReopen call s:reopen(<q-bang>)
 " Force file refresh for specified subprojects (defaults to all in active
 " subset).
 com! -nargs=1 FPSRefresh call s:refresh(<f-args>)
+com! FPSClose call s:close()
 
 " Grep commands
 " Grep non-adding variants
@@ -2558,31 +2495,27 @@ com! -bang -nargs=1 Tgrepadd call s:grep('Tgrepadd', <q-bang>, <f-args>)
 com! -bang -nargs=1 Lgrepadd call s:grep('Lgrepadd', <q-bang>, <f-args>)
 
 " Find commands
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Find call s:find('Find', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Sfind call s:find('Sfind', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Tfind call s:find('Tfind', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Lfind call s:find('Lfind', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Slfind call s:find('Slfind', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Tlfind call s:find('Tlfind', <q-bang>, <f-args>)
+com! -bang -nargs=1 -complete=customlist,<SID>complete_filenames Find call s:find('Find', <q-bang>, <f-args>)
+com! -bang -nargs=1 -complete=customlist,<SID>complete_filenames Sfind call s:find('Sfind', <q-bang>, <f-args>)
+com! -bang -nargs=1 -complete=customlist,<SID>complete_filenames Tfind call s:find('Tfind', <q-bang>, <f-args>)
+com! -bang -nargs=1 -complete=customlist,<SID>complete_filenames Lfind call s:find('Lfind', <q-bang>, <f-args>)
+com! -bang -nargs=1 -complete=customlist,<SID>complete_filenames Slfind call s:find('Slfind', <q-bang>, <f-args>)
+com! -bang -nargs=1 -complete=customlist,<SID>complete_filenames Tlfind call s:find('Tlfind', <q-bang>, <f-args>)
 
 " Find add variants
 " Design Decision: See note on Grep add variants for rationale regarding
 " omission of window-creating location-list variants.
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Findadd call s:find('Findadd', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Sfindadd call s:find('Sfindadd', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Tfindadd call s:find('Tfindadd', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Lfindadd call s:find('Lfindadd', <q-bang>, <f-args>)
+com! -bang -nargs=1 -complete=customlist,<SID>complete_filenames Findadd call s:find('Findadd', <q-bang>, <f-args>)
+com! -bang -nargs=1 -complete=customlist,<SID>complete_filenames Sfindadd call s:find('Sfindadd', <q-bang>, <f-args>)
+com! -bang -nargs=1 -complete=customlist,<SID>complete_filenames Tfindadd call s:find('Tfindadd', <q-bang>, <f-args>)
+com! -bang -nargs=1 -complete=customlist,<SID>complete_filenames Lfindadd call s:find('Lfindadd', <q-bang>, <f-args>)
 
-" Edit commands (UNDER CONSTRUCTION)
-" TODO: Should the commands be Sedit, Tedit and Edit (intra-plugin
-" consistency) or Split, Edit, Tabedit (Vim consistency)?
-" Note: I sort of like intra-plugin consistency; also, I've always found 'tab'
-" to be annoyingly long to type in Vim...
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Split call s:edit('Split', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Edit call s:edit('Edit', <q-bang>, <f-args>)
-com! -bang -nargs=+ -complete=customlist,<SID>complete_filenames Tabedit call s:edit('Tabedit', <q-bang>, <f-args>)
+" <<<
 
+" The remainder of this file needn't be parsed.
+finish
 
+" >>> Code graveyard
 com! -nargs=* -complete=customlist,<SID>complete_filenames Spq call FA(<q-args>)
 " Quoted args play...
 com! -nargs=* QA FA <q-args>
@@ -2633,8 +2566,8 @@ endfu
 com! -nargs=1 -complete=customlist,Complete_customlist CL call FA(<f-args>)
 com! -nargs=1 -complete=custom,Complete_custom C echo "foo"
 " <<<
-
-" >>> Running notes
+" >>> Running notes - (Probably should move this to a readme or something in
+"     Github)
 
 " Prack:< Get rid of last vestiges of this name: e.g., g:fps_config should
 " bear new name (TBD).
