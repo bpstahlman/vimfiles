@@ -633,6 +633,8 @@ fu! s:build_opts(raw, lvl, base)
         " of names that are not opts, but are expected: e.g., 'shortname'.
         " Decision: Don't complicate things unnecessarily by treating things
         " like 'shortname' as options.
+        " TODO: Skip keys that begin with '#' (possibly with leading
+        " whitespace) to permit a form of 'commenting'.
         if !has_key(s:opt_cfg, opt_name)
             unlet opt_val " E706 workaround
             continue
@@ -1545,6 +1547,12 @@ endfu
 " On a filesystem that allows `:' in a filename, is the `:' part of the glob,
 " or is it an explicit (albeit unnecessary) separator between (omitted)
 " subproject spec and glob `foo'?
+" Assumption: Input represents a spec and only a spec, such that it's safe
+" (and desirable) to anchor pattern match at both beginning and end. Note that
+" when it was anchored only at beginning, garbage after valid options went
+" undetected: e.g., if user hit `/' instead of `:', producing an input of
+" `-j/**/foo', the -j would be taken as valid short option, and the /**/foo
+" would simply be discarded without error.
 " Refactor_TODO: In order to be able to use this for new FPSOpen and variants
 " (which need to get list of sp names up front), refactor to remove the part
 " that checks long/short opt names. I'm thinking instead of a list of indices,
@@ -1553,7 +1561,7 @@ endfu
 fu! s:parse_spec(opt, throw)
     let oc = '[a-zA-Z0-9_]' " chars that can appear in option
     "                  <sopts>              <lopts>                            <glob>
-    let re_opt = '^\%(-\('.oc.'\+\)\)\?\%(--\('.oc.'\+\%(,'.oc.'\+\)*\)\)\?\%(:\(.*\)\)\?'
+    let re_opt = '^\%(-\('.oc.'\+\)\)\?\%(--\('.oc.'\+\%(,'.oc.'\+\)*\)\)\?\%(:\(.*\)\)\?$'
     let ms = matchlist(a:opt, re_opt)
     if empty(ms)
         if a:throw
