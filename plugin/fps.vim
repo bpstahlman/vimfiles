@@ -100,8 +100,6 @@ fu! s:prj_create(force_refresh, p_name, ...)
         " Assumption: spsel member has already been created and initialized;
         " thus, we've validated basic structure of g:fps_config.
         let p_raw = g:fps_config.projects[self.name]
-        " TODO: UNDER CONSTRUCTION - rework all this... (This is old
-        " process_cfg.)
         " Note: We don't need to preserve g_opt with s:var, as it will be
         " accessible via prototype of project-level opt.
         let g_opt = s:build_opts(g:fps_config, 0, {}) " TODO: No need to pass global...
@@ -543,11 +541,18 @@ let s:opt_cfg = {
         \'maxlvl': 2,
         \'type': 1
     \},
-    \'root': {
-        \'#comment': "Would be highly unusual to define root globally, but it could be made to work with appropriate subproject-specific finds...",
-        \'minlvl': 0,
-        \'maxlvl': 2,
-        \'type': 3
+    \'proot': {
+        \'#comment': "If defined, fixes base for rel sproot; defaults to dir specified in open, or cwd at open",
+        \'minlvl': 1,
+        \'maxlvl': 1,
+        \'type': 1,
+        \'default': 
+    \},
+    \'sproot': {
+        \'#comment': "",
+        \'minlvl': 1,
+        \'maxlvl': 1,
+        \'type': 1
     \}
 \}
 " <<<
@@ -659,11 +664,26 @@ fu! s:build_opts(raw, lvl, base)
     endfor
     " Make sure all options that are required by this level have been set.
     for [opt_name, opt_cfg] in items(s:opt_cfg)
-        if !has_key(opt_cfg, 'default') && !has_key(opt_cfg, 'vim') && a:lvl > opt_cfg.maxlvl
+        if a:lvl > opt_cfg.maxlvl
+            " Has option been set yet?
             let flags = {}
             call opts.get(opt_name, flags)
             if !flags.set
-                throw "Missing required option: " . opt_name
+                " If we can't set now (from default or vim), throw error.
+                if has_key(opt_cfg, 'default')
+                    if type(opt_cfg.default) == 2
+                        " Invoke function to set default.
+                        let val = opt_cfg.default(?)
+                    else
+                        let val = opt_cfg.default
+                    endif
+                elseif has_key(opt_cfg, 'vim')
+                    " Use value of Vim option.
+                    " TODO: Is there a use case for this?
+                    exe 'let l:val = &' . opt_cfg.vim
+                else
+                    throw "Missing required option: " . opt_name
+                endif
             endif
         endif
     endfor
