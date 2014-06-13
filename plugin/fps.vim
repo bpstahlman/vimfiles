@@ -1695,16 +1695,31 @@ fu! s:complete_filenames(arg_lead, cmd_line, cursor_pos)
 endfu
 " <<<
 " >>> Functions invoked by commands
-fu! s:refresh(cmdline)
+fu! s:refresh(...)
+    " Note: Input should be 0 or more specs represented as a single string.
+    " TODO: UNDER CONSTRUCTION!!!
+    let cmdline = !a:0 ? '' : a:1
     " Parse cmdline into an array of specs (and hopefully, nothing else).
-    let [sprjs, argstr] = s:parse_cmdline(a:cmdline, 0)
+    let [sprjs, argstr] = s:parse_cmdline(cmdline, 0)
+    echo sprjs
     if !empty(argstr)
         " Refresh command doesn't accept any non-spec args!
         echoerr "Non pspec args not accepted by this command: " . argstr
     endif
+    " TODO: Probably need something along the lines of sort_and_combine_pspecs
+    " here (to avoid multiple refreshes when same sp inadvertently specified
+    " multiple times); if so, need to parameterize sort_and_combine_pspecs to
+    " handle the case in which sprjs is a simple list of sp's rather than a
+    " list of objects, each of which contains an sprj and a list of files.
+    if empty(sprjs)
+        " No specs provided: refresh all subprojects...
+        let sprjs = s:get_unconstrained_pspecs(1)
+    endif
+    echo sprjs
     let sf = s:sf_create()
     try
         for sprj in sprjs
+            " TODO - Fix this...
             let rootdir = call('finddir', sprj.opt.get('root'))
             if rootdir == ''
                 throw "Couldn't locate project base. Make sure your cwd is within the project."
@@ -1853,13 +1868,17 @@ fu! s:convert_file_list_to_string(pspecs, shell)
     endfor
 endfu
 " TODO: Rework this.
-fu! s:get_unconstrained_pspecs()
+" TODO: Test new omit_files option, which allows return of simple of list of
+" sp's. Decide on the sense of the optional flag: should it instead be
+" want_files? Consistency with has_glob sense?
+fu! s:get_unconstrained_pspecs(...)
+    let omit_files = a:0 && a:1
     let ret = []
     call s:prj.iter_init()
     while s:prj.iter_valid()
         let sprj = s:prj.iter_current()
         " TODO: Make copy of files? Better way to handle unconstrained?
-        call add(ret, {'sprj': sprj, 'files': sprj.files[:]})
+        call add(ret, omit_files ? sprj : {'sprj': sprj, 'files': sprj.files[:]})
         call s:prj.iter_next()
     endwhile
     return ret
@@ -2460,7 +2479,7 @@ com! -bang -nargs=+ FPSOpen call s:open(<q-bang>, <f-args>)
 com! -bang -nargs=0 FPSReopen call s:reopen(<q-bang>)
 " Force file refresh for specified subprojects (defaults to all in active
 " subset).
-com! -nargs=1 FPSRefresh call s:refresh(<f-args>)
+com! -nargs=? FPSRefresh call s:refresh(<f-args>)
 com! FPSClose call s:close()
 
 " Grep commands
