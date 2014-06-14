@@ -22,27 +22,6 @@ let g:fps_config = {
                     \'find': 'find . \( \( '
                         \.' -path ./shared/extjs -o -path ./help/transition/jquery.js \) '
                         \.' -prune -false \) -o -iname ''*.js'''
-                \},{
-					\'name': 'foo',
-                    \'shortname': 'f',
-                    \'root': ['src/public', ';asec'],
-                    \'find': 'find . \( \( '
-                        \.' -path ./shared/extjs -o -path ./help/transition/jquery.js \) '
-                        \.' -prune -false \) -o -iname ''*.js'''
-                \},{
-					\'name': 'boo',
-                    \'shortname': 'b',
-                    \'root': ['src/public', ';asec'],
-                    \'find': 'find . \( \( '
-                        \.' -path ./shared/extjs -o -path ./help/transition/jquery.js \) '
-                        \.' -prune -false \) -o -iname ''*.js'''
-                \},{
-					\'name': 'baz',
-                    \'shortname': 'z',
-                    \'root': ['src/public', ';asec'],
-                    \'find': 'find . \( \( '
-                        \.' -path ./shared/extjs -o -path ./help/transition/jquery.js \) '
-                        \.' -prune -false \) -o -iname ''*.js'''
                 \}
             \]
         \}
