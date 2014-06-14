@@ -11,35 +11,35 @@ let g:fps_config = {
                 \{
                     \'name': 'php',
                     \'shortname': 'p',
-                    \'root': ['src/private', ';asec'],
+                    \'root': 'src/private',
                     \'find': 'find . \( \( '
                         \.' -path ./extensions -o -path ./framework -o -path ./gii -o -path ./tests -o -path ./vendors \) '
                         \.' -prune -false \) -o -iname ''*.php'''
                 \},{
 					\'name': 'js',
                     \'shortname': 'j',
-                    \'root': ['src/public', ';asec'],
+                    \'root': 'src/public',
                     \'find': 'find . \( \( '
                         \.' -path ./shared/extjs -o -path ./help/transition/jquery.js \) '
                         \.' -prune -false \) -o -iname ''*.js'''
                 \},{
 					\'name': 'foo',
                     \'shortname': 'f',
-                    \'root': ['src/public', ';asec'],
+                    \'root': 'src/public',
                     \'find': 'find . \( \( '
                         \.' -path ./shared/extjs -o -path ./help/transition/jquery.js \) '
                         \.' -prune -false \) -o -iname ''*.js'''
                 \},{
 					\'name': 'boo',
                     \'shortname': 'b',
-                    \'root': ['src/public', ';asec'],
+                    \'root': 'src/public',
                     \'find': 'find . \( \( '
                         \.' -path ./shared/extjs -o -path ./help/transition/jquery.js \) '
                         \.' -prune -false \) -o -iname ''*.js'''
                 \},{
 					\'name': 'baz',
                     \'shortname': 'z',
-                    \'root': ['src/public', ';asec'],
+                    \'root': 'src/public',
                     \'find': 'find . \( \( '
                         \.' -path ./shared/extjs -o -path ./help/transition/jquery.js \) '
                         \.' -prune -false \) -o -iname ''*.js'''
@@ -126,7 +126,10 @@ fu! s:prj_create(force_refresh, p_name, ...)
                 " Don't commit to adding to s:sp_cfg[] yet...
                 let sprj = {}
                 let sprj.name = sp_name
-                let sprj.rootdir = call('finddir', sp_opt.get('root'))
+                " TEMP DEBUG
+                """"let sprj.rootdir = call('finddir', sp_opt.get('root'))
+                let sprj.rootdir = sp_opt.get('root')
+                " TODO: get should throw on missing required opt...
                 if sprj.rootdir == ''
                     throw "Warning: Skipping subproject `" . sp_name . " due to invalid config: Couldn't locate project base. Make sure your cwd is within the project."
                 endif
@@ -136,11 +139,18 @@ fu! s:prj_create(force_refresh, p_name, ...)
                 call s:cache_listfile(sprj, sp_opt, a:force_refresh)
                 " Associate the options object.
                 let sprj.opt = sp_opt
+                let dbg = {}
+                echo "proot: " . sp_opt.get('proot', dbg)
+                echo "flags: " . string(dbg)
+                echo "bugaboo: " . sp_opt.get('bugaboo', dbg)
+                echo "flags: " . string(dbg)
+                echo "toodaloo: " . sp_opt.get('toodaloo', dbg)
+                echo "flags: " . string(dbg)
                 " Accumulate the valid subproject.
                 let self.sprjs[sp_name] = sprj
             catch
                 " Invalid subproject
-                call s:warn("Warning: Skipping subproject `" . sp_name . " due to error: " . v:exception)
+                call s:warn("Warning: Skipping subproject `" . sp_name . " due to error: " . v:exception . " at " . v:throwpoint)
                 call self.spsel.disable(sp_name)
             finally
                 call self.spsel.iter_next()
@@ -303,7 +313,7 @@ fu! s:spsel_create(p_name, ...)
                 endif
             catch
                 " Invalid subproject
-                call s:warn("Warning: Skipping invalid subproject config `" . sp_name . "': " . v:exception)
+                call s:warn("Warning: Skipping invalid subproject config `" . sp_name . "': " . v:exception . " at " . v:throwpoint)
             endtry
         endfor
         " If no valid subprojects, no point in continuing...
@@ -451,7 +461,6 @@ fu! s:open(bang, ...)
     endif
     "try
         let s:prj = s:prj_create(a:bang == '!', a:000[-1], a:000[0:-2])
-        "call s:process_cfg(a:p_name, sp_names)
     "catch
         "throw "Cannot open project `" . a:000[-1] . "': " . v:exception
         " TODO: Is this necessary, given that s:prj hasn't been set? We may
@@ -506,34 +515,34 @@ let s:opt_cfg = {
         \'minlvl': 0,
         \'maxlvl': 2,
         \'type': 1,
-        \'default': 'files.list'
+        \'default_val': 'files.list'
     \},
     \'maxgrepsize': {
         \'minlvl': 0,
         \'maxlvl': 2,
         \'type': 0,
-        \'default': 50000
+        \'default_val': 50000
     \},
     \'more': {
         \'#TODO:': 'Decide whether to support more than true/false.',
         \'minlvl': 0,
         \'maxlvl': 2,
         \'type': 0,
-        \'default': 0,
+        \'default_val': 0,
         \'vim': {'name': 'grepprg', 'boolean': 0}
     \},
     \'grepprg': {
         \'minlvl': 0,
         \'maxlvl': 2,
         \'type': 1,
-        \'default': 'grep -n $* /dev/null',
+        \'default_val': 'grep -n $* /dev/null',
         \'vim': {'name': 'grepprg', 'boolean': 0}
     \},
     \'grepformat': {
         \'minlvl': 0,
         \'maxlvl': 2,
         \'type': 1,
-        \'default': '%f:%l:%m,%f:%l%m,%f  %l%m',
+        \'default_val': '%f:%l:%m,%f:%l%m,%f  %l%m',
         \'vim': {'name': 'grepformat', 'boolean': 0}
     \},
     \'find': {
@@ -546,13 +555,25 @@ let s:opt_cfg = {
         \'minlvl': 1,
         \'maxlvl': 1,
         \'type': 1,
-        \'default': 
+        \'default_fun': 's:setdef_proot'
     \},
-    \'sproot': {
+    \'root': {
         \'#comment': "",
-        \'minlvl': 1,
-        \'maxlvl': 1,
+        \'minlvl': 2,
+        \'maxlvl': 2,
         \'type': 1
+    \},
+    \'bugaboo': {
+        \'minlvl': 0,
+        \'maxlvl': 1,
+        \'type': 1,
+        \'default_val': 'bugaboo value'
+    \},
+    \'toodaloo': {
+        \'minlvl': 1,
+        \'maxlvl': 2,
+        \'type': 1,
+        \'default_fun': 's:setdef_toodaloo'
     \}
 \}
 " <<<
@@ -575,33 +596,23 @@ fu! s:opts_create(opts, lvl, ...)
         else
             let flags = {}
         endif
-        call extend(flags, {'def': 0, 'set': 0, 'vim': '', 'lvl': -1})
+        call extend(flags, {'lvl': -1})
         let obj = self
         while !empty(obj)
             if has_key(obj.opts, a:name)
                 let flags.lvl = obj.lvl
-                let flags.set = 1
                 let value = obj.opts[a:name]
-                break
+                return value
             endif
             " Move up to parent
             let obj = obj.base
         endwhile
-        " Is this a valid option?
-        " TODO: Consider whether to add 'invalid' option (noting that that
-        " would amount to an internal error).
-        if has_key(s:opt_cfg, a:name)
-            " Is there a corresponding Vim option?
-            if has_key(s:opt_cfg[a:name], 'vim')
-                let flags.vim = s:opt_cfg[a:name].vim
-            endif
-            if !flags.set && has_key(s:opt_cfg[a:name], 'default')
-                let flags.def = 1
-                let flags.set = 1
-                let value = s:opt_cfg[a:name].default
-            endif
+        if a:0 == 0
+            throw "Internal error: Unknown option `" . a:name . "'"
+        else
+            " Indicate failure to find option.
+            let flags.lvl = -1
         endif
-        return exists('l:value') ? value : ''
     endfu
     fu! opts.set(name, value) dict
         let self.opts[a:name] = a:value
@@ -626,10 +637,17 @@ fu! Test_opts_create()
         endfor
     endfor
 endfu
+fu! s:setdef_toodaloo(lvl, opts)
+    return a:opts.get('bugaboo') . ' and toodaloo too'
+endfu
+fu! s:setdef_proot(lvl, opts)
+    return 'silly_proot'
+endfu
 " TODO: A name that differentiates this from runtime (cmdline) option
 " processing. Is this even needed between caller and s:opts_create?
-" TODO: No need for this. Put it in s:opts_create. This makes sense, as it
-" would consolidate all the s:opt_cfg[] access.
+" TODO: No need for this. Put it in s:opts_create (or private helper
+" function). This makes sense, as it would consolidate all the s:opt_cfg[]
+" access.
 fu! s:build_opts(raw, lvl, base)
     let opts = s:opts_create({}, a:lvl, a:base)
     for [opt_name, opt_val] in items(a:raw)
@@ -664,179 +682,32 @@ fu! s:build_opts(raw, lvl, base)
     endfor
     " Make sure all options that are required by this level have been set.
     for [opt_name, opt_cfg] in items(s:opt_cfg)
-        if a:lvl > opt_cfg.maxlvl
+        if a:lvl == opt_cfg.maxlvl
             " Has option been set yet?
             let flags = {}
-            call opts.get(opt_name, flags)
-            if !flags.set
+            let set_lvl = opts.get(opt_name, flags)
+            if flags.lvl < 0
                 " If we can't set now (from default or vim), throw error.
-                if has_key(opt_cfg, 'default')
-                    if type(opt_cfg.default) == 2
-                        " Invoke function to set default.
-                        let val = opt_cfg.default(?)
-                    else
-                        let val = opt_cfg.default
-                    endif
+                if has_key(opt_cfg, 'default_fun')
+                    " Invoke function to set default.
+                    let opt_val = function(opt_cfg.default_fun)(a:lvl, opts)
+                    "let opt_val = (type(opt_cfg.default) == 2 ? function(opt_cfg.default_fun) : default_fun)(opt_name, a:lvl, opts)
+                elseif has_key(opt_cfg, 'default_val')
+                    " Invoke function to set default.
+                    let opt_val = opt_cfg.default_val
                 elseif has_key(opt_cfg, 'vim')
                     " Use value of Vim option.
                     " TODO: Is there a use case for this?
-                    exe 'let l:val = &' . opt_cfg.vim
+                    exe 'let l:opt_val = &' . opt_cfg.vim
                 else
                     throw "Missing required option: " . opt_name
                 endif
+                call opts.set(opt_name, opt_val)
+                unlet opt_val " E706 workaround
             endif
         endif
     endfor
     return opts
-endfu
-" Process the subproject/module short/long name options.
-" Output: Sets the following data structures:
-" s:shortnames
-"   Dictionary mapping short (single-char) options to the index of the
-"   corresponding submodule (in config array).
-" s:longnames
-"   Sorted List of Dictionaries of the following form:
-"   { 'name': <longname>, 're': <regex matching name>, 'idx': <submodule index> }
-"   Note: Array is sorted by longname.
-fu! s:process_cfg(p_name)
-    " Make sure there's at least 1 project
-    if !has_key(g:fps_config, 'projects')
-        throw "No projects defined."
-    endif
-    if type(g:fps_config.projects) != 4
-        throw "Invalid project definition. Must be Dictionary."
-    endif
-    " Does the named project exist?
-    if !has_key(g:fps_config.projects, a:p_name)
-        throw "No configuration found. :help TODO fps_config???"
-    endif
-    " TODO: build_opts will throw on (eg) missing required args - handle
-    " somehow...
-    let p_raw = g:fps_config.projects[a:p_name]
-    " Make sure there's at least 1 subproject
-    if !has_key(p_raw, 'subprojects')
-        throw "No subprojects defined for project " . a:p_name
-    endif
-    if type(p_raw.subprojects) != 4
-        throw "Invalid subprojects definition for project " . a:p_name . ". Must be Dictionary."
-    endif
-    " Note: We don't need to preserve g_opt with s:var, as it will be
-    " accessible via prototype of project-level opt.
-    let g_opt = s:build_opts(g:fps_config, 0, {}) " TODO: No need to pass global...
-    let s:p_opt = s:build_opts(p_raw, 1, g_opt)
-
-    " Build snapshot of project opt/cfg until re-initialization.
-    let s:sp_opt = []
-    let s:sp_cfg = []
-    " Short (single-char) names stored in a hash
-    " Long names stored in sorted array of patterns employing \%[...]
-    let s:shortnames = {}
-    let longnames = []
-    let lname_to_index = {}
-    let i = 0
-    let cfg_idx = 0 " index into s:sp_cfg (i.e., valid configs only)
-    " TODO: This dictionary loop is no longer valid. This function is going
-    " away... See changes in the new project and sp objects.
-    for [sp_name, sp_raw] in items(p_raw.subprojects)
-        try
-            let sp_opt = s:build_opts(sp_raw, 2, s:p_opt)
-            " TODO: Don't hardcode these patterns...
-            if (sp_name !~ '^[a-zA-Z0-9_]\+$')
-                throw "Ignoring invalid subproject name `" . sp_name
-                    \. "': must be sequence of characters matching [a-zA-Z0-9_]."
-            else
-                if !has_key(lname_to_index, sp_name)
-                    let lname_to_index[sp_name] = cfg_idx
-                    call add(longnames, sp_name)
-                else
-                    call s:warn("Warning: Name " . sp_name . " used multiple times. All but first usage ignored.")
-                endif
-            endif
-            if has_key(sp_raw, 'shortname')
-                if (sp_raw.shortname !~ '^[a-zA-Z0-9_]$')
-                    call s:warn("Ignoring invalid shortname `" . sp_raw.shortname
-                        \. "': must be single character matching [a-zA-Z0-9_].")
-                else
-                    if !has_key(s:shortnames, sp_raw.shortname)
-                        let s:shortnames[sp_raw.shortname] = cfg_idx
-                    else
-                        call s:warn("Warning: Name " . sp_raw.shortname . " used multiple times. All but first usage ignored.")
-                    endif
-                endif
-            endif
-            " Don't commit to adding to s:sp_cfg[] yet...
-            let sp_cfg = {}
-            " Add name, which was represented only as key of source object
-            let sp_cfg.name = sp_name
-            " Save original index, in case it's needed for reporting.
-            " TODO: Perhaps save a title string (e.g., `--longname, -shortname')
-            " for reporting purposes...
-            let sp_cfg.orig_idx = i
-            let sp_cfg.rootdir = call('finddir', sp_opt.get('root'))
-            if sp_cfg.rootdir == ''
-                throw "Warning: Skipping invalid subproject config at index " . i . ": Couldn't locate project base. Make sure your cwd is within the project."
-            endif
-            " Save full path of rootdir.
-            let sp_cfg.rootdir = s:canonicalize_path(sp_cfg.rootdir, '')
-            " Build cache, but don't force refresh.
-            call s:cache_listfile(sp_cfg, sp_opt, 0)
-            " Current config item not skipped: i.e., valid subproject.
-            call add(s:sp_cfg, sp_cfg)
-            call add(s:sp_opt, sp_opt)
-            let cfg_idx = cfg_idx + 1 " Keep up with sp_idx
-        catch
-            " Invalid subproject
-            call s:warn("Warning: Skipping invalid subproject config at index " . i . ": " . v:exception)
-            " TODO: Decide on disabled. Perhaps just remove... But consider
-            " fact that disabling might be required on a refresh...
-            let sp_cfg.disabled = 1
-        finally
-            let i = i + 1 " Keep up with original idx
-        endtry
-    endfor
-    " If no valid subprojects, no point in continuing...
-    if empty(s:sp_cfg)
-        throw "No valid subprojects. :help fps-config"
-    endif
-    " TODO: Perhaps refactor some of this into function.
-    " Process the long options to determine the portions required for
-    " uniqueness.
-    call sort(longnames)
-    let ln = len(longnames)
-    let i = 1
-    let reqs = [matchstr(longnames[0], '^.')]
-    while i < ln
-        " Get common portion + 1 char (if possible)
-        let ml = matchlist(longnames[i], '\(\%[' . longnames[i-1] . ']\)\(.\)\?')
-        let [cmn, nxt] = ml[1:2]
-        " Is it possible we need to lengthen previous req?
-        if len(cmn) >= len(reqs[i-1])
-            " Can we lengthen previous req?
-            if len(reqs[i-1]) < len(longnames[i-1])
-                " Set to common portion + 1 char (if possible)
-                let reqs[i-1] = matchstr(longnames[i-1], cmn . '.\?')
-            endif
-        endif
-        " Take only as much of current as is required for uniqueness:
-        " namely, common portion + 1 char.
-        call add(reqs, cmn . nxt)
-        let i = i + 1
-    endwhile
-    " Build an array of patterns and corresponding indices.
-    " Note: Arrays reqs and longnames are parallel, and original indices can
-    " be looked up in lname_to_index.
-    let s:longnames = []
-    let i = 0
-    while i < ln
-        let re = reqs[i]
-        " Is the long name longer than the required portion?
-        if len(longnames[i]) > len(reqs[i])
-            " Append the optional part within \%[...]
-            let re .= '\%[' . longnames[i][len(reqs[i]):] . ']'
-        endif
-        call add(s:longnames, {'name': longnames[i], 're': re, 'idx': lname_to_index[longnames[i]]})
-        let i = i + 1
-    endwhile
 endfu
 
 " Return s:sp_cfg index corresponding to input short/long option name (or
