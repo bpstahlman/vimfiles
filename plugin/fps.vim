@@ -102,8 +102,10 @@ fu! s:prj_create(force_refresh, p_name, ...)
         let p_raw = g:fps_config.projects[self.name]
         " Note: We don't need to preserve g_opt with s:var, as it will be
         " accessible via prototype of project-level opt.
-        let g_opt = s:build_opts(g:fps_config, 0, {}) " TODO: No need to pass global...
-        let p_opt = s:build_opts(p_raw, 1, g_opt)
+        " TODO: Get this another way...
+        let ctx = {'proot': getcwd()}
+        let g_opt = s:opts_create(g:fps_config, 0, {}, ctx)
+        let p_opt = s:opts_create(p_raw, 1, g_opt, ctx)
         " Note: Iterate spsel directly, as sprjs hasn't been built yet.
         " While iterating, keep up with index into global subprojects list, of
         " which the list processed by the iterator may be only a subset.
@@ -122,7 +124,7 @@ fu! s:prj_create(force_refresh, p_name, ...)
                     let sp_idx += 1
                 endwhile
                 let sp_raw = p_raw.subprojects[sp_idx]
-                let sp_opt = s:build_opts(sp_raw, 2, p_opt)
+                let sp_opt = s:opts_create(sp_raw, 2, p_opt, ctx)
                 " Don't commit to adding to s:sp_cfg[] yet...
                 let sprj = {}
                 let sprj.name = sp_name
@@ -139,13 +141,16 @@ fu! s:prj_create(force_refresh, p_name, ...)
                 call s:cache_listfile(sprj, sp_opt, a:force_refresh)
                 " Associate the options object.
                 let sprj.opt = sp_opt
-                let dbg = {}
-                echo "proot: " . sp_opt.get('proot', dbg)
-                echo "flags: " . string(dbg)
-                echo "bugaboo: " . sp_opt.get('bugaboo', dbg)
-                echo "flags: " . string(dbg)
-                echo "toodaloo: " . sp_opt.get('toodaloo', dbg)
-                echo "flags: " . string(dbg)
+
+                "let dbg = {}
+                "echo "proot: " . sp_opt.get('proot', dbg)
+                "echo "flags: " . string(dbg)
+                "echo "bugaboo: " . sp_opt.get('bugaboo', dbg)
+                "echo "flags: " . string(dbg)
+                "echo "toodaloo: " . sp_opt.get('toodaloo', dbg)
+                "echo "flags: " . string(dbg)
+                "echo "foobaz: " . sp_opt.get('foobaz', dbg)
+                "echo "flags: " . string(dbg)
                 " Accumulate the valid subproject.
                 let self.sprjs[sp_name] = sprj
             catch
@@ -501,52 +506,51 @@ endfu
 " <<<
 " >>> Static data used to process options
 " Notes:
-" -'type' is return value of type()
-" -No need to specify 'type' if there's a 'default'.
-" -'required' means user *must* provide a value.
-"  TODO: It's actually unnecessary, as it can be deduced from presence/absence
-"  of others: e.g., 'default', 'vim'
-" TODO: I believe required and default are redundant: i.e., all options are
-" required unless they have a default...
-" TODO: Consider removing 'vim' and adding ability to specify conversion
-" function (for converting raw value to opt value).
+" 'type' is return value of type()
+" No need to specify 'type' if there's a 'default'; it won't even be checked.
+" 'default' object format:
+"   'type':  vim | function | value
+"   'value': {vimopt-name} | {func-name} | {value}
+" TODO: Replace listfile with cachedir or somesuch.
 let s:opt_cfg = {
     \'listfile': {
         \'minlvl': 0,
         \'maxlvl': 2,
         \'type': 1,
-        \'default_val': 'files.list'
+        \'default': {
+            \'type': 'value',
+            \'value': 'files.list'
+        \}
     \},
     \'maxgrepsize': {
         \'minlvl': 0,
         \'maxlvl': 2,
         \'type': 0,
-        \'default_val': 50000
-    \},
-    \'more': {
-        \'#TODO:': 'Decide whether to support more than true/false.',
-        \'minlvl': 0,
-        \'maxlvl': 2,
-        \'type': 0,
-        \'default_val': 0,
-        \'vim': {'name': 'grepprg', 'boolean': 0}
+        \'default': {
+            \'type': 'value',
+            \'value': 50000
+        \}
     \},
     \'grepprg': {
         \'minlvl': 0,
         \'maxlvl': 2,
         \'type': 1,
-        \'default_val': 'grep -n $* /dev/null',
-        \'vim': {'name': 'grepprg', 'boolean': 0}
+        \'default': {
+            \'type': 'value',
+            \'value': 'grep -n'
+        \}
     \},
     \'grepformat': {
         \'minlvl': 0,
         \'maxlvl': 2,
         \'type': 1,
-        \'default_val': '%f:%l:%m,%f:%l%m,%f  %l%m',
-        \'vim': {'name': 'grepformat', 'boolean': 0}
+        \'default': {
+            \'type': 'value',
+            \'value': '%f:%l:%m,%f:%l%m,%f  %l%m'
+        \}
     \},
     \'find': {
-        \'minlvl': 0,
+        \'minlvl': 2,
         \'maxlvl': 2,
         \'type': 1
     \},
@@ -555,68 +559,149 @@ let s:opt_cfg = {
         \'minlvl': 1,
         \'maxlvl': 1,
         \'type': 1,
-        \'default_fun': 's:setdef_proot'
+        \'default': {
+            \'type': 'function',
+            \'value': 's:setdef_proot'
+        \}
     \},
     \'root': {
         \'#comment': "",
         \'minlvl': 2,
         \'maxlvl': 2,
-        \'type': 1
+        \'type': 1,
+        \'convert': 's:optconv_root'
     \},
     \'bugaboo': {
         \'minlvl': 0,
         \'maxlvl': 1,
         \'type': 1,
-        \'default_val': 'bugaboo value'
+        \'default': {
+            \'type': 'value',
+            \'value': 'bugaboo value'
+        \}
     \},
     \'toodaloo': {
         \'minlvl': 1,
         \'maxlvl': 2,
         \'type': 1,
-        \'default_fun': 's:setdef_toodaloo'
+        \'default': {
+            \'type': 'function',
+            \'value': 's:setdef_toodaloo'
+        \}
+    \},
+    \'foobaz': {
+        \'minlvl': 2,
+        \'maxlvl': 2,
+        \'type': 0,
+        \'default': {
+            \'type': 'vim',
+            \'value': 'autowriteall'
+        \}
     \}
 \}
 " <<<
 " >>> Functions used to process config
-" Note: ... is base, defaults to {}
-" TODO: Consider whether all these return flags are needed, given that prior
-" option processing should preclude possibility (eg) of invalid/missing opt.
-fu! s:opts_create(opts, lvl, ...)
+" Optional:
+"   a:1: parent object, defaults to {}
+"   a:2: extra contextual data, supplied to any default or convert functions
+fu! s:opts_create(raw, lvl, ...)
     let base = a:0 > 0 ? a:1 : {}
-    let opts = {'opts': a:opts, 'lvl': a:lvl, 'base': base}
-    " Optional input object filled with the following flags:
-    " def, set, vim, lvl
-    " Assumption: Prior validation is such that failure to find a value for
-    " the option (possibly default) implies internal error.
+    let data = a:0 > 1 ? a:2 : {}
+    let opts = {'opts': {}, 'lvl': a:lvl, 'base': base}
+    " Lookup and return requested option value, returning the level at which
+    " the option was found in the input dict (if supplied).
+    " Note: Doing it this way (rather than returning list) for convenience of
+    " callers, which fall into 2 phases:
+    " 1. option processing - may call this accessor solely as existence test
+    " 2. post-option processing - due to phase 1 validation, request for
+    "    missing option implies internal error.
     fu! opts.get(name, ...) dict
         if a:0 > 0
             let flags = a:1
             " Empty input object.
             call filter(flags, 0)
-        else
-            let flags = {}
+            let flags.lvl = -1
         endif
-        call extend(flags, {'lvl': -1})
         let obj = self
         while !empty(obj)
             if has_key(obj.opts, a:name)
-                let flags.lvl = obj.lvl
-                let value = obj.opts[a:name]
-                return value
+                if a:0 > 0
+                    let flags.lvl = obj.lvl
+                endif
+                return obj.opts[a:name]
             endif
             " Move up to parent
             let obj = obj.base
         endwhile
         if a:0 == 0
             throw "Internal error: Unknown option `" . a:name . "'"
-        else
-            " Indicate failure to find option.
-            let flags.lvl = -1
         endif
+        " If error not thrown, lvl of -1 communicates failure to caller.
     endfu
-    fu! opts.set(name, value) dict
-        let self.opts[a:name] = a:value
+    " Private utility function
+    fu! opts.construct(raw, lvl, base, data)
+        for [opt_name, opt_val] in items(a:raw)
+            " TODO: As long as opts are not segregated in a subkey like 'opts', if
+            " we want to warn about non-existent opts, we need to maintain a set
+            " of names that are not opts, but are expected: e.g., 'shortname'.
+            " Decision: Don't complicate things unnecessarily by treating things
+            " like 'shortname' as options.
+            " TODO: Skip keys that begin with '#' (possibly with leading
+            " whitespace) to permit a form of 'commenting'.
+            if !has_key(s:opt_cfg, opt_name)
+                unlet opt_val " E706 workaround
+                continue
+            endif
+            " Option exists.
+            let opt_cfg = s:opt_cfg[opt_name]
+            " If option can't be set at this level, ignore, possibly with
+            " warning (TODO)...
+            if a:lvl >= opt_cfg.minlvl && a:lvl <= opt_cfg.maxlvl
+                " Validate type
+                if type(opt_val) != opt_cfg.type
+                    " TODO: Flesh out the error message. Also, should we just skip for
+                    " now?
+                    throw "Invalid value supplied for option " . opt_name
+                endif
+                " Option value is valid.
+                let self.opts[opt_name] = opt_val
+            endif
+            unlet opt_val " E706 workaround
+        endfor
+        " Make sure all options that are required by this level have been set.
+        for [opt_name, opt_cfg] in items(s:opt_cfg)
+            if a:lvl == opt_cfg.maxlvl
+                " Has option been set yet?
+                let flags = {}
+                call self.get(opt_name, flags)
+                if flags.lvl < 0
+                    " If we can't provide default now, throw error.
+                    if has_key(opt_cfg, 'default')
+                        let def = opt_cfg.default
+                        if def.type == 'function'
+                            " Invoke function, passing level, partially-built
+                            " opts object, and any contextual data.
+                            let opt_val = function(def.value)(a:lvl, self, a:data)
+                        elseif def.type == 'value'
+                            let opt_val = def.value
+                        elseif def.type == 'vim'
+                            " Use value of Vim option.
+                            " TODO: Is there a use case for this?
+                            exe 'let l:opt_val = &' . def.value
+                        else
+                            throw "Internal error: " . def.type . " is not a valid default type."
+                        endif
+                    else
+                        throw "Missing required option: " . opt_name
+                    endif
+                    let self.opts[opt_name] = opt_val
+                    unlet opt_val " E706 workaround
+                endif
+            endif
+        endfor
     endfu
+    " Construct...
+    call opts.construct(a:raw, a:lvl, base, data)
     return opts
 endfu
 fu! Test_opts_create()
@@ -637,122 +722,11 @@ fu! Test_opts_create()
         endfor
     endfor
 endfu
-fu! s:setdef_toodaloo(lvl, opts)
+fu! s:setdef_toodaloo(lvl, opts, data)
     return a:opts.get('bugaboo') . ' and toodaloo too'
 endfu
-fu! s:setdef_proot(lvl, opts)
+fu! s:setdef_proot(lvl, opts, data)
     return 'silly_proot'
-endfu
-" TODO: A name that differentiates this from runtime (cmdline) option
-" processing. Is this even needed between caller and s:opts_create?
-" TODO: No need for this. Put it in s:opts_create (or private helper
-" function). This makes sense, as it would consolidate all the s:opt_cfg[]
-" access.
-fu! s:build_opts(raw, lvl, base)
-    let opts = s:opts_create({}, a:lvl, a:base)
-    for [opt_name, opt_val] in items(a:raw)
-        " TODO: As long as opts are not segregated in a subkey like 'opts', if
-        " we want to warn about non-existent opts, we need to maintain a set
-        " of names that are not opts, but are expected: e.g., 'shortname'.
-        " Decision: Don't complicate things unnecessarily by treating things
-        " like 'shortname' as options.
-        " TODO: Skip keys that begin with '#' (possibly with leading
-        " whitespace) to permit a form of 'commenting'.
-        if !has_key(s:opt_cfg, opt_name)
-            unlet opt_val " E706 workaround
-            continue
-        endif
-        " Option exists.
-        let opt_cfg = s:opt_cfg[opt_name]
-        if a:lvl < opt_cfg.minlvl || a:lvl > opt_cfg.maxlvl
-            " Option can't be set at this level; ignore.
-            " TODO: Add warning!
-            unlet opt_val " E706 workaround
-            continue
-        endif
-        " Validate type
-        if type(opt_val) != opt_cfg.type
-            " TODO: Flesh out the error message. Also, should we just skip for
-            " now?
-            throw "Invalid value supplied for option " . opt_name
-        endif
-        " Option value is valid.
-        call opts.set(opt_name, opt_val)
-        unlet opt_val " E706 workaround
-    endfor
-    " Make sure all options that are required by this level have been set.
-    for [opt_name, opt_cfg] in items(s:opt_cfg)
-        if a:lvl == opt_cfg.maxlvl
-            " Has option been set yet?
-            let flags = {}
-            let set_lvl = opts.get(opt_name, flags)
-            if flags.lvl < 0
-                " If we can't set now (from default or vim), throw error.
-                if has_key(opt_cfg, 'default_fun')
-                    " Invoke function to set default.
-                    let opt_val = function(opt_cfg.default_fun)(a:lvl, opts)
-                    "let opt_val = (type(opt_cfg.default) == 2 ? function(opt_cfg.default_fun) : default_fun)(opt_name, a:lvl, opts)
-                elseif has_key(opt_cfg, 'default_val')
-                    " Invoke function to set default.
-                    let opt_val = opt_cfg.default_val
-                elseif has_key(opt_cfg, 'vim')
-                    " Use value of Vim option.
-                    " TODO: Is there a use case for this?
-                    exe 'let l:opt_val = &' . opt_cfg.vim
-                else
-                    throw "Missing required option: " . opt_name
-                endif
-                call opts.set(opt_name, opt_val)
-                unlet opt_val " E706 workaround
-            endif
-        endif
-    endfor
-    return opts
-endfu
-
-" Return s:sp_cfg index corresponding to input short/long option name (or
-" -1 if matching config not found).
-" Input(s):
-"   opt
-"     Short or long option name, prefixed with 's:' or 'l:' to indicate
-"     short/long.
-fu! s:get_cfg_idx(opt)
-    let [is_short, name] = [a:opt[0] == 's', a:opt[2:]]
-    if is_short
-        if has_key(s:shortnames, name)
-            return s:shortnames[name]
-        elseif
-            return -1
-        endif
-    else
-        " Look for name in s:longnames (array of {'name', ..., 're': ..., 'idx': ...})
-        for lname in s:longnames
-            if name ==# lname.name || name =~# lname.re
-                return lname.idx
-            elseif name <# lname.name
-                " We've passed the last possible match.
-                break
-            endif
-        endfor
-        " Not found!
-        return -1
-    endif
-endfu
-
-" Try various ways to get a subproject-specific value for specified option.
-" TODO: Remove if this approach remains unused.
-fu! s:get_opt(sp_idx, opt, default_to_vim)
-    if has_key(s:sp_cfg[a:sp_idx], a:opt)
-        return s:sp_cfg[a:sp_idx][a:opt]
-    elseif exists('g:fps_' . a:opt)
-        " TODO: Revisit this when plugin global options are reworked.
-        return g:fps_{a:opt}
-    elseif a:default_to_vim
-        " Default to the Vim option value in effect for current window.
-        return getwinvar(0, '&' . a:opt)
-    else
-        throw "Internal error: No value found for option " . a:opt
-    endif
 endfu
 
 " Canonicalize the filenames in listfile, converting to be relative to rootdir
