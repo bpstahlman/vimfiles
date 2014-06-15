@@ -5,6 +5,7 @@ let g:fps_config = {
     \'maxgrepsize': 4095,
     \'grepprg': 'grep -n $* /dev/null',
     \'grepformat': '%f:%l:%m,%f:%l%m,%f  %l%m',
+    \'cachedir': 'C:/Users/stahlmanb/tmp/fps',
     \'projects': {
         \'asec': {
             \'subprojects': [
@@ -18,27 +19,6 @@ let g:fps_config = {
                 \},{
 					\'name': 'js',
                     \'shortname': 'j',
-                    \'root': 'src/public',
-                    \'find': 'find . \( \( '
-                        \.' -path ./shared/extjs -o -path ./help/transition/jquery.js \) '
-                        \.' -prune -false \) -o -iname ''*.js'''
-                \},{
-					\'name': 'foo',
-                    \'shortname': 'f',
-                    \'root': 'src/public',
-                    \'find': 'find . \( \( '
-                        \.' -path ./shared/extjs -o -path ./help/transition/jquery.js \) '
-                        \.' -prune -false \) -o -iname ''*.js'''
-                \},{
-					\'name': 'boo',
-                    \'shortname': 'b',
-                    \'root': 'src/public',
-                    \'find': 'find . \( \( '
-                        \.' -path ./shared/extjs -o -path ./help/transition/jquery.js \) '
-                        \.' -prune -false \) -o -iname ''*.js'''
-                \},{
-					\'name': 'baz',
-                    \'shortname': 'z',
                     \'root': 'src/public',
                     \'find': 'find . \( \( '
                         \.' -path ./shared/extjs -o -path ./help/transition/jquery.js \) '
@@ -125,22 +105,8 @@ fu! s:prj_create(force_refresh, p_name, ...)
                 endwhile
                 let sp_raw = p_raw.subprojects[sp_idx]
                 let sp_opt = s:opts_create(sp_raw, 2, p_opt, ctx)
-                " Don't commit to adding to s:sp_cfg[] yet...
-                let sprj = {}
-                let sprj.name = sp_name
-                " TEMP DEBUG
-                """"let sprj.rootdir = call('finddir', sp_opt.get('root'))
-                let sprj.rootdir = sp_opt.get('root')
-                " TODO: get should throw on missing required opt...
-                if sprj.rootdir == ''
-                    throw "Warning: Skipping subproject `" . sp_name . " due to invalid config: Couldn't locate project base. Make sure your cwd is within the project."
-                endif
-                " Convert rootdir to full path.
-                let sprj.rootdir = s:canonicalize_path(sprj.rootdir, '')
-                " Build cache, but don't force refresh. (TODO - Unless bang?)
-                call s:cache_listfile(sprj, sp_opt, a:force_refresh)
-                " Associate the options object.
-                let sprj.opt = sp_opt
+                " Accumulate the subproject.
+                let self.sprjs[sp_name] = s:sprj_create(self, sp_name, sp_opt, a:force_refresh)
 
                 "let dbg = {}
                 "echo "proot: " . sp_opt.get('proot', dbg)
@@ -151,8 +117,6 @@ fu! s:prj_create(force_refresh, p_name, ...)
                 "echo "flags: " . string(dbg)
                 "echo "foobaz: " . sp_opt.get('foobaz', dbg)
                 "echo "flags: " . string(dbg)
-                " Accumulate the valid subproject.
-                let self.sprjs[sp_name] = sprj
             catch
                 " Invalid subproject
                 call s:warn("Warning: Skipping subproject `" . sp_name . " due to error: " . v:exception . " at " . v:throwpoint)
@@ -188,6 +152,116 @@ fu! s:prj_create(force_refresh, p_name, ...)
 
     return prj
 endfu
+fu! s:sprj_create(prj, name, opt, force_refresh)
+    let sprj = {'prj': a:prj, 'name': a:name, 'opt': a:opt}
+    " Canonicalize the filenames in listfile, converting to be relative to rootdir
+    " if possible.
+    " Format: Canonical form uses `/', and has no `.' or `..' components, leading
+    " or otherwise.
+    " Note: Nonexistent paths cannot be fully canonicalized; they will be retained
+    " in list in partially canonicalized form: expand converts slashes but not .
+    " and ..
+    " Path Conversion: If user specified path mappings in the 'pathconv' option,
+    " they will be tried as well; only the first applicable mapping is applied.
+    " Caveat: If there happen to be special chars in the pathname (unlikely),
+    " expand will attempt to expand, so it's best to ensure pathnames don't have
+    " `*', `**', $ENV, etc...
+    " Return: The canonicalized list.
+    " TODO: Have this done once at Refresh and initial load and saved in a
+    " persistent structure.
+    " Exceptions: Leave for caller.
+    " TODO: Perhaps replace sp_cfg/sp_opt with an sp_idx.
+    fu! sprj.cache_listfile(force_refresh)
+        let root = self.opt.get('root')
+        let listfile_path = self.get_listfile_path()
+        let listfile_readable = filereadable(listfile_path)
+        let sf = s:sf_create()
+        try
+            " Both listfile generation and file canonicalization require us to
+            " be in root dir.
+            call sf.pushd(root)
+            " Do we need to create/update the listfile?
+            " Assumption: Either the if or elseif *will* be entered.
+            if !listfile_readable || a:force_refresh
+                " Caveat: Originally, used :! and > to put results in
+                " listfile; this can be problematic in some environments,
+                " due to need for abs path conversion. Circumvent issues by
+                " using system()/writefile() combination.
+                " Note: Alternatively, could use convert_path mechanism.
+                " TODO: Should we impose these sorts of constraints on
+                " (possibly system-dependent v:shell_error)?
+                " Assumption: Nonzero will never be returned for success, even
+                " if the external command doesn't give a meaningful error
+                " code...
+                silent! let files_raw = split(system(self.opt.get('find')), '\n')
+                "echo "files_raw: " . string(files_raw)
+                if v:shell_error != 0
+                    throw "Encountered error attempting to build listfile `" . listfile_path . "' for subproject "
+                        \. self.name . ": Shell error code=" . v:shell_error
+                endif
+                " Write the listfile.
+                " Note: We must set 'shellslash' for canonicalization.
+                call sf.setopt('shellslash', 1, {'boolean': 1})
+                " Build canonicalized list within loop.
+                let files = []
+                let pathconv = self.opt.get('pathconv')
+                let do_pathconv = !empty(pathconv)
+                for file_raw in files_raw
+                    if do_pathconv
+                        let file_raw = pathconv.convert_path(file_raw, 'in')
+                    endif
+                    let file_raw = s:canonicalize_path(file_raw, root)
+                    " Add canonical name to list.
+                    call add(files, file_raw)
+                endfor
+                " TODO: Make sort optional so we can skip if user's find
+                " ensures sorted.
+                " TODO: Should we uniquify? Doing so could permit some optimizations
+                " (e.g., find_insert_idx).
+                call sort(files)
+                " Save the file to permit processing to be skipped next time.
+                let v:errmsg = ''
+                silent! let status = writefile(files, listfile_path)
+                if status == -1 || v:errmsg != ''
+                    " Warn user that listfile can't be saved for next time...
+                    " Rationale: Inability to write the file needn't disable
+                    " the subproject; although it's expensive, we can re-run
+                    " find whenever sp is opened.
+                    call s:warn("Unable to write listfile `" . listfile_path . "' for subproject "
+                        \. self.name . " due to the following error: " . v:errmsg . ". Until problem is corrected,"
+                        \. " subsequent subproject opens may take slightly longer than necessary.")
+                    " Note: delete() returns 0 on success, 1 on failure, so we
+                    " could warn on failure, but there's really no reason to
+                    if delete(listfile_path) == 1
+                        " Question: Does this warrant separate warning?
+                        call s:warn("Unable to delete stale listfile `" . listfile_path . "' for subproject " . self.name)
+                    endif
+                endif
+            elseif listfile_readable
+                " No need to run find or process listfile; simply read and use.
+                let files = readfile(listfile_path)
+            endif
+        " TODO: Probably remove the catch...
+        "catch
+            " TODO: Perhaps a Rethrow method to be used everywhere instead of
+            " this (for stripping extra Vim(echoerr) at head).
+            " Alternatively, a display function to strip them all from v:exception
+            " before output...
+            "echoerr v:exception
+        finally
+            call sf.destroy()
+        endtry
+        " Cache processed filelist on sprj object.
+        let self.files = files
+    endfu
+    fu! sprj.get_listfile_path()
+        " TODO: can/will cachedir have trailing slash?
+        let listfile_name = self.opt.get('cachedir') . '/' . self.prj.name . '-' . self.name . '-' . self.opt.get('listfile')
+    endfu
+    " Build cache, forcing refresh if appropriate.
+    call sprj.cache_listfile(a:force_refresh)
+endfu
+
 fu! s:spsel_create(p_name, ...)
     let sp_filts = a:0 > 0 ? a:1 : []
     let spsel = {'longnames': [], 'longpats': [], 'shortnames': {}, 'disabled': {}, 'iter_idx': 0}
@@ -504,14 +578,18 @@ fu! s:close()
     endif
 endfu
 " <<<
-" >>> Static data used to process options
+" >>> Static data and functions used to process options
 " Notes:
 " 'type' is return value of type()
 " No need to specify 'type' if there's a 'default'; it won't even be checked.
 " 'default' object format:
 "   'type':  vim | function | value
 "   'value': {vimopt-name} | {func-name} | {value}
+" 'convert' key: Optional name of a function used to convert a user-supplied
+"    option value: e.g., user supplies relative sp root, which then gets
+"    converted to absolute using value of proot.
 " TODO: Replace listfile with cachedir or somesuch.
+" TODO: May not need listfile option anymore.
 let s:opt_cfg = {
     \'listfile': {
         \'minlvl': 0,
@@ -520,6 +598,26 @@ let s:opt_cfg = {
         \'default': {
             \'type': 'value',
             \'value': 'files.list'
+        \}
+    \},
+    \'cachedir': {
+        \'minlvl': 0,
+        \'maxlvl': 2,
+        \'type': 1,
+        \'convert': 's:optconv_cachedir',
+        \'default': {
+            \'type': 'function',
+            \'value': 's:optdef_cachedir'
+        \}
+    \},
+    \'pathconv': {
+        \'minlvl': 0,
+        \'maxlvl': 2,
+        \'type': 3,
+        \'convert': 's:optconv_pathconv',
+        \'default': {
+            \'type': 'value',
+            \'value': {}
         \}
     \},
     \'maxgrepsize': {
@@ -561,7 +659,7 @@ let s:opt_cfg = {
         \'type': 1,
         \'default': {
             \'type': 'function',
-            \'value': 's:setdef_proot'
+            \'value': 's:optdef_proot'
         \}
     \},
     \'root': {
@@ -586,7 +684,7 @@ let s:opt_cfg = {
         \'type': 1,
         \'default': {
             \'type': 'function',
-            \'value': 's:setdef_toodaloo'
+            \'value': 's:optdef_toodaloo'
         \}
     \},
     \'foobaz': {
@@ -599,6 +697,127 @@ let s:opt_cfg = {
         \}
     \}
 \}
+" Option convert functions
+" Assumption: proot has already been finalized.
+" Rationale: Its maxlvl is lower than root's
+fu! s:optconv_root(raw, lvl, opts, data)
+    let proot = a:opts.get('proot')
+    " Convert rootdir to full path.
+    " Design Decision: Always let canonicalize_path attempt to relativize the
+    " path to proot.
+    " Rationale: If sp root happens to be absolute, and not located beneath
+    " proot, the attempt will fail harmlessly, and the specified sp root will
+    " be retained.
+    return s:canonicalize_path(a:raw, proot)
+endfu
+fu! s:optconv_cachedir(raw, lvl, opts, data)
+    " Special case: `.' means sp root. Convert a single dot (or even ./ or .\)
+    " to empty string.
+    " TODO: Should we accept the ./ form?
+    " TODO: Perhaps implement exhaustive test for abs path.
+    " Rationale: We'll be in sp root when this is needed.
+    return substitute(a:raw, '^\s*\.\s*[^/\\]$', '', '')
+endfu
+" Return object that can be used like this:
+" let external_path = o.convert_path(internal_path, 'out')
+" TODO: This object-based approach is around 15% slower than a non-object
+" based approach; may want to switch, or at least optimize: e.g., don't invoke
+" if we know path is relative, or if the object is empty...
+fu! s:optconv_pathconv(raw, lvl, opts, data)
+    if empty(a:raw)
+        " Optimization
+        return {}
+    endif
+    let o = {'convs': []}
+    for conv in a:raw
+        if type(conv[0] != 1) || type(conv[1] != 1)
+            throw "Invalid type specified in 'pathconv' array: must be [['from', 'to']...]"
+        endif
+        " Accumulate list of 2 element lists: [[from, to]...]
+        call add(o.convs, conv)
+    endfor
+    fu! o.convert_path(path, dir)
+        let from_idx = a:dir == 'in' ? 0 : 1
+        for conv in self.convs
+            let from = conv[from_idx]
+            " Design Decision: Since the pathconv feature is designed for Unix
+            " emulation environments on Windows, hardcode case-insensitivity.
+            " TODO: Could eventually add option with default of ignorecase.
+            if a:path[0 : len(from) - 1] ==? from
+                return conv[(from_idx + 1) % 2] . a:path[len(from) : ]
+            endif
+        endfor
+        " Return original unmodified
+        return a:path
+    endfu
+    return o
+endfu
+let s:convs = [['/cygdrive/c/', 'C:/'], ['/cygdrive/d/', 'D:/']]
+fu! Test_pathconv()
+    let obj = S_optconv_pathconv(s:convs, 2, {}, {})
+    let opaths = ['/cygdrive/c/foobaz', '/cygdrive/c/boohoo', 'cygdrive/c/blooey', 'foo/bar', '/cygdrive/d/rahrah']
+    let ipaths = []
+    for p in opaths
+        let ipath = obj.convert_path(p, 'in')
+        echo "Converting " . p . " for input: " . obj.convert_path(p, 'in')
+        call add(ipaths, ipath)
+    endfor
+    for p in ipaths
+        echo "Converting " . p . " for output: " . obj.convert_path(p, 'out')
+    endfor
+    " Timing group 1
+    let ts = reltime()
+    for i in range(1000)
+        for p in opaths
+            let ipath = obj.convert_path(p, 'in')
+            let opath = obj.convert_path(p, 'out')
+        endfor
+    endfor
+    echo "Time for object-base approach: " . reltimestr(reltime(ts))
+
+    fu! Convert(path, dir)
+        let from_idx = a:dir == 'in' ? 0 : 1
+        for conv in s:convs
+            let from = conv[from_idx]
+            " Design Decision: Since the pathconv feature is designed for Unix
+            " emulation environments on Windows, hardcode case-insensitivity.
+            " TODO: Could eventually add option with default of ignorecase.
+            if a:path[0 : len(from) - 1] ==? from
+                return conv[(from_idx + 1) % 2] . a:path[len(from) : ]
+            endif
+        endfor
+        " Return original unmodified
+        return a:path
+    endfu
+    " Timing group 2
+    let ts = reltime()
+    for i in range(1000)
+        for p in opaths
+            let ipath = Convert(p, 'in')
+            let opath = Convert(p, 'out')
+        endfor
+    endfor
+    " Test results:
+    " Using the object-based approach increases runtime by a little over 15%.
+    " Since 1000 iterations still took only around a quarter second, it's
+    " probably not that big a deal, but there's room for optimization here.
+    echo "Time for leaner approach: " . reltimestr(reltime(ts))
+endfu
+
+" Option default functions
+fu! s:optdef_toodaloo(lvl, opts, data)
+    return a:opts.get('bugaboo') . ' and toodaloo too'
+endfu
+fu! s:optdef_proot(lvl, opts, data)
+    " Note: proot missing from input data implies internal error.
+    " Assumption: If user hasn't set explicitly, proot determined either from
+    " final FPSOpen arg or cwd before this point.
+    return a:data.proot
+endfu
+fu! s:optdef_cachedir(lvl, opts, data)
+    " Default to the directory used by tempname()
+    return fnamemodify(tempname(), ':h')
+endfu
 " <<<
 " >>> Functions used to process config
 " Optional:
@@ -664,6 +883,12 @@ fu! s:opts_create(raw, lvl, ...)
                     throw "Invalid value supplied for option " . opt_name
                 endif
                 " Option value is valid.
+                if has_key(opt_cfg, 'convert')
+                    " Convert user-supplied value with configured function.
+                    " Rationale: Default function can do its own conversion if
+                    " necessary.
+                    let opt_val = function(opt_cfg.convert)(opt_val, a:lvl, self, a:data)
+                endif
                 let self.opts[opt_name] = opt_val
             endif
             unlet opt_val " E706 workaround
@@ -722,12 +947,6 @@ fu! Test_opts_create()
         endfor
     endfor
 endfu
-fu! s:setdef_toodaloo(lvl, opts, data)
-    return a:opts.get('bugaboo') . ' and toodaloo too'
-endfu
-fu! s:setdef_proot(lvl, opts, data)
-    return 'silly_proot'
-endfu
 
 " Canonicalize the filenames in listfile, converting to be relative to rootdir
 " if possible.
@@ -736,6 +955,8 @@ endfu
 " Note: Nonexistent paths cannot be fully canonicalized; they will be retained
 " in list in partially canonicalized form: expand converts slashes but not .
 " and ..
+" Path Conversion: If user specified path mappings in the 'pathconv' option,
+" they will be tried as well; only the first applicable mapping is applied.
 " Caveat: If there happen to be special chars in the pathname (unlikely),
 " expand will attempt to expand, so it's best to ensure pathnames don't have
 " `*', `**', $ENV, etc...
@@ -744,16 +965,19 @@ endfu
 " persistent structure.
 " Exceptions: Leave for caller.
 " TODO: Perhaps replace sp_cfg/sp_opt with an sp_idx.
-fu! s:cache_listfile(sp_cfg, sp_opt, force_refresh)
+fu! s:cache_listfile_orig(sp_cfg, sp_opt, force_refresh)
+    let root = a:sp_cfg.opt.get('root')
+    let cachedir = a:sp_cfg.opt.get('cachedir')
     let listfile = a:sp_opt.get('listfile')
     " See whether the listfile exists and is readable.
-    let listfile_path = a:sp_cfg.rootdir . listfile
+    " TODO: Change how listfile is found...
+    let listfile_path = root . listfile
     let listfile_path_found = findfile(listfile, a:sp_cfg.rootdir)
     let sf = s:sf_create()
     try
         " Both listfile generation and file canonicalization require us to be
         " in root dir.
-        call sf.pushd(a:sp_cfg.rootdir)
+        call sf.pushd(root)
         " Do we need to create/update the listfile?
         if listfile_path_found == '' || a:force_refresh
             let v:errmsg = ''
@@ -774,11 +998,13 @@ fu! s:cache_listfile(sp_cfg, sp_opt, force_refresh)
         call sf.setopt('shellslash', 1, {'boolean': 1})
         " Build canonicalized list within loop.
         let files = []
+        let pathconv = a:sp_cfg.opt.get('pathconv')
+        let do_pathconv = !empty(pathconv)
         for file_raw in files_raw
-            "echo "Before: " file_raw
-            let file_raw = s:canonicalize_path(file_raw, a:sp_cfg.rootdir)
-            "echo "After: " file_raw
-            "echo "rootdir: " a:sp_cfg.rootdir
+            if do_pathconv
+                let file_raw = pathconv.convert_path(file_raw, 'in')
+            endif
+            let file_raw = s:canonicalize_path(file_raw, root)
             " Add canonical name to list.
             call add(files, file_raw)
         endfor
@@ -1113,6 +1339,7 @@ fu! s:get_matching_files(sprj, glob, partial)
     let sf = s:sf_create()
     try
         let anchor_dir = ''
+        let root = a:sprj.opt.get('root')
         " Handle leading anchor (if any)
         " ./ works just like Vim
         " .// specifies the current working dir
@@ -1124,11 +1351,11 @@ fu! s:get_matching_files(sprj, glob, partial)
         let glob = a:glob
         if glob =~ '^\.//'
             " Use fnamemodify to ensure trailing slash.
-            let anchor_dir = s:canonicalize_path(getcwd(), a:sprj.rootdir)
+            let anchor_dir = s:canonicalize_path(getcwd(), root)
             let glob = anchor_dir . glob[3:] " strip .//
         elseif a:glob =~ '^\./'
             " Note: This will default to same as .// if no current file.
-            let anchor_dir = s:canonicalize_path(expand('%:h'), a:sprj.rootdir)
+            let anchor_dir = s:canonicalize_path(expand('%:h'), root)
             let glob = anchor_dir . glob[2:] " strip ./
         endif
         " Convert * and ** in glob, and extract fixed string constraints into
@@ -1585,14 +1812,9 @@ fu! s:refresh(...)
     try
         for sprj in sprjs
             " TODO - Fix this...
-            let rootdir = call('finddir', sprj.opt.get('root'))
-            if rootdir == ''
-                throw "Couldn't locate project base. Make sure your cwd is within the project."
-            endif
-            let rootdir = s:canonicalize_path(rootdir, '')
+            let root = sprj.opt.get('root')
             " Note: An sf.cd (TODO) would make more sense here than pushd...
-            call sf.pushd(rootdir)
-            let sprj.rootdir = rootdir
+            call sf.pushd(root)
             call s:cache_listfile(sprj, sprj.opt, 1)
         endfor
     "catch /Vim(echoerr)/
@@ -1785,7 +2007,7 @@ fu! s:do_int_grep(sf, pspecs, argstr, bang, use_ll, is_adding)
         "endfor
         " Move to root of subproject to perform grep.
         " Rationale: File paths are relative to this directory.
-        call a:sf.pushd(pspec.sprj.rootdir)
+        call a:sf.pushd(pspec.sprj.opt.get('root'))
 
         " Note: Always inhibit jump here, as that's handled by caller. Don't
         " use 'silent', as we want to see the periodic progress indicator
@@ -1856,7 +2078,7 @@ fu! s:do_ext_grep(sf, pspecs, argstr, bang, use_ll, is_adding)
         " Move to root of subproject and create the temporary script file.
         " Rationale: Avoid potential cross-platform issues with absolute
         " paths.
-        call a:sf.pushd(sprj.rootdir)
+        call a:sf.pushd(sprj.opt.get('root'))
         " This try and associated 'finally' ensures cleanup of tempfile
         " created in current dir.
         " Note: Intentionally placing call to get_tempfile outside try.
@@ -2028,7 +2250,7 @@ fu! s:find(cmd, bang, cmdline)
             let [files, sprj] = [pspecs[0].files, pspecs[0].sprj]
             " Move temporarily to sp root to open file.
             " Note: Unnecessary but safe if filename happens to be absolute.
-            call sf.pushd(sprj.rootdir)
+            call sf.pushd(sprj.opt.get('root'))
             " Run applicable file open command without bang to ensure safety.
             exe (!empty(win_cmd) ? win_cmd : 'edit') . ' ' . fnameescape(files[0])
             " Note: try-finally will handle state restoration.
@@ -2059,7 +2281,7 @@ fu! s:find(cmd, bang, cmdline)
             " qf/ll was updated, and will keep the qf/ll list in sync as
             " cwd is subsequently changed.
             " TODO: cd semantics make more sense than pushd in loop...
-            call sf.pushd(sprj.rootdir)
+            call sf.pushd(sprj.opt.get('root'))
             " Use one of the following to add files: cexpr!, lexpr!, caddexpr, laddexpr
             " Note: Use bang (if supported) to inhibit jump, and silent to suppress its output.
             " Rationale: Both jump and output will be handled in command-
