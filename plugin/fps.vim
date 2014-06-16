@@ -254,12 +254,36 @@ fu! s:sprj_create(prj, name, opt, force_refresh)
         " Cache processed filelist on sprj object.
         let self.files = files
     endfu
+    fu! sprj.get_script_temppath()
+        " TODO!!!!! Like tempname, but taking cachedir into account.
+        " UNDER CONSTRUCTION
+        fu! s:get_tempfile()
+            let base = 'fpstmp'
+            let name = base
+            let i = 1
+            while glob(name)
+                if i > 100
+                    throw "Can't find suitable name for temporary file in `" . getcwd() . "'"
+                endif
+                let name = base . printf("%03d", i)
+                let i += 1
+            endwhile
+            " Write a placeholder to make sure we can write here.
+            " Note: Subsequent calls to writefile will overwrite. Caller responsible
+            " for deleting.
+            if writefile([], name, 1)
+                throw "Can't write temporary file in `" . getcwd() . "'"
+            endif
+            return name
+        endfu
+    endfu
     fu! sprj.get_listfile_path()
         " TODO: can/will cachedir have trailing slash?
         let listfile_name = self.opt.get('cachedir') . '/' . self.prj.name . '-' . self.name . '-' . self.opt.get('listfile')
     endfu
     " Build cache, forcing refresh if appropriate.
     call sprj.cache_listfile(a:force_refresh)
+    return sprj
 endfu
 
 fu! s:spsel_create(p_name, ...)
@@ -590,6 +614,11 @@ endfu
 "    converted to absolute using value of proot.
 " TODO: Replace listfile with cachedir or somesuch.
 " TODO: May not need listfile option anymore.
+" TODO: Consider doing away with 'vim' default type. Keep in mind that Vim
+" options could change after load. How would we handle this?
+" TODO: Consider whether user of get() accessor may need to know not only the
+" level at which option was set, but also, how it was set (e.g., user config
+" vs default).
 let s:opt_cfg = {
     \'listfile': {
         \'minlvl': 0,
@@ -2066,15 +2095,12 @@ fu! s:do_ext_grep(sf, pspecs, argstr, bang, use_ll, is_adding)
         endwhile
         " Ready to process all batches for current sp.
         let sprj = pspec.sprj
-        " Note: If user has not overridden grepprg and grepformat,
-        " keep current Vim setting.
-        let flags = {}
-        let grepprg = sprj.opt.get('grepprg', flags)
-        if flags.set | call a:sf.setopt('grepprg', grepprg) | endif
+        let grepprg = sprj.opt.get('grepprg')
+        call a:sf.setopt('grepprg', grepprg)
         " Note: Plugin option grepformat corresponds to Vim option
         " 'errorformat' (because we're using cexpr et al.)
-        let grepformat = sprj.opt.get('grepformat', flags)
-        if flags.set | call a:sf.setopt('errorformat', grepformat) | endif
+        let grepformat = sprj.opt.get('grepformat')
+        call a:sf.setopt('errorformat', grepformat)
         " Move to root of subproject and create the temporary script file.
         " Rationale: Avoid potential cross-platform issues with absolute
         " paths.
