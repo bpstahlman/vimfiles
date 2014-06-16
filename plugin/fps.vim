@@ -5,7 +5,6 @@ let g:fps_config = {
     \'maxgrepsize': 4095,
     \'grepprg': 'grep -n $* /dev/null',
     \'grepformat': '%f:%l:%m,%f:%l%m,%f  %l%m',
-    \'cachedir': 'C:/Users/stahlmanb/tmp/fps',
     \'projects': {
         \'asec': {
             \'subprojects': [
@@ -254,28 +253,33 @@ fu! s:sprj_create(prj, name, opt, force_refresh)
         " Cache processed filelist on sprj object.
         let self.files = files
     endfu
+    " TODO: !!!! For sake of efficiency, define all dict functions separately,
+    " then add to the objects at construction... (Creates 1 instance instead
+    " of multiple.)
+    " Like tempname, but taking cachedir into account.
+    " Design Decision: In many cases, it would be ok to use a fixed name for
+    " the script; however, cachedir can be a global temp, or even the user's
+    " subjproject dir, so I'm erring on the side of caution by finding a
+    " unique filename.
     fu! sprj.get_script_temppath()
-        " TODO!!!!! Like tempname, but taking cachedir into account.
-        " UNDER CONSTRUCTION
-        fu! s:get_tempfile()
-            let base = 'fpstmp'
-            let name = base
-            let i = 1
-            while glob(name)
-                if i > 100
-                    throw "Can't find suitable name for temporary file in `" . getcwd() . "'"
-                endif
-                let name = base . printf("%03d", i)
-                let i += 1
-            endwhile
-            " Write a placeholder to make sure we can write here.
-            " Note: Subsequent calls to writefile will overwrite. Caller responsible
-            " for deleting.
-            if writefile([], name, 1)
-                throw "Can't write temporary file in `" . getcwd() . "'"
+        let base = 'fpstmp'
+        let cachedir = self.opt.get('cachedir')
+        let path = cachedir . '/' . base
+        let i = 1
+        while glob(path)
+            if i > 100
+                throw "Can't find suitable name for temporary file in `" . cachedir  . "'"
             endif
-            return name
-        endfu
+            let path = base . printf("%03d", i)
+            let i += 1
+        endwhile
+        " Write a placeholder to make sure we can write here.
+        " Note: Subsequent calls to writefile will overwrite. Caller responsible
+        " for deleting.
+        if writefile([], path, 1)
+            throw "Can't write temporary file in `" . getcwd() . "'"
+        endif
+        return path
     endfu
     fu! sprj.get_listfile_path()
         " TODO: can/will cachedir have trailing slash?
@@ -612,10 +616,14 @@ endfu
 " 'convert' key: Optional name of a function used to convert a user-supplied
 "    option value: e.g., user supplies relative sp root, which then gets
 "    converted to absolute using value of proot.
-" TODO: Replace listfile with cachedir or somesuch.
-" TODO: May not need listfile option anymore.
+" TODO: May not need listfile option anymore; actually, I want to allow user
+" to determine end of basename and suffix, so just make it more of a listfile
+" 'suffix' or 'basename', to which we'll add project and subproject separated
+" by `-'.
 " TODO: Consider doing away with 'vim' default type. Keep in mind that Vim
 " options could change after load. How would we handle this?
+" TODO: Consider adding explicit 'optional' flag to allow options to be
+" completely optional: i.e., no default and no error when missing.
 " TODO: Consider whether user of get() accessor may need to know not only the
 " level at which option was set, but also, how it was set (e.g., user config
 " vs default).
@@ -697,33 +705,6 @@ let s:opt_cfg = {
         \'maxlvl': 2,
         \'type': 1,
         \'convert': 's:optconv_root'
-    \},
-    \'bugaboo': {
-        \'minlvl': 0,
-        \'maxlvl': 1,
-        \'type': 1,
-        \'default': {
-            \'type': 'value',
-            \'value': 'bugaboo value'
-        \}
-    \},
-    \'toodaloo': {
-        \'minlvl': 1,
-        \'maxlvl': 2,
-        \'type': 1,
-        \'default': {
-            \'type': 'function',
-            \'value': 's:optdef_toodaloo'
-        \}
-    \},
-    \'foobaz': {
-        \'minlvl': 2,
-        \'maxlvl': 2,
-        \'type': 0,
-        \'default': {
-            \'type': 'vim',
-            \'value': 'autowriteall'
-        \}
     \}
 \}
 " Option convert functions
@@ -855,14 +836,19 @@ endfu
 fu! s:opts_create(raw, lvl, ...)
     let base = a:0 > 0 ? a:1 : {}
     let data = a:0 > 1 ? a:2 : {}
-    let opts = {'opts': {}, 'lvl': a:lvl, 'base': base}
+    " Special field descriptions:
+    " 'defaulted': existence hash indicating opts that were defaulted
+    " 'converted': has mapping converted option names to their raw
+    " (unconverted) values
+    " 'unset': existence hash containing non-required options that are unset.
+    let opts = {'opts': {}, 'lvl': a:lvl, 'base': base, 'defaulted': {}, 'converted': {}, 'unset': {}}
     " Lookup and return requested option value, returning the level at which
     " the option was found in the input dict (if supplied).
     " Note: Doing it this way (rather than returning list) for convenience of
-    " callers, which fall into 2 phases:
+    " callers, which fall into 2 categories:
     " 1. option processing - may call this accessor solely as existence test
     " 2. post-option processing - due to phase 1 validation, request for
-    "    missing option implies internal error.
+    "    missing (as opposed to unset) option implies internal error.
     fu! opts.get(name, ...) dict
         if a:0 > 0
             let flags = a:1
@@ -872,9 +858,16 @@ fu! s:opts_create(raw, lvl, ...)
         endif
         let obj = self
         while !empty(obj)
-            if has_key(obj.opts, a:name)
+            if has_key(obj.opts, a:name) || has_key(obj.unset, a:name)
                 if a:0 > 0
+                    " Set all flags to simplify things for caller.
                     let flags.lvl = obj.lvl
+                    let flags.unset = has_key(obj.unset, a:name)
+                    let flags.defaulted = has_key(obj.defaulted, a:name)
+                    let flags.converted = has_key(obj.converted, a:name)
+                    if flags.converted
+                        let flags.raw = self.converted[a:name]
+                    endif
                 endif
                 return obj.opts[a:name]
             endif
@@ -889,13 +882,9 @@ fu! s:opts_create(raw, lvl, ...)
     " Private utility function
     fu! opts.construct(raw, lvl, base, data)
         for [opt_name, opt_val] in items(a:raw)
-            " TODO: As long as opts are not segregated in a subkey like 'opts', if
-            " we want to warn about non-existent opts, we need to maintain a set
-            " of names that are not opts, but are expected: e.g., 'shortname'.
-            " Decision: Don't complicate things unnecessarily by treating things
-            " like 'shortname' as options.
             " TODO: Skip keys that begin with '#' (possibly with leading
             " whitespace) to permit a form of 'commenting'.
+            " TODO: Add to processing of user config as well.
             if !has_key(s:opt_cfg, opt_name)
                 unlet opt_val " E706 workaround
                 continue
@@ -914,9 +903,15 @@ fu! s:opts_create(raw, lvl, ...)
                 " Option value is valid.
                 if has_key(opt_cfg, 'convert')
                     " Convert user-supplied value with configured function.
-                    " Rationale: Default function can do its own conversion if
+                    " Note: Default function can do its own conversion if
                     " necessary.
-                    let opt_val = function(opt_cfg.convert)(opt_val, a:lvl, self, a:data)
+                    " Save the raw value in 'converted' dict; note that the
+                    " tempvar manipulations are necessary to avoid E706 (if
+                    " converter should change type).
+                    let r = opt_val
+                    unlet opt_val " E706 workaround
+                    let self.converted[opt_name] = r
+                    let opt_val = function(opt_cfg.convert)(r, a:lvl, self, a:data)
                 endif
                 let self.opts[opt_name] = opt_val
             endif
@@ -925,7 +920,7 @@ fu! s:opts_create(raw, lvl, ...)
         " Make sure all options that are required by this level have been set.
         for [opt_name, opt_cfg] in items(s:opt_cfg)
             if a:lvl == opt_cfg.maxlvl
-                " Has option been set yet?
+                " Has option been set (or unset) yet?
                 let flags = {}
                 call self.get(opt_name, flags)
                 if flags.lvl < 0
@@ -934,17 +929,17 @@ fu! s:opts_create(raw, lvl, ...)
                         let def = opt_cfg.default
                         if def.type == 'function'
                             " Invoke function, passing level, partially-built
-                            " opts object, and any contextual data.
+                            " opts object, along with any contextual data.
                             let opt_val = function(def.value)(a:lvl, self, a:data)
                         elseif def.type == 'value'
                             let opt_val = def.value
-                        elseif def.type == 'vim'
-                            " Use value of Vim option.
-                            " TODO: Is there a use case for this?
-                            exe 'let l:opt_val = &' . def.value
                         else
                             throw "Internal error: " . def.type . " is not a valid default type."
                         endif
+                        let self.defaulted[opt_name] = 1
+                    elseif has_key(opt_cfg, 'optional') && opt_cfg.optional
+                        " Record fact that this option is unset (and it's ok).
+                        let self.unset[opt_name] = 1
                     else
                         throw "Missing required option: " . opt_name
                     endif
@@ -2106,22 +2101,20 @@ fu! s:do_ext_grep(sf, pspecs, argstr, bang, use_ll, is_adding)
         " paths.
         call a:sf.pushd(sprj.opt.get('root'))
         " This try and associated 'finally' ensures cleanup of tempfile
-        " created in current dir.
         " Note: Intentionally placing call to get_tempfile outside try.
         " Rationale: Abnormal return from get_tempfile obviates need for
         " cleanup.
-        let scriptname = s:get_tempfile()
+        let scriptpath = sprj.get_script_temppath()
         try
-            call writefile(scriptlines, scriptname)
+            call writefile(scriptlines, scriptpath)
             " TODO: Introduce plugin-specific shell/shellcmdflag options.
             " Note: Ideally, would use stdin arg to system(), as this would
             " obviate need for tempfile in current dir, but this would work
             " only for shells that will parse stdin.
             " Caveat: Some shells won't have ./ in PATH, so we can't simply
             " use bare tempfile name.
-            " TODO: Don't hardcode the ./ - allow user to override with an
-            " option.
-            let result = system(&shell . ' ' . &shellcmdflag . ' ./' . scriptname)
+            " NOTE: scriptpath is now absolute: TODO: Adjust comment above...
+            let result = system(&shell . ' ' . &shellcmdflag . ' ' . scriptpath)
             if !empty(result)
                 let got_match = 1
             endif
@@ -2143,9 +2136,12 @@ fu! s:do_ext_grep(sf, pspecs, argstr, bang, use_ll, is_adding)
             " swapfile exists for one of the files in result...
             exe 'silent ' . addcmd . ' l:result'
         finally
-            " Design Decision: Could test for failure and report, but odds of
-            " failure are low, as is the cost (a file left in sp root).
-            call delete(scriptname)
+            " Design Decision: Although failure is unlikely, I don't like
+            " possibility of accumulation (due to uniquification in
+            " get_script_temppath) of orphan files.
+            "if delete(scriptpath) != 0
+            "    call s:warn("Unable to delete temporary script file `" . scriptpath . "'")
+            "endif
         endtry
         let force_add = 1
     endwhile
