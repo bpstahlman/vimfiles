@@ -3,7 +3,7 @@
 let g:fps_config = {
     \'listfile': 'files.list',
     \'maxgrepsize': 4095,
-    \'grepprg': 'grep -n $* /dev/null',
+    \'grepprg': 'grep -n',
     \'grepformat': '%f:%l:%m,%f:%l%m,%f  %l%m',
     \'projects': {
         \'asec': {
@@ -171,6 +171,7 @@ fu! s:sprj_create(prj, name, opt, force_refresh)
     " Exceptions: Leave for caller.
     " TODO: Perhaps replace sp_cfg/sp_opt with an sp_idx.
     fu! sprj.cache_listfile(force_refresh)
+        " TODO: Possibly check for 'unset' on root, and avoid moving?
         let root = self.opt.get('root')
         let listfile_path = self.get_listfile_path()
         let listfile_readable = filereadable(listfile_path)
@@ -203,10 +204,15 @@ fu! s:sprj_create(prj, name, opt, force_refresh)
                 call sf.setopt('shellslash', 1, {'boolean': 1})
                 " Build canonicalized list within loop.
                 let files = []
-                let pathconv = self.opt.get('pathconv')
-                let do_pathconv = !empty(pathconv)
+                let flags = {}
+                let pathconv = self.opt.get('pathconv', flags)
+                let do_pathconv = !flags.unset
                 for file_raw in files_raw
                     if do_pathconv
+                        " TODO: Either avoid object for this
+                        " performance-critical conversion, or perhaps cache
+                        " both internal and external forms to avoid conversion
+                        " altogether...
                         let file_raw = pathconv.convert_path(file_raw, 'in')
                     endif
                     let file_raw = s:canonicalize_path(file_raw, root)
@@ -263,6 +269,8 @@ fu! s:sprj_create(prj, name, opt, force_refresh)
     " unique filename.
     fu! sprj.get_script_temppath()
         let base = 'fpstmp'
+        " TODO: STOPPED HERE! Decide on directory format: store with trailing
+        " / or not: should relative to root be stored as '' or './'?
         let cachedir = self.opt.get('cachedir')
         let path = cachedir . '/' . base
         let i = 1
@@ -609,10 +617,10 @@ endfu
 " >>> Static data and functions used to process options
 " Notes:
 " 'type' is return value of type()
-" No need to specify 'type' if there's a 'default'; it won't even be checked.
 " 'default' object format:
-"   'type':  vim | function | value
-"   'value': {vimopt-name} | {func-name} | {value}
+"   'type':  unset | function | value
+"   'value': {func-name} | {value}
+"   Note: type 'unset' allows us not to have any value - not even default.
 " 'convert' key: Optional name of a function used to convert a user-supplied
 "    option value: e.g., user supplies relative sp root, which then gets
 "    converted to absolute using value of proot.
@@ -624,9 +632,8 @@ endfu
 " options could change after load. How would we handle this?
 " TODO: Consider adding explicit 'optional' flag to allow options to be
 " completely optional: i.e., no default and no error when missing.
-" TODO: Consider whether user of get() accessor may need to know not only the
-" level at which option was set, but also, how it was set (e.g., user config
-" vs default).
+" TODO: Consider making 'root' nullable (would make sense iff all paths
+" absolute).
 let s:opt_cfg = {
     \'listfile': {
         \'minlvl': 0,
@@ -653,8 +660,7 @@ let s:opt_cfg = {
         \'type': 3,
         \'convert': 's:optconv_pathconv',
         \'default': {
-            \'type': 'value',
-            \'value': {}
+            \'type': 'unset'
         \}
     \},
     \'maxgrepsize': {
@@ -933,13 +939,13 @@ fu! s:opts_create(raw, lvl, ...)
                             let opt_val = function(def.value)(a:lvl, self, a:data)
                         elseif def.type == 'value'
                             let opt_val = def.value
+                        elseif def.type == 'unset'
+                            " Record fact that this option is unset (and it's ok).
+                            let self.unset[opt_name] = 1
                         else
                             throw "Internal error: " . def.type . " is not a valid default type."
                         endif
                         let self.defaulted[opt_name] = 1
-                    elseif has_key(opt_cfg, 'optional') && opt_cfg.optional
-                        " Record fact that this option is unset (and it's ok).
-                        let self.unset[opt_name] = 1
                     else
                         throw "Missing required option: " . opt_name
                     endif
@@ -972,82 +978,6 @@ fu! Test_opts_create()
     endfor
 endfu
 
-" Canonicalize the filenames in listfile, converting to be relative to rootdir
-" if possible.
-" Format: Canonical form uses `/', and has no `.' or `..' components, leading
-" or otherwise.
-" Note: Nonexistent paths cannot be fully canonicalized; they will be retained
-" in list in partially canonicalized form: expand converts slashes but not .
-" and ..
-" Path Conversion: If user specified path mappings in the 'pathconv' option,
-" they will be tried as well; only the first applicable mapping is applied.
-" Caveat: If there happen to be special chars in the pathname (unlikely),
-" expand will attempt to expand, so it's best to ensure pathnames don't have
-" `*', `**', $ENV, etc...
-" Return: The canonicalized list.
-" TODO: Have this done once at Refresh and initial load and saved in a
-" persistent structure.
-" Exceptions: Leave for caller.
-" TODO: Perhaps replace sp_cfg/sp_opt with an sp_idx.
-fu! s:cache_listfile_orig(sp_cfg, sp_opt, force_refresh)
-    let root = a:sp_cfg.opt.get('root')
-    let cachedir = a:sp_cfg.opt.get('cachedir')
-    let listfile = a:sp_opt.get('listfile')
-    " See whether the listfile exists and is readable.
-    " TODO: Change how listfile is found...
-    let listfile_path = root . listfile
-    let listfile_path_found = findfile(listfile, a:sp_cfg.rootdir)
-    let sf = s:sf_create()
-    try
-        " Both listfile generation and file canonicalization require us to be
-        " in root dir.
-        call sf.pushd(root)
-        " Do we need to create/update the listfile?
-        if listfile_path_found == '' || a:force_refresh
-            let v:errmsg = ''
-            " Note: silent avoids the annoying 'Hit enter' prompt.
-            exe 'silent !' . a:sp_opt.get('find') . ' >' . listfile
-            if v:errmsg != ''
-                throw "Encountered error attempting to build listfile `" . listfile_path . "' for subproject "
-                    \. a:sp_cfg.name . ": " . v:errmsg . ". Disabling subproject."
-            endif
-        endif
-        " If here, we expect to have a file to read.
-        if !filereadable(listfile_path)
-            throw "Couldn't open listfile `" . listfile_path . "' for subproject "
-                \. a:sp_cfg.name . ". Disabling subproject."
-        endif
-        let files_raw = readfile(listfile_path)
-        " Note: We must set 'shellslash' for canonicalization.
-        call sf.setopt('shellslash', 1, {'boolean': 1})
-        " Build canonicalized list within loop.
-        let files = []
-        let pathconv = a:sp_cfg.opt.get('pathconv')
-        let do_pathconv = !empty(pathconv)
-        for file_raw in files_raw
-            if do_pathconv
-                let file_raw = pathconv.convert_path(file_raw, 'in')
-            endif
-            let file_raw = s:canonicalize_path(file_raw, root)
-            " Add canonical name to list.
-            call add(files, file_raw)
-        endfor
-    catch
-        " TODO: Perhaps a Rethrow method to be used everywhere instead of
-        " this (for stripping extra Vim(echoerr) at head).
-        " Alternatively, a display function to strip them all from v:exception
-        " before output...
-        echoerr v:exception
-    finally
-        call sf.destroy()
-    endtry
-    " TODO: Make this optional so we can skip if user's find or whatever
-    " ensures sorted.
-    " TODO: Should we uniquify? Doing so could permit some optimizations
-    " (e.g., find_insert_idx).
-    call sort(files)
-    let a:sp_cfg.files = files
-endfu
 " <<<
 " >>> Functions pertaining to file processing
 " Convert occurrences of * and **[[SIGN]NUMBER] in input glob to corresponding
@@ -1928,7 +1858,12 @@ fu! s:xargify_pspecs(pspecs, fixlen)
     if empty(pspecs)
         return []
     endif
-    let _pspecs = [] " transformed pspec list
+    " Initialize return list of transformed pspecs
+    let _pspecs = []
+    " Will we be performing output abs path translation within loop?
+    let flags = {}
+    let pathconv = self.opt.get('pathconv', flags)
+    let do_pathconv = !flags.unset
     for pspec in pspecs
         if !exists('l:_pspec') || _pspec.sprj isnot pspec.sprj
             if exists('l:_pspec')
@@ -1942,6 +1877,12 @@ fu! s:xargify_pspecs(pspecs, fixlen)
         let maxgrepsize = pspec.sprj.opt.get('maxgrepsize')
         " Accumulate as many files as possible without exceeding maxgrepsize
         for f in pspec.files
+            " Perform any required path conversions before length test.
+            " TODO: Should path conversion be optional? Currently, this
+            " function is called only in preparation for external commands...
+            if do_pathconv
+                let f = pathconv.convert_path(f, 'out')
+            endif
             " Escape and prepend space before length test.
             let f = ' ' . shellescape(f)
             let len_f = strlen(f)
@@ -1993,28 +1934,6 @@ fu! s:get_unconstrained_pspecs(...)
         call s:prj.iter_next()
     endwhile
     return ret
-endfu
-
-" TODO: Move this to util section, possibly wrapping in object to facilitate
-" cleanup.
-fu! s:get_tempfile()
-    let base = 'fpstmp'
-    let name = base
-    let i = 1
-    while glob(name)
-        if i > 100
-            throw "Can't find suitable name for temporary file in `" . getcwd() . "'"
-        endif
-        let name = base . printf("%03d", i)
-        let i += 1
-    endwhile
-    " Write a placeholder to make sure we can write here.
-    " Note: Subsequent calls to writefile will overwrite. Caller responsible
-    " for deleting.
-    if writefile([], name, 1)
-        throw "Can't write temporary file in `" . getcwd() . "'"
-    endif
-    return name
 endfu
 
 " Return: True iff matches found.
@@ -2101,9 +2020,9 @@ fu! s:do_ext_grep(sf, pspecs, argstr, bang, use_ll, is_adding)
         " paths.
         call a:sf.pushd(sprj.opt.get('root'))
         " This try and associated 'finally' ensures cleanup of tempfile
-        " Note: Intentionally placing call to get_tempfile outside try.
-        " Rationale: Abnormal return from get_tempfile obviates need for
-        " cleanup.
+        " Note: Intentionally placing call to get_script_temppath outside try.
+        " Rationale: Abnormal return from get_script_temppath obviates need
+        " for cleanup.
         let scriptpath = sprj.get_script_temppath()
         try
             call writefile(scriptlines, scriptpath)
@@ -2186,6 +2105,11 @@ fu! s:grep(cmd, bang, cmdline)
             echoerr "No file(s) to grep."
         endif
         if external
+            let flags = {}
+            let pathconv = self.opt.get('pathconv', flags)
+            if !flags.unset
+                " Perform any required path translations
+            endif
             " TODO: Where to configure max len? Also, calculate fixlen
             " Note: xargify_pspecs handles sorting, combining, and uniquifying.
             let pspecs = s:xargify_pspecs(pspecs, 100)
