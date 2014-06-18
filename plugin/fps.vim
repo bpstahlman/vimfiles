@@ -1338,16 +1338,27 @@ endfu
 
 " Canonicalize the input path, attempting to make relative to rootdir (if
 " non-empty).
+" Note: Use fnamemodify and expand in 2-step process to canonicalize:
+" 1. fnamemodify with :p gets full path (but possibly with incorrect slashes)
+"    Note: If path exists and is a directory, fnamemodify will add trailing
+"    slash (of type determined by 'shellslash'), but won't modify non-trailing
+"    slashes.
+" 2. expand canonicalizes the non-trailing slashes in the path returned by
+"    fnamemodify.
+"    Note: expand won't add a trailing slash for a directory, but neither will
+"    it remove the one added by fnamemodify.
+" Note: Could use `:.' modifier to relativize, but this strips the drive name
+" (when it's default), which I don't want.
+" Note: Could do all this manually with regex matching, isdirectory, etc...,
+" and perhaps I still will, but there's a certain safety in allowing Vim to
+" handle slash canonicalization.
+" TODO: Idea to consider: Is it really necessary for us to canonicalize
+" slashes in files obtained from find? Consider that it's needed only on
+" Windows systems with a *nix emulation layer handling the find, and on such
+" systems, Vim can handle either type of slash internally! The only thing Vim
+" wouldn't be able to handle is abs paths like /cygdrive/c/... in the find
+" results, but I already have the pathconv option to handle that...
 fu! s:canonicalize_path(path, rootdir)
-    " Note: Use fnamemodify and expand in 2-step process to canonicalize:
-    " 1. fnamemodify with :p gets full path (but possibly with incorrect
-    "    slashes)
-    " 2. expand canonicalizes the slashes in the path returned by fnamemodify.
-    " Note: Could use `:.' modifier to relativize, but this strips the
-    " drive name (when it's default), which I don't want.
-    " Note: fnamemodify ensures a `/' at the end of a directory name, and
-    " expand won't remove it.
-    "echo "Input path: " . a:path . " -- cwd: " . getcwd()
     let path = expand(fnamemodify(a:path, ':p'))
     "echo "path: " . path
     if (a:rootdir != '')
@@ -1366,7 +1377,6 @@ endfu
 " >>> Functions used to read/write internal data structures.
 " TODO - Remove if nothing goes here...
 fu! Show_statics()
-    let s:
 endfu
 " <<<
 " >>> Functions for displaying Errors/Warnings
