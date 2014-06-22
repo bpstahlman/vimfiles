@@ -2,14 +2,32 @@
 let g:exch_dir = 'C:/Users/stahlmanb/tmp'
 let g:pathconv = ['C:/', '/cygdrive/c/']
 let g:sess_name = 'screpl'
+" TODO: Put in hierarchical config.
+let g:sess_cmd = '/cygdrive/c/Apps/Racket/Racket'
 let g:win_name = 'screpl'
 
 
-vmap <buffer> <C-CR> :<C-W>call <SID>send_selection()<CR>
+vmap <buffer> <C-CR> :<C-W>call <SID>cmd_send_selection()<CR>
 
-com! -nargs=1 ScreplStart call s:start_session(<f-args>)
+com! -nargs=1 ScreplStart call s:cmd_start_session(<f-args>)
 
-fu! s:start_session(sess_name)
+fu! s:start_session_maybe(sess_name)
+	" Use quiet and list options to check existence of appropriately-named session.
+	let info = system('screen -q -ls ' . a:sess_name)
+	if v:shell_error > 10
+		" We've got one that can be reattached.
+		return
+	else if v:shell_error == 10
+		echo "Warning: Found at least 1 " . a:sess_name . " session, but can't attach."
+	endif
+	" Create the session detached.
+	call system('screen -d -m -S ' . a:sess_name . ' ' . g:sess_cmd) 
+endfu
+
+fu! s:cmd_start_session(sess_name)
+	" TODO: Test for failure (e.g., no screen program)?
+	call s:ensure_session(a:sess_name)
+
 	let b:screpl_sess_name = a:sess_name
 	let b:screpl_rsp_bufname = 'screpl-' . a:sess_name
 	try
@@ -70,14 +88,26 @@ endfu
 " Solution: Evaluate a marker string (perhaps same one used in comment at beginning) after all expressions sent to the
 " repl. This top-level string should not appear in the buffer until the user's expression has been evaluated. We can
 " just keep checking the buffer (with separate screen calls) until we have it or time out (user configurable parameter).
+" Killing Session: screen -X -S [session # you want to kill] quit
+" Explanation: the kill command works only for current window, quit is for entire session.
+" Starting Detached: -d -m option combination starts screen in detached mode. Verified that it works from Windows GVim.
+" This is great: makes it easy for me to start from the plugin; in fact, I can use screen -list to see whether a session
+" exists already, and start detached if not...
 
-fu! s:send_selection()
+fu! s:cmd_send_selection()
 	norm `<"zyv`>
+	" TODO: Should this stuff be here or in send_selection? (Keep in mind I may eventually support tmux as well).
 	let mkr = ';;; CMD-' . reltimestr(reltime())
 	let lines = split(@z, '\n')
 	call insert(lines, mkr)
+	call s:send_selection_and_get_response(lines)
+
+endfu
+
+fu! s:send_selection_and_get_response(sel)
 	call writefile(lines, b:screpl_exch_file)
 	" TODO: Escaping for filenames?
+	" Template: screen -S sess_name -p 0 -X eval 'readbuf path_ext' 'paste .'
 	call system('screen -S ' . shellescape(b:screpl_sess_name)
 		\. ' -X eval ' . shellescape('readbuf ' . b:screpl_exch_file_ext)
 		\. ' ' . shellescape(' paste .'))
@@ -85,23 +115,28 @@ fu! s:send_selection()
 	"while localtime() - ts < 2
 	"	let dbg = 42
 	"endwhile
-	call s:recv_response(mkr)
-endfu
-
-fu! s:recv_response(mkr)
-	call system('screen -S ' . shellescape(b:screpl_sess_name)
-		\. " -X eval copy " . shellescape("stuff '?" . a:mkr ."\\015 Gk$ '")
-		\. ' ' . shellescape('writebuf ' . b:screpl_exch_file_ext))
-	let lines = readfile(b:screpl_exch_file)
-	call add(lines, '')
+	let resp = s:recv_response(mkr)
 	try
 		let winnr = winnr()
 		exe bufwinnr(b:screpl_rsp_bufnr) . 'wincmd w'
-		call append(line('$'), lines)
+		call append(line('$'), resp)
 		norm G
 	finally
 		exe winnr . 'wincmd w'
 	endtry
+endfu
+
+fu! s:recv_response(mkr)
+	" Template: screen -S sess_name -X eval copy 'stuff "?{marker-string}\015 Gk$ "' 'writebuf path_ext'
+	" Note: The octal literal \015 must be parsed by screen, not Vim.
+	call system('screen -S ' . shellescape(b:screpl_sess_name)
+		\. " -X eval copy " . shellescape("stuff '?" . a:mkr ."\\015 Gk$ '")
+		\. ' ' . shellescape('writebuf ' . b:screpl_exch_file_ext))
+	" TODO: Need to loop until we detect end marker (which will be a bare string marker expression, safe for any
+	" lisp/scheme)...
+	let lines = readfile(b:screpl_exch_file)
+	call add(lines, '')
+	return lines
 
 endfu
 
