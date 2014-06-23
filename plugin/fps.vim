@@ -1059,6 +1059,7 @@ fu! s:glob_to_patt(glob, partial)
     if !a:partial
         let patt .= '$'
     endif
+    let g:dbgPatt = patt
     return {'patt': patt,
         \'start_anchor': start_anchor,
         \'end_anchor': end_anchor,

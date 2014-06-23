@@ -47,6 +47,7 @@
 let g:exch_dir = 'C:/Users/stahlmanb/tmp'
 let g:pathconv = ['C:/', '/cygdrive/c/']
 let g:sess_name = 'screpl'
+let g:resp_timeout = 3000
 " TODO: Put in hierarchical config.
 let g:sess_cmd = '/cygdrive/c/Apps/Racket/Racket'
 let g:win_name = 'screpl'
@@ -69,9 +70,21 @@ fu! s:start_session_maybe(sess_name)
 	call system('screen -d -m -S ' . a:sess_name . ' ' . g:sess_cmd) 
 endfu
 
+" TODO: Is sess_name needed? Is this function even needed?
+fu! s:set_options(sess_name)
+	" Options
+endfu
+
 fu! s:cmd_start_session(sess_name)
 	" TODO: Test for failure (e.g., no screen program)?
-	call s:ensure_session(a:sess_name)
+	call s:start_session_maybe(a:sess_name)
+
+	if exists('g:resp_timeout')
+		" TODO: Validate!
+		let b:resp_timeout = g:resp_timeout
+	else
+		let b:resp_timeout = 5000
+	endif
 
 	let b:screpl_sess_name = a:sess_name
 	let b:screpl_rsp_bufname = 'screpl-' . a:sess_name
@@ -95,13 +108,14 @@ endfu
 fu! s:cmd_send_selection()
 	norm `<"zyv`>
 	" TODO: Should this stuff be here or in send_selection? (Keep in mind I may eventually support tmux as well).
-	let mkr = ';;; CMD-' . reltimestr(reltime())
+	let smkr = ';;; CMD-' . reltimestr(reltime())
+	let emkr = '"' . smkr . '"'
 	let lines = split(@z, '\n')
-	call insert(lines, mkr)
-	call add(lines, '"CMD-' . reltimestr(reltime()) . '"')
+	" Wrap with markers
+	call insert(lines, smkr)
+	call add(lines, emkr)
 	" send_and_get won't return till the marker string is evaluated (to itself).
-	let resp = s:send_and_get(lines)
-
+	let resp = s:send_and_get(lines, smkr, emkr)
 	try
 		let winnr = winnr()
 		exe bufwinnr(b:screpl_rsp_bufnr) . 'wincmd w'
@@ -111,40 +125,40 @@ fu! s:cmd_send_selection()
 		exe winnr . 'wincmd w'
 	endtry
 endfu
-
-fu! s:send_and_get(lines)
-	let end_mkr = a:lines[-1]
+"(define x 42)
+fu! s:send_and_get(lines, smkr, emkr)
 	call writefile(a:lines, b:screpl_exch_file)
 	" TODO: Escaping for filenames?
 	" Template: screen -S sess_name -p 0 -X eval 'readbuf path_ext' 'paste .'
 	call system('screen -S ' . shellescape(b:screpl_sess_name)
 		\. ' -X eval ' . shellescape('readbuf ' . b:screpl_exch_file_ext)
 		\. ' ' . shellescape(' paste .'))
-	let resp = s:recv_response(end_mkr)
+	let resp = s:recv_response(a:smkr, a:emkr)
 endfu
 
-fu! s:recv_response(end_mkr)
+fu! s:recv_response(smkr, emkr)
 	let start = reltime()
 	while 1
 		" Copy from beginning of start marker to eol before end marker.
 		" Template: screen -S sess_name -X eval copy 'stuff "?{marker-string}\015 Gk$ "' 'writebuf path_ext'
 		" Note: The octal literal \015 must be parsed by screen, not Vim.
 		call system('screen -S ' . shellescape(b:screpl_sess_name)
-			\. " -X eval copy " . shellescape("stuff '?" . a:mkr ."\\015 Gk$ '")
+			\. " -X eval copy " . shellescape("stuff '?" . a:smkr ."\\015 Gk$ '")
 			\. ' ' . shellescape('writebuf ' . b:screpl_exch_file_ext))
 		" TODO: Need to loop until we detect end marker (which will be a bare string marker expression, safe for any
 		" lisp/scheme)...
 		let lines = readfile(b:screpl_exch_file)
 		" Look for 2 occurrences of marker string at end
 		" Question: Can we constrain to final 2 lines? I think that should be safe...
-		if lines[-1] =~ a:end_mkr && lines[-1] =~ a:end_mkr
+		if lines[-1] =~ a:emkr && lines[-1] =~ a:emkr
 			" Got it!
 			break
 		endif
 		" UNDER CONSTRUCTION...
 		" Convert to millisecond value
+		" TODO: Put this in function.
 		let delta = substitute(substitute(reltimestr(reltime(start)), '\.\(\d\{3}\).*', '\1', ''), '\s\+', '', 'g') + 0
-		if delta > g:resp_timeout
+		if delta > b:resp_timeout
 			throw "Timed out awaiting response from REPL."
 		endif
 	endwhile
