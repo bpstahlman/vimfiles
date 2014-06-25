@@ -47,27 +47,35 @@
 let g:exch_dir = 'C:/Users/stahlmanb/tmp'
 let g:pathconv = ['C:/', '/cygdrive/c/']
 let g:sess_name = 'screpl'
-let g:resp_timeout = 3000
-" TODO: Put in hierarchical config.
+let g:resp_timeout = 1000
+" TODO: Put all this in hierarchical config.
 let g:sess_cmd = '/cygdrive/c/Apps/Racket/Racket'
 let g:win_name = 'screpl'
 
+let s:log_system = 1
 
 vmap <buffer> <C-CR> :<C-W>call <SID>cmd_send_selection()<CR>
 
 com! -nargs=1 ScreplStart call s:cmd_start_session(<f-args>)
 
+fu! s:system(cmd)
+	if s:log_system
+		echomsg a:cmd
+	endif
+	return system(a:cmd)
+endfu
+
 fu! s:start_session_maybe(sess_name)
 	" Use quiet and list options to check existence of appropriately-named session.
-	let info = system('screen -q -ls ' . a:sess_name)
+	let info = s:system('screen -q -ls ' . a:sess_name)
 	if v:shell_error > 10
 		" We've got one that can be reattached.
 		return
-	else if v:shell_error == 10
+	elseif v:shell_error == 10
 		echo "Warning: Found at least 1 " . a:sess_name . " session, but can't attach."
 	endif
 	" Create the session detached.
-	call system('screen -d -m -S ' . a:sess_name . ' ' . g:sess_cmd) 
+	call s:system('screen -d -m -S ' . a:sess_name . ' ' . g:sess_cmd) 
 endfu
 
 " TODO: Is sess_name needed? Is this function even needed?
@@ -77,6 +85,7 @@ endfu
 
 fu! s:cmd_start_session(sess_name)
 	" TODO: Test for failure (e.g., no screen program)?
+	" TEMP DEBUG
 	call s:start_session_maybe(a:sess_name)
 
 	if exists('g:resp_timeout')
@@ -96,44 +105,54 @@ fu! s:cmd_start_session(sess_name)
 	endtry
 	let b:screpl_rsp_bufnr = bufnr('#')
 	let b:screpl_exch_dir = exists('g:exch_dir') ? g:exch_dir : fnamemodify(tempname(), ':h')
-	let basename = 'screpl-' . b:screpl_sess_name
-	let b:screpl_exch_file = b:screpl_exch_dir . '/' . basename
+	let basename_in = 'screpl-in' . b:screpl_sess_name
+	let basename_out = 'screpl-out' . b:screpl_sess_name
+	let b:screpl_exch_infile = b:screpl_exch_dir . '/' . basename_in
+	let b:screpl_exch_outfile = b:screpl_exch_dir . '/' . basename_out
 	" TODO: Do we need shellslash normalization?
 	if !empty(g:pathconv)
 		" TODO: Consider subst flags...
-		let b:screpl_exch_file_ext = substitute(b:screpl_exch_file, g:pathconv[0], g:pathconv[1], 'g')
+		let b:screpl_exch_infile_ext = substitute(b:screpl_exch_infile, g:pathconv[0], g:pathconv[1], 'g')
+		let b:screpl_exch_outfile_ext = substitute(b:screpl_exch_outfile, g:pathconv[0], g:pathconv[1], 'g')
 	endif
 endfu
 
 fu! s:cmd_send_selection()
 	norm `<"zyv`>
 	" TODO: Should this stuff be here or in send_selection? (Keep in mind I may eventually support tmux as well).
-	let smkr = ';;; CMD-' . reltimestr(reltime())
-	let emkr = '"' . smkr . '"'
+	let mkr = 'CMD-' . reltimestr(reltime())
+	let smkr = ';;; ' . mkr
+	let emkr = '"' . mkr . '"'
 	let lines = split(@z, '\n')
 	" Wrap with markers
 	call insert(lines, smkr)
 	call add(lines, emkr)
-	" send_and_get won't return till the marker string is evaluated (to itself).
-	let resp = s:send_and_get(lines, smkr, emkr)
+	" Handle failure to get response.
 	try
-		let winnr = winnr()
-		exe bufwinnr(b:screpl_rsp_bufnr) . 'wincmd w'
-		call append(line('$'), resp)
-		norm G
-	finally
-		exe winnr . 'wincmd w'
+		" send_and_get won't return till the marker string is evaluated (to itself).
+		let resp = s:send_and_get(lines, smkr, emkr)
+		" Make sure we come back to editing window.
+		try
+			let winnr = winnr()
+			exe bufwinnr(b:screpl_rsp_bufnr) . 'wincmd w'
+			call append(line('$'), resp)
+			norm G
+		finally
+			exe winnr . 'wincmd w'
+		endtry
+	catch
+		echoerr "Error: " . v:exception . " at " . v:throwpoint
 	endtry
 endfu
-"(define x 42)
+
 fu! s:send_and_get(lines, smkr, emkr)
-	call writefile(a:lines, b:screpl_exch_file)
+	call writefile(a:lines, b:screpl_exch_infile)
 	" TODO: Escaping for filenames?
 	" Template: screen -S sess_name -p 0 -X eval 'readbuf path_ext' 'paste .'
-	call system('screen -S ' . shellescape(b:screpl_sess_name)
-		\. ' -X eval ' . shellescape('readbuf ' . b:screpl_exch_file_ext)
+	call s:system('screen -S ' . shellescape(b:screpl_sess_name)
+		\. ' -X eval ' . shellescape('readbuf ' . b:screpl_exch_infile_ext)
 		\. ' ' . shellescape(' paste .'))
-	let resp = s:recv_response(a:smkr, a:emkr)
+	return s:recv_response(a:smkr, a:emkr)
 endfu
 
 fu! s:recv_response(smkr, emkr)
@@ -142,15 +161,20 @@ fu! s:recv_response(smkr, emkr)
 		" Copy from beginning of start marker to eol before end marker.
 		" Template: screen -S sess_name -X eval copy 'stuff "?{marker-string}\015 Gk$ "' 'writebuf path_ext'
 		" Note: The octal literal \015 must be parsed by screen, not Vim.
-		call system('screen -S ' . shellescape(b:screpl_sess_name)
-			\. " -X eval copy " . shellescape("stuff '?" . a:smkr ."\\015 Gk$ '")
-			\. ' ' . shellescape('writebuf ' . b:screpl_exch_file_ext))
+		" Note: Get everything from smkr to emkr inclusive.
+		" Rationale: We need to test for emkr, and smkr will probably be displayed.
+		" Issue: Things work fine as long as screen is left open. If it's detached, however, the scrollback stuff
+		" doesn't work properly...
+		call s:system('screen -S ' . shellescape(b:screpl_sess_name)
+			\. " -X eval copy " . shellescape("stuff '?" . a:smkr ."\\015 G '")
+			\. ' ' . shellescape('writebuf ' . b:screpl_exch_outfile_ext))
+
 		" TODO: Need to loop until we detect end marker (which will be a bare string marker expression, safe for any
 		" lisp/scheme)...
-		let lines = readfile(b:screpl_exch_file)
+		let lines = readfile(b:screpl_exch_outfile)
 		" Look for 2 occurrences of marker string at end
 		" Question: Can we constrain to final 2 lines? I think that should be safe...
-		if lines[-1] =~ a:emkr && lines[-1] =~ a:emkr
+		if lines[-1] =~ a:emkr || lines[-2] =~ a:emkr
 			" Got it!
 			break
 		endif
