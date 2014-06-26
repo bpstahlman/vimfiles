@@ -22,6 +22,13 @@ let g:fps_config = {
                     \'find': 'find . \( \( '
                         \.' -path ./shared/extjs -o -path ./help/transition/jquery.js \) '
                         \.' -prune -false \) -o -iname ''*.js'''
+                \},{
+					\'name': 'reg',
+                    \'shortname': 'r',
+                    \'root': ['src/private', ';asec'],
+                    \'find': 'find . \( \( '
+                        \.' -path ./registry \) '
+                        \.' -prune -false \) -o -iname ''*.json'''
                 \}
             \]
         \}
