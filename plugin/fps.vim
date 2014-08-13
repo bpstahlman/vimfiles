@@ -844,7 +844,7 @@ fu! s:opts_create(raw, lvl, ...)
     let data = a:0 > 1 ? a:2 : {}
     " Special field descriptions:
     " 'defaulted': existence hash indicating opts that were defaulted
-    " 'converted': has mapping converted option names to their raw
+    " 'converted': hash mapping converted option names to their raw
     " (unconverted) values
     " 'unset': existence hash containing non-required options that are unset.
     let opts = {'opts': {}, 'lvl': a:lvl, 'base': base, 'defaulted': {}, 'converted': {}, 'unset': {}}
@@ -930,6 +930,7 @@ fu! s:opts_create(raw, lvl, ...)
                 let flags = {}
                 call self.get(opt_name, flags)
                 if flags.lvl < 0
+                    " Option not found.
                     " If we can't provide default now, throw error.
                     if has_key(opt_cfg, 'default')
                         let def = opt_cfg.default
@@ -949,8 +950,11 @@ fu! s:opts_create(raw, lvl, ...)
                     else
                         throw "Missing required option: " . opt_name
                     endif
-                    let self.opts[opt_name] = opt_val
-                    unlet opt_val " E706 workaround
+                    " Caveat: No value when 'unset'
+                    if exists('l:opt_val')
+                        let self.opts[opt_name] = opt_val
+                        unlet opt_val " E706 workaround
+                    endif
                 endif
             endif
         endfor
