@@ -25,10 +25,8 @@ let g:fps_config = {
                 \},{
 					\'name': 'reg',
                     \'shortname': 'r',
-                    \'root': ['src/private', ';asec'],
-                    \'find': 'find . \( \( '
-                        \.' -path ./registry \) '
-                        \.' -prune -false \) -o -iname ''*.json'''
+                    \'root': ['src/private/registry', ';asec'],
+                    \'find': 'find . -iname ''*.json'''
                 \}
             \]
         \}
