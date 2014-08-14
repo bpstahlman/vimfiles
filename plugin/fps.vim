@@ -724,7 +724,12 @@ fu! s:optconv_root(raw, lvl, opts, data)
     " Rationale: If sp root happens to be absolute, and not located beneath
     " proot, the attempt will fail harmlessly, and the specified sp root will
     " be retained.
-    return s:canonicalize_path(a:raw, proot)
+    " TODO!!!!!! UNDER CONSTRUCTION!!!!!!!!
+    " root may be specified as relative to proot; if so, concat; otherwise,
+    " just use as-is...
+    " Problem: Currently, pushd is failing because 'root' isn't absolute...
+    let canon_root = s:canonicalize_path(a:raw, proot)
+
 endfu
 fu! s:optconv_cachedir(raw, lvl, opts, data)
     " Special case: `.' means sp root. Convert a single dot (or even ./ or .\)
@@ -864,10 +869,12 @@ fu! s:opts_create(raw, lvl, ...)
         endif
         let obj = self
         while !empty(obj)
-            if has_key(obj.opts, a:name) || has_key(obj.unset, a:name)
+            let unset = has_key(obj.unset, a:name)
+            if has_key(obj.opts, a:name) || unset
                 if a:0 > 0
                     " Set all flags to simplify things for caller.
                     let flags.lvl = obj.lvl
+                    " Note: Currently, unset implies defaulted.
                     let flags.unset = has_key(obj.unset, a:name)
                     let flags.defaulted = has_key(obj.defaulted, a:name)
                     let flags.converted = has_key(obj.converted, a:name)
@@ -875,7 +882,7 @@ fu! s:opts_create(raw, lvl, ...)
                         let flags.raw = self.converted[a:name]
                     endif
                 endif
-                return obj.opts[a:name]
+                return unset ? '' : obj.opts[a:name]
             endif
             " Move up to parent
             let obj = obj.base
@@ -1782,13 +1789,17 @@ fu! s:refresh(...)
             " TODO - Fix this...
             let root = sprj.opt.get('root')
             " Note: An sf.cd (TODO) would make more sense here than pushd...
+            echo "About to call pushd " . getcwd()
             call sf.pushd(root)
-            call s:cache_listfile(sprj, sprj.opt, 1)
+            echo "Just called pushd " . getcwd()
+            call sprj.cache_listfile(1)
         endfor
     "catch /Vim(echoerr)/
         "echohl ErrorMsg|echomsg v:exception|echohl None
     finally
+        echo "Calling destroy..."
         call sf.destroy()
+        echo "Called destroy..."
     endtry
 endfu
 
@@ -1876,8 +1887,10 @@ fu! s:xargify_pspecs(pspecs, fixlen)
     let _pspecs = []
     " Will we be performing output abs path translation within loop?
     let flags = {}
-    let pathconv = self.opt.get('pathconv', flags)
-    let do_pathconv = !flags.unset
+    " TODO: pathconv would need to be per-sprj, but don't really want to do it
+    " here: look at doing only at load and caching...
+    "let pathconv = self.opt.get('pathconv', flags)
+    "let do_pathconv = !flags.unset
     for pspec in pspecs
         if !exists('l:_pspec') || _pspec.sprj isnot pspec.sprj
             if exists('l:_pspec')
@@ -1894,9 +1907,10 @@ fu! s:xargify_pspecs(pspecs, fixlen)
             " Perform any required path conversions before length test.
             " TODO: Should path conversion be optional? Currently, this
             " function is called only in preparation for external commands...
-            if do_pathconv
-                let f = pathconv.convert_path(f, 'out')
-            endif
+            " TODO: See earlier note...
+            "if do_pathconv
+            "    let f = pathconv.convert_path(f, 'out')
+            "endif
             " Escape and prepend space before length test.
             let f = ' ' . shellescape(f)
             let len_f = strlen(f)
@@ -2119,11 +2133,15 @@ fu! s:grep(cmd, bang, cmdline)
             echoerr "No file(s) to grep."
         endif
         if external
-            let flags = {}
-            let pathconv = self.opt.get('pathconv', flags)
-            if !flags.unset
-                " Perform any required path translations
-            endif
+            " TODO: pathconv can be defined per-sprj, so this can't go here,
+            " but I really don't want the expense of pathconv at all at grep
+            " time: if it needs to be done, should be done at load and
+            " cached...
+            "let flags = {}
+            "let pathconv = self.opt.get('pathconv', flags)
+            "if !flags.unset
+            "    " Perform any required path translations
+            "endif
             " TODO: Where to configure max len? Also, calculate fixlen
             " Note: xargify_pspecs handles sorting, combining, and uniquifying.
             let pspecs = s:xargify_pspecs(pspecs, 100)
