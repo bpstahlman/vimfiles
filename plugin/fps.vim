@@ -567,24 +567,100 @@ endfu
 "<<<
 
 " >>> Functions used to start/stop/refresh the plugin
+let s:fps_dir_basename = '.fps'
+let s:config_basename = 'config'
+fu! s:find_prj_dir()
+    let fps_dir = finddir(s:fps_dir_basename, ';')
+    if empty(fps_dir)
+        throw "Can't find project root."
+    endif
+    " Cache some paths for convenience, ensuring abs path (finddir returns rel
+    " when it can).
+    " Note: finddir adds trailing slash, which is preserved by :p, after
+    " which, a single :h removes slash only, and a double :h removes
+    " /component/
+    let s:cfg.prj_root = fnamemodify(fps_dir, ':p:h:h') . '/'
+    let s:cfg.fps_dir = fnamemodify(fps_dir, ':p:h') . '/'
+    let s:cfg.config_file = s:cfg.fps_dir . s:config_basename
+    " TODO: Any more?
+endfu
+fu! s:validate_opt(section, p, v)
+    let re_opt_names = 'grepprg\|grepformat\|grepmaxlines'
+    " TODO: Perhaps additional validation
+    return a:p =~ re_opt_names
+endfu
+let s:default_opt = {
+    \'maxgrepsize': 4095,
+    \'grepprg': 'grep -n',
+    \'grepformat': '%f:%l:%m,%f:%l%m,%f  %l%m'
+\}
+fu! s:process_config()
+    " TODO: Perhaps relative?
+    if !filereadable(s:cfg.config_file)
+        throw "Can't read global config file " . s:cfg.config_file
+    endif
+    " TODO: Initialize each 
+    let s:cfg.sp_opt = {}
+    let s:cfg.sp_names = []
+    let section = '' " [global]
+    let re_section = '^\s*\[\([a-zA-Z0-9_]\+\)\][\s;#]*$'
+    " This one is comment or blank.
+    let re_comment = '^\s*\%([;#]\|$\)'
+    " Init global opts from default config but allow config file to override.
+    let g_opt = deepcopy(s:default_opt)
+    let opt = g_opt
+    " Note: Leading whitespace permitted, but whitespace around = not ignored
+    let re_propdef = '^\s*\(\i\+\)\s*=\s*\([''"]\?\)\(.\{-}\)\2\s*$'
+    let lineno = 0
+    for line in readfile(s:cfg.config_file)
+        let lineno += 1
+        if line =~ re_comment
+            " Skip comment
+            continue
+        elseif line =~ re_propdef
+            let [_, p, q, v; rest] = matchlist(line, re_propdef)
+            " Let validate throw...
+            call s:validate_opt(section, p, v)
+            let opt[p] = v
+        elseif line =~ re_section
+            let s = substitute(line, re_section, '\1', '')
+            if has_key(s:cfg.sp_opt, s)
+                throw "Multiple definitions for section " . s
+            endif
+            " Initialize sp opt from global.
+            let opt = deepcopy(g_opt)
+            let s:cfg.sp_opt[s] = opt
+            " Keep track of sp order
+            call add(s:cfg.sp_names, s)
+            let section = s
+        else
+            " Something illegal
+            throw "Unexpected input in config file at line " . lineno . ": " . line
+        endif
+    endfor
+endfu
+fu! s:prj_init(force_refresh, p_name, ...)
+    let s:cfg = {}
+    " TODO: Set cdpath?
+    call s:find_prj_dir()
+    "exe 'cd ' . s:cfg['prj_dir']
+    let sf = s:sf_create()
+    try
+        "exe 'cd ' . s:cfg.
+        call s:process_config()
+        echo "cfg: " . string(s:cfg)
+    finally
+        call sf.destroy()
+    endtry
+
+endfu
+" <<<
+" >>> Functions used to start/stop/refresh the plugin
 " Inputs:
 "   [<sp_spec>...] <p_name>
 fu! s:open(bang, ...)
-    " Close any currently open project.
-    if exists('s:prj') && !empty(s:prj)
-        call s:prj.close()
-    endif
-    "try
-        let s:prj = s:prj_create(a:bang == '!', a:000[-1], a:000[0:-2])
-    "catch
-        "throw "Cannot open project `" . a:000[-1] . "': " . v:exception
-        " TODO: Is this necessary, given that s:prj hasn't been set? We may
-        " have set some static vars (e.g., s:longnames/s:shortnames), but
-        " they'd be set next time...
-        if exists('s:prj') && !empty(s:prj)
-            call s:prj.close()
-        endif
-    "endtry
+    " TODO: Close any open?
+    call s:prj_init(a:bang == '!', a:000[-1], a:000[0:-2])
 endfu
 
 fu! s:reopen(bang)
