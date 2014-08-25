@@ -570,7 +570,11 @@ endfu
 let s:fps_dir_basename = '.fps'
 let s:config_basename = 'config'
 fu! s:find_prj_dir()
+    " Temporarily clear 'path' to prevent searching anywhere but up from cwd
+    let path_save = &path
+    set path=
     let fps_dir = finddir(s:fps_dir_basename, ';')
+    let &path = path_save
     if empty(fps_dir)
         throw "Can't find project root."
     endif
@@ -585,7 +589,7 @@ fu! s:find_prj_dir()
     " TODO: Any more?
 endfu
 fu! s:validate_opt(section, p, v)
-    let re_opt_names = 'grepprg\|grepformat\|grepmaxlines'
+    let re_opt_names = 'grepprg\|grepformat\|grepmaxlines\|find\|root'
     " TODO: Perhaps additional validation
     return a:p =~ re_opt_names
 endfu
@@ -594,14 +598,17 @@ let s:default_opt = {
     \'grepprg': 'grep -n',
     \'grepformat': '%f:%l:%m,%f:%l%m,%f  %l%m'
 \}
+fu! s:add_sprj_opt_defaults(opt, sprj_name)
+    let a:opt.find = 'find-' . a:sprj_name
+endfu
 fu! s:process_config()
     " TODO: Perhaps relative?
     if !filereadable(s:cfg.config_file)
         throw "Can't read global config file " . s:cfg.config_file
     endif
     " TODO: Initialize each 
-    let s:cfg.sp_opt = {}
-    let s:cfg.sp_names = []
+    let s:cfg.sprjs = {}
+    let s:cfg.sprj_names = []
     let section = '' " [global]
     let re_section = '^\s*\[\([a-zA-Z0-9_]\+\)\][\s;#]*$'
     " This one is comment or blank.
@@ -624,19 +631,158 @@ fu! s:process_config()
             let opt[p] = v
         elseif line =~ re_section
             let s = substitute(line, re_section, '\1', '')
-            if has_key(s:cfg.sp_opt, s)
+            if has_key(s:cfg.sprjs, s)
                 throw "Multiple definitions for section " . s
             endif
             " Initialize sp opt from global.
             let opt = deepcopy(g_opt)
-            let s:cfg.sp_opt[s] = opt
+            " Add any sprj-specific defaults.
+            call s:add_sprj_opt_defaults(opt, s)
+            let s:cfg.sprjs[s] = {'opt': opt}
             " Keep track of sp order
-            call add(s:cfg.sp_names, s)
+            call add(s:cfg.sprj_names, s)
             let section = s
         else
             " Something illegal
             throw "Unexpected input in config file at line " . lineno . ": " . line
         endif
+    endfor
+endfu
+" Check for mandatory options, and set some file paths...
+" TODO: Perhaps combine this with validate_prj.
+fu! s:post_process_config()
+    for [sprj_name, sprj] in items(s:cfg.sprjs)
+        if empty(sprj.opt.root)
+            " If sprj root not specified, assume same as prj root
+
+        else
+            " Could be absolute or relative
+        endif
+    endfor
+endfu
+fu! s:get_path_info(path)
+    let fr = filereadable(a:path)
+    let fw = filewritable(a:path)
+    let id = isdirectory(a:path)
+    return {'type': id ? 'd' : (fr || fw) ? 'f' : '', 'readonly': !fw}
+endfu
+" Make sure the fps prj dir contains everything that's required.
+" Pre-condition: We're in the prj dir.
+fu! s:validate_prj()
+    " Check for all sp find files.
+    for [sprj_name, sprj] in items(s:cfg.sprjs)
+        " Assumption: 'find' key must exist (has relative default), but file may not.
+        if !filereadable(sprj.opt.find)
+            throw "No find script defined for subproject " . sprj_name
+        endif
+        " Convert to absolute path.
+        let sprj.opt.find = fnamemodify(sprj.opt.find, ':p')
+    endfor
+
+    " Ensure existence of .cache and .tmp dirs.
+    " TODO: Do we want to add something to s:cfg for these, or at least create
+    " symbolic names for the relative paths?
+    for dir in ['.tmp', '.cache', '.cache/file-lists']
+        let pi = s:get_path_info(dir)
+        if pi.type == ''
+            " Create directory, creating intermediate paths as required.
+            call mkdir(dir, "p")
+        elseif pi.type == 'f'
+            throw "Refusing to overwrite existing file: " . getcwd() . '/' . dir
+        elseif pi.type == 'd' && pi.readonly
+            throw "Directory " . getcwd() . '/' . dir . " must be writable."
+        endif
+    endfor
+endfu
+" Pre-condition: In plugin dir.
+" TODO: UNDER DEVELOPMENT
+fu! s:cache_listfiles(force_refresh)
+    for [sprj_name, sprj] in items(s:cfg.sprjs)
+        " .cache/listfile-{sprj}
+        let lf = '.cache/listfile-' . sprj_name
+        let lf_readable = filereadable(lf)
+        let sf = s:sf_create()
+        try
+            " Both listfile generation and file canonicalization require us to
+            " be in sprj root dir.
+            call sf.pushd(sprj.root)
+            " Do we need to create/update the listfile?
+            " Assumption: Either the if or elseif *will* be entered.
+            if !lf_readable || a:force_refresh
+                " Caveat: Originally, used :! and > to put results in
+                " listfile; this can be problematic in some environments,
+                " due to need for abs path conversion. Circumvent issues by
+                " using system()/writefile() combination.
+                " Note: Alternatively, could use convert_path mechanism.
+                " TODO: Should we impose these sorts of constraints on
+                " (possibly system-dependent v:shell_error)?
+                " Assumption: Nonzero will never be returned for success, even
+                " if the external command doesn't give a meaningful error
+                " code...
+                silent! let files_raw = split(system(sprj.opt.find), '\n')
+                "echo "files_raw: " . string(files_raw)
+                if v:shell_error != 0
+                    throw "Encountered error attempting to build listfile `" . lf . "' for subproject "
+                        \. self.name . ": Shell error code=" . v:shell_error
+                endif
+                " Write the listfile.
+                " Note: We must set 'shellslash' for canonicalization.
+                call sf.setopt('shellslash', 1, {'boolean': 1})
+                " Build canonicalized list within loop.
+                let files = []
+                let flags = {}
+                let pathconv = self.opt.get('pathconv', flags)
+                let do_pathconv = !flags.unset
+                for file_raw in files_raw
+                    if do_pathconv
+                        " TODO: Either avoid object for this
+                        " performance-critical conversion, or perhaps cache
+                        " both internal and external forms to avoid conversion
+                        " altogether...
+                        let file_raw = pathconv.convert_path(file_raw, 'in')
+                    endif
+                    let file_raw = s:canonicalize_path(file_raw, root)
+                    " Add canonical name to list.
+                    call add(files, file_raw)
+                endfor
+                " TODO: Make sort optional so we can skip if user's find
+                " ensures sorted.
+                " TODO: Should we uniquify? Doing so could permit some optimizations
+                " (e.g., find_insert_idx).
+                call sort(files)
+                " Save the file to permit processing to be skipped next time.
+                let v:errmsg = ''
+                silent! let status = writefile(files, lf)
+                if status == -1 || v:errmsg != ''
+                    " Warn user that listfile can't be saved for next time...
+                    " Rationale: Inability to write the file needn't disable
+                    " the subproject; although it's expensive, we can re-run
+                    " find whenever sp is opened.
+                    call s:warn("Unable to write listfile `" . lf . "' for subproject "
+                        \. self.name . " due to the following error: " . v:errmsg . ". Until problem is corrected,"
+                        \. " subsequent subproject opens may take slightly longer than necessary.")
+                    " Note: delete() returns 0 on success, 1 on failure, so we
+                    " could warn on failure, but there's really no reason to
+                    if delete(lf) == 1
+                        " Question: Does this warrant separate warning?
+                        call s:warn("Unable to delete stale listfile `" . lf . "' for subproject " . self.name)
+                    endif
+                endif
+            elseif lf_readable
+                " No need to run find or process listfile; simply read and use.
+                let files = readfile(lf)
+            endif
+        " TODO: Probably remove the catch...
+        "catch
+            " TODO: Perhaps a Rethrow method to be used everywhere instead of
+            " this (for stripping extra Vim(echoerr) at head).
+            " Alternatively, a display function to strip them all from v:exception
+            " before output...
+            "echoerr v:exception
+        finally
+            call sf.destroy()
+        endtry
+
     endfor
 endfu
 fu! s:prj_init(force_refresh, p_name, ...)
@@ -646,8 +792,12 @@ fu! s:prj_init(force_refresh, p_name, ...)
     "exe 'cd ' . s:cfg['prj_dir']
     let sf = s:sf_create()
     try
-        "exe 'cd ' . s:cfg.
         call s:process_config()
+        " Move to the fps work dir
+        exe 'cd ' . s:cfg.fps_dir
+        call s:validate_prj()
+        " Cache (creating if necessary) filelists.
+        call s:cache_file_lists()
         echo "cfg: " . string(s:cfg)
     finally
         call sf.destroy()
