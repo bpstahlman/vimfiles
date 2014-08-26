@@ -567,6 +567,8 @@ endfu
 "<<<
 
 " >>> Functions used to start/stop/refresh the plugin
+" TODO: Don't hardcode this: allow user to set a global option (e.g.,
+" g:fps_project_basename) so he can pick something that won't conflict.
 let s:fps_dir_basename = '.fps'
 let s:config_basename = 'config'
 fu! s:find_prj_dir()
@@ -580,16 +582,17 @@ fu! s:find_prj_dir()
     endif
     " Cache some paths for convenience, ensuring abs path (finddir returns rel
     " when it can).
-    " Note: finddir adds trailing slash, which is preserved by :p, after
-    " which, a single :h removes slash only, and a double :h removes
-    " /component/
+    " Note: finddir adds trailing slash for directory, as does fnamemodify
+    " (provided the directory exists). The slash is preserved by :p, after
+    " which, a single :h removes slash only, and a double :h removes a
+    " trailing `/component/'.
     let s:cfg.prj_root = fnamemodify(fps_dir, ':p:h:h') . '/'
-    let s:cfg.fps_dir = fnamemodify(fps_dir, ':p:h') . '/'
+    let s:cfg.fps_dir = fnamemodify(fps_dir, ':p')
     let s:cfg.config_file = s:cfg.fps_dir . s:config_basename
     " TODO: Any more?
 endfu
 fu! s:validate_opt(section, p, v)
-    let re_opt_names = 'grepprg\|grepformat\|grepmaxlines\|find\|root'
+    let re_opt_names = 'grepprg\|grepformat\|grepmaxlines\|find\|root\|shortname'
     " TODO: Perhaps additional validation
     return a:p =~ re_opt_names
 endfu
@@ -648,16 +651,65 @@ fu! s:process_config()
         endif
     endfor
 endfu
+" TODO: Currently unused.
+fu! s:is_abs_path(path)
+    " TODO: This may not cover all corner cases... (Network paths?) Perhaps take 'shellslash' on Windows into account?
+    return a:path =~? '^\%([a-z]:\)\?[\\/]'
+endfu
 " Check for mandatory options, and set some file paths...
 " TODO: Perhaps combine this with validate_prj.
+" Directory Assumption: In plugin dir
 fu! s:post_process_config()
+    " Initialize map of short -> long names to be built in loop.
+    let s:cfg.shortnames = {}
     for [sprj_name, sprj] in items(s:cfg.sprjs)
-        if empty(sprj.opt.root)
+        " 'root'
+        if !has_key(sprj.opt, 'root') || empty(sprj.opt.root)
             " If sprj root not specified, assume same as prj root
-
+            let sprj.root = s:cfg.prj_root
         else
-            " Could be absolute or relative
+            " User specified root as option: could be abs or rel (to prj root)
+            let d = finddir(sprj.opt.root, s:cfg.prj_root)
+            if !empty(d)
+                let d = fnamemodify(d, ':p')
+            else
+                " Path invalid!
+                throw "Invalid root specified for subproject " . sprj_name
+            endif
+            " Save abs path with trailing /
+            let sprj.root = d
         endif
+        " Remove option if it was set.
+        if has_key(sprj.opt, 'root') | call remove(sprj.opt, 'root') | endif
+
+        " 'find'
+        " Assumption: 'find' key must exist (has relative default), but file
+        " itself may not.
+        if !filereadable(sprj.opt.find)
+            throw "No find script defined for subproject " . sprj_name
+        endif
+        " Convert to absolute path.
+        " Discovery: fnamemodify with :p *always* produces trailing / for
+        " existing dir.
+        let sprj.opt.find = fnamemodify(sprj.opt.find, ':p')
+
+        " 'shortname'
+        if !has_key(sprj.opt, 'shortname')
+            " TODO: Warn user he won't have an abbrev for this sprj?
+        else
+            let sn = sprj.opt.shortname
+            if sn !~? '^[a-z0-9]$'
+                throw "Invalid 'shortname' specified for subproject " . sprj_name . ": `" . sn
+                    \. "'. Must be single alphanumeric character."
+            endif
+            if has_key(s:cfg.shortnames, sn)
+                throw "Illegal attempt to re-use shortname `" . sn . "' for subproject " . sprj_name
+                    \. "; first used for subproject " . s:cfg.shortnames[sn]
+            endif
+            " Add valid shortname to the map
+            let s:cfg.shortnames[sn] = sprj_name
+        endif
+
     endfor
 endfu
 fu! s:get_path_info(path)
@@ -669,16 +721,6 @@ endfu
 " Make sure the fps prj dir contains everything that's required.
 " Pre-condition: We're in the prj dir.
 fu! s:validate_prj()
-    " Check for all sp find files.
-    for [sprj_name, sprj] in items(s:cfg.sprjs)
-        " Assumption: 'find' key must exist (has relative default), but file may not.
-        if !filereadable(sprj.opt.find)
-            throw "No find script defined for subproject " . sprj_name
-        endif
-        " Convert to absolute path.
-        let sprj.opt.find = fnamemodify(sprj.opt.find, ':p')
-    endfor
-
     " Ensure existence of .cache and .tmp dirs.
     " TODO: Do we want to add something to s:cfg for these, or at least create
     " symbolic names for the relative paths?
@@ -789,15 +831,15 @@ fu! s:prj_init(force_refresh, p_name, ...)
     let s:cfg = {}
     " TODO: Set cdpath?
     call s:find_prj_dir()
-    "exe 'cd ' . s:cfg['prj_dir']
     let sf = s:sf_create()
     try
         call s:process_config()
-        " Move to the fps work dir
+        " Move to the plugin dir for post-processing and validation.
         exe 'cd ' . s:cfg.fps_dir
+        call s:post_process_config()
         call s:validate_prj()
         " Cache (creating if necessary) filelists.
-        call s:cache_file_lists()
+        "call s:cache_listfiles()
         echo "cfg: " . string(s:cfg)
     finally
         call sf.destroy()
