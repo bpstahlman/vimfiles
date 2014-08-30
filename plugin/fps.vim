@@ -601,6 +601,8 @@ let s:default_opt = {
     \'grepprg': 'grep -n',
     \'grepformat': '%f:%l:%m,%f:%l%m,%f  %l%m'
 \}
+" Context: Add any sprj-specific defaults on top of the current global config
+" upon transitioning to sprj section.
 fu! s:add_sprj_opt_defaults(opt, sprj_name)
     let a:opt.find = 'find-' . a:sprj_name
 endfu
@@ -661,7 +663,7 @@ endfu
 " Directory Assumption: In plugin dir
 fu! s:post_process_config()
     " Initialize map of short -> long names to be built in loop.
-    let s:cfg.shortnames = {}
+    let s:cfg.sprj_snames = {}
     for [sprj_name, sprj] in items(s:cfg.sprjs)
         " 'root'
         if !has_key(sprj.opt, 'root') || empty(sprj.opt.root)
@@ -693,6 +695,26 @@ fu! s:post_process_config()
         " existing dir.
         let sprj.opt.find = fnamemodify(sprj.opt.find, ':p')
 
+        " Ensure existence of cache and tmp dirs.
+        for dir in [{'name': 'tmp', 'path': 'tmp'}, {'name': 'cache', 'path': 'cache'}, {'name': 'listfiles', 'path': 'cache/listfiles'}]
+            let [name, path] = [dir.name, dir.path]
+            let pi = s:get_path_info(path)
+            if pi.type == ''
+                " Create directory, creating intermediate paths as required.
+                call mkdir(path, "p")
+            elseif pi.type == 'f'
+                throw "Refusing to overwrite existing file: " . getcwd() . '/' . path
+            elseif pi.type == 'd' && pi.readonly
+                throw "Directory " . getcwd() . '/' . path . " must be writable."
+            endif
+            " Save absolute path.
+            let s:cfg[name . '_dir'] = fnamemodify(path, ':p')
+        endfor
+
+        " listfile path
+        let sprj.listfile = s:cfg.listfiles_dir . sprj_name
+
+
         " 'shortname'
         if !has_key(sprj.opt, 'shortname')
             " TODO: Warn user he won't have an abbrev for this sprj?
@@ -702,12 +724,12 @@ fu! s:post_process_config()
                 throw "Invalid 'shortname' specified for subproject " . sprj_name . ": `" . sn
                     \. "'. Must be single alphanumeric character."
             endif
-            if has_key(s:cfg.shortnames, sn)
+            if has_key(s:cfg.sprj_snames, sn)
                 throw "Illegal attempt to re-use shortname `" . sn . "' for subproject " . sprj_name
-                    \. "; first used for subproject " . s:cfg.shortnames[sn]
+                    \. "; first used for subproject " . s:cfg.sprj_snames[sn]
             endif
             " Add valid shortname to the map
-            let s:cfg.shortnames[sn] = sprj_name
+            let s:cfg.sprj_snames[sn] = sprj_name
         endif
 
     endfor
@@ -721,27 +743,12 @@ endfu
 " Make sure the fps prj dir contains everything that's required.
 " Pre-condition: We're in the prj dir.
 fu! s:validate_prj()
-    " Ensure existence of .cache and .tmp dirs.
-    " TODO: Do we want to add something to s:cfg for these, or at least create
-    " symbolic names for the relative paths?
-    for dir in ['.tmp', '.cache', '.cache/file-lists']
-        let pi = s:get_path_info(dir)
-        if pi.type == ''
-            " Create directory, creating intermediate paths as required.
-            call mkdir(dir, "p")
-        elseif pi.type == 'f'
-            throw "Refusing to overwrite existing file: " . getcwd() . '/' . dir
-        elseif pi.type == 'd' && pi.readonly
-            throw "Directory " . getcwd() . '/' . dir . " must be writable."
-        endif
-    endfor
 endfu
 " Pre-condition: In plugin dir.
 " TODO: UNDER DEVELOPMENT
 fu! s:cache_listfiles(force_refresh)
     for [sprj_name, sprj] in items(s:cfg.sprjs)
-        " .cache/listfile-{sprj}
-        let lf = '.cache/listfile-' . sprj_name
+        let lf = sprj.listfile
         let lf_readable = filereadable(lf)
         let sf = s:sf_create()
         try
@@ -765,25 +772,26 @@ fu! s:cache_listfiles(force_refresh)
                 "echo "files_raw: " . string(files_raw)
                 if v:shell_error != 0
                     throw "Encountered error attempting to build listfile `" . lf . "' for subproject "
-                        \. self.name . ": Shell error code=" . v:shell_error
+                        \. sprj_name . ": Shell error code=" . v:shell_error
                 endif
                 " Write the listfile.
                 " Note: We must set 'shellslash' for canonicalization.
                 call sf.setopt('shellslash', 1, {'boolean': 1})
                 " Build canonicalized list within loop.
                 let files = []
-                let flags = {}
-                let pathconv = self.opt.get('pathconv', flags)
-                let do_pathconv = !flags.unset
+                " TODO: Decide whether to keep some sort of path conversion.
+                "let flags = {}
+                "let pathconv = self.opt.get('pathconv', flags)
+                "let do_pathconv = !flags.unset
                 for file_raw in files_raw
-                    if do_pathconv
-                        " TODO: Either avoid object for this
-                        " performance-critical conversion, or perhaps cache
-                        " both internal and external forms to avoid conversion
-                        " altogether...
-                        let file_raw = pathconv.convert_path(file_raw, 'in')
-                    endif
-                    let file_raw = s:canonicalize_path(file_raw, root)
+                    "if do_pathconv
+                    "    " TODO: Either avoid object for this
+                    "    " performance-critical conversion, or perhaps cache
+                    "    " both internal and external forms to avoid conversion
+                    "    " altogether...
+                    "    let file_raw = pathconv.convert_path(file_raw, 'in')
+                    "endif
+                    let file_raw = s:canonicalize_path(file_raw, sprj.root)
                     " Add canonical name to list.
                     call add(files, file_raw)
                 endfor
@@ -837,9 +845,8 @@ fu! s:prj_init(force_refresh, p_name, ...)
         " Move to the plugin dir for post-processing and validation.
         exe 'cd ' . s:cfg.fps_dir
         call s:post_process_config()
-        call s:validate_prj()
-        " Cache (creating if necessary) filelists.
-        "call s:cache_listfiles()
+        " Cache (creating if necessary) listfiles.
+        call s:cache_listfiles(a:force_refresh)
         echo "cfg: " . string(s:cfg)
     finally
         call sf.destroy()
