@@ -567,15 +567,38 @@ endfu
 "<<<
 
 " >>> Functions used to start/stop/refresh the plugin
+" --Project directory structure--
+" .fps/
+"     config
+"     find-{sp1_name}
+"     .
+"     .
+"     cache/
+"         listfiles/
+"             {sp1_name}
+"             .
+"             .
+"     tmp/
+"
+
+let s:default_opt = {
+    \'maxgrepsize': 4095,
+    \'grepprg': 'grep -n',
+    \'grepformat': '%f:%l:%m,%f:%l%m,%f  %l%m'
+\}
+
 " TODO: Don't hardcode this: allow user to set a global option (e.g.,
 " g:fps_project_basename) so he can pick something that won't conflict.
-let s:fps_dir_basename = '.fps'
-let s:config_basename = 'config'
+let s:C_fps_dir = '.fps'
+let s:C_config_file = 'config'
+let s:C_tmp_dir = 'tmp'
+let s:C_cache_dir = 'cache'
+let s:C_listfiles_dir = 'cache/listfiles'
 fu! s:find_prj_dir()
     " Temporarily clear 'path' to prevent searching anywhere but up from cwd
     let path_save = &path
     set path=
-    let fps_dir = finddir(s:fps_dir_basename, ';')
+    let fps_dir = finddir(s:C_fps_dir, ';')
     let &path = path_save
     if empty(fps_dir)
         throw "Can't find project root."
@@ -588,7 +611,7 @@ fu! s:find_prj_dir()
     " trailing `/component/'.
     let s:cfg.prj_root = fnamemodify(fps_dir, ':p:h:h') . '/'
     let s:cfg.fps_dir = fnamemodify(fps_dir, ':p')
-    let s:cfg.config_file = s:cfg.fps_dir . s:config_basename
+    let s:cfg.config_file = s:cfg.fps_dir . s:C_config_file
     " TODO: Any more?
 endfu
 fu! s:validate_opt(section, p, v)
@@ -596,11 +619,6 @@ fu! s:validate_opt(section, p, v)
     " TODO: Perhaps additional validation
     return a:p =~ re_opt_names
 endfu
-let s:default_opt = {
-    \'maxgrepsize': 4095,
-    \'grepprg': 'grep -n',
-    \'grepformat': '%f:%l:%m,%f:%l%m,%f  %l%m'
-\}
 " Context: Add any sprj-specific defaults on top of the current global config
 " upon transitioning to sprj section.
 fu! s:add_sprj_opt_defaults(opt, sprj_name)
@@ -696,7 +714,7 @@ fu! s:post_process_config()
         let sprj.opt.find = fnamemodify(sprj.opt.find, ':p')
 
         " Ensure existence of cache and tmp dirs.
-        for dir in [{'name': 'tmp', 'path': 'tmp'}, {'name': 'cache', 'path': 'cache'}, {'name': 'listfiles', 'path': 'cache/listfiles'}]
+        for dir in [{'name': 'tmp', 'path': s:C_tmp_dir}, {'name': 'cache', 'path': s:C_cache_dir}, {'name': 'listfiles', 'path': s:C_listfiles_dir}]
             let [name, path] = [dir.name, dir.path]
             let pi = s:get_path_info(path)
             if pi.type == ''
