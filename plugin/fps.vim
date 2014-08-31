@@ -624,11 +624,12 @@ endfu
 fu! s:add_sprj_opt_defaults(opt, sprj_name)
     let a:opt.find = 'find-' . a:sprj_name
 endfu
-fu! s:process_config()
+fu! s:process_config(sp_filter)
     " TODO: Perhaps relative?
     if !filereadable(s:cfg.config_file)
         throw "Can't read global config file " . s:cfg.config_file
     endif
+    let s:cfg.has_filter = !empty(a:sp_filter)
     " TODO: Initialize each 
     let s:cfg.sprjs = {}
     let s:cfg.sprj_names = []
@@ -642,19 +643,20 @@ fu! s:process_config()
     " Note: Leading whitespace permitted, but whitespace around = not ignored
     let re_propdef = '^\s*\(\i\+\)\s*=\s*\([''"]\?\)\(.\{-}\)\2\s*$'
     let lineno = 0
+    let skipping_section = 0
     for line in readfile(s:cfg.config_file)
         let lineno += 1
-        if line =~ re_comment
-            " Skip comment
-            continue
-        elseif line =~ re_propdef
-            let [_, p, q, v; rest] = matchlist(line, re_propdef)
-            " Let validate throw...
-            call s:validate_opt(section, p, v)
-            let opt[p] = v
-        elseif line =~ re_section
+        if line =~ re_section
+            echomsg "Inside section"
             let s = substitute(line, re_section, '\1', '')
-            if has_key(s:cfg.sprjs, s)
+            if s:cfg.has_filter
+                if index(a:sp_filter, s) == -1
+                    let skipping_section = 1
+                    continue
+                else
+                    let skipping_section = 0
+                endif
+            elseif has_key(s:cfg.sprjs, s)
                 throw "Multiple definitions for section " . s
             endif
             " Initialize sp opt from global.
@@ -663,8 +665,19 @@ fu! s:process_config()
             call s:add_sprj_opt_defaults(opt, s)
             let s:cfg.sprjs[s] = {'opt': opt}
             " Keep track of sp order
+            echomsg "Adding..."
             call add(s:cfg.sprj_names, s)
             let section = s
+        elseif skipping_section
+            continue
+        elseif line =~ re_comment
+            " Skip comment
+            continue
+        elseif line =~ re_propdef
+            let [_, p, q, v; rest] = matchlist(line, re_propdef)
+            " Let validate throw...
+            call s:validate_opt(section, p, v)
+            let opt[p] = v
         else
             " Something illegal
             throw "Unexpected input in config file at line " . lineno . ": " . line
@@ -676,8 +689,6 @@ fu! s:is_abs_path(path)
     " TODO: This may not cover all corner cases... (Network paths?) Perhaps take 'shellslash' on Windows into account?
     return a:path =~? '^\%([a-z]:\)\?[\\/]'
 endfu
-" Check for mandatory options, and set some file paths...
-" TODO: Perhaps combine this with validate_prj.
 " Directory Assumption: In plugin dir
 fu! s:post_process_config()
     " Initialize map of short -> long names to be built in loop.
@@ -751,6 +762,55 @@ fu! s:post_process_config()
         endif
 
     endfor
+
+    " Create patterns from longnames
+    let s:cfg.longpats = s:process_longnames(s:cfg.sprj_names)
+
+endfu
+" Process the long options to determine the portions required for
+" uniqueness.
+" Take raw input array of longnames and return array of the following:
+" {'name': <longname>, 're': <regex>}
+fu! s:process_longnames(longnames)
+    " Caveat: Copy the input array before destructive sort.
+    let longnames = a:longnames[:]
+    echo string(longnames)
+    call sort(longnames)
+    let ln = len(longnames)
+    let i = 1
+    let reqs = [matchstr(longnames[0], '^.')]
+    while i < ln
+        " Get common portion + 1 char (if possible)
+        let ml = matchlist(longnames[i], '\(\%[' . longnames[i-1] . ']\)\(.\)\?')
+        let [cmn, nxt] = ml[1:2]
+        " Is it possible we need to lengthen previous req?
+        if len(cmn) >= len(reqs[i-1])
+            " Can we lengthen previous req?
+            if len(reqs[i-1]) < len(longnames[i-1])
+                " Set to common portion + 1 char (if possible)
+                let reqs[i-1] = matchstr(longnames[i-1], cmn . '.\?')
+            endif
+        endif
+        " Take only as much of current as is required for uniqueness:
+        " namely, common portion + 1 char.
+        call add(reqs, cmn . nxt)
+        let i = i + 1
+    endwhile
+    " Build an array of patterns and corresponding indices.
+    " Note: Arrays reqs and longnames are parallel.
+    let longpats = []
+    let i = 0
+    while i < ln
+        let re = reqs[i]
+        " Is the long name longer than the required portion?
+        if len(longnames[i]) > len(reqs[i])
+            " Append the optional part within \%[...]
+            let re .= '\%[' . longnames[i][len(reqs[i]):] . ']'
+        endif
+        call add(longpats, {'name': longnames[i], 're': re})
+        let i = i + 1
+    endwhile
+    return longpats
 endfu
 fu! s:get_path_info(path)
     let fr = filereadable(a:path)
@@ -758,12 +818,7 @@ fu! s:get_path_info(path)
     let id = isdirectory(a:path)
     return {'type': id ? 'd' : (fr || fw) ? 'f' : '', 'readonly': !fw}
 endfu
-" Make sure the fps prj dir contains everything that's required.
-" Pre-condition: We're in the prj dir.
-fu! s:validate_prj()
-endfu
 " Pre-condition: In plugin dir.
-" TODO: UNDER DEVELOPMENT
 fu! s:cache_listfiles(force_refresh)
     for [sprj_name, sprj] in items(s:cfg.sprjs)
         let lf = sprj.listfile
@@ -853,19 +908,21 @@ fu! s:cache_listfiles(force_refresh)
 
     endfor
 endfu
-fu! s:prj_init(force_refresh, p_name, ...)
-    let s:cfg = {}
+fu! s:prj_init(force_refresh, sp_filter)
+    echo string(a:sp_filter)
     " TODO: Set cdpath?
     call s:find_prj_dir()
     let sf = s:sf_create()
     try
-        call s:process_config()
+        call s:process_config(a:sp_filter)
         " Move to the plugin dir for post-processing and validation.
         exe 'cd ' . s:cfg.fps_dir
         call s:post_process_config()
         " Cache (creating if necessary) listfiles.
         call s:cache_listfiles(a:force_refresh)
-        echo "cfg: " . string(s:cfg)
+        if exists('g:fps_debug') && g:fps_debug
+            echo "cfg: " . string(s:cfg)
+        endif
     finally
         call sf.destroy()
     endtry
@@ -874,36 +931,29 @@ endfu
 " <<<
 " >>> Functions used to start/stop/refresh the plugin
 " Inputs:
-"   [<sp_spec>...] <p_name>
+"   [<sp_spec>...]
 fu! s:open(bang, ...)
     " TODO: Close any open?
-    call s:prj_init(a:bang == '!', a:000[-1], a:000[0:-2])
+    call s:prj_init(a:bang == '!', a:000)
 endfu
 
 fu! s:reopen(bang)
     " Close any currently open project.
-    if !exists('s:prj') || empty(s:prj)
+    " TODO: Do we need a disable or loaded flag?
+    if !exists('s:cfg')
         throw "No open project. :help FPSOpen"
     endif
     let args = [a:bang]
-    " Note: Pass true for 'include disabled' flag to ensure that an sp
-    " disabled due to error will be enabled if error has been fixed.
-    call extend(args, map(s:prj.get_all_sps(1), '"--" . v:val.name'))
-    call add(args, s:prj.name)
+    " Note: If filter active, it's represented by sprj_names
+    call extend(args, s:cfg.has_filter ? s:cfg.sprj_names : [])
     " Invoke open.
-    " TODO: Could have prj keep up with whether it was invoked with a filter,
-    " and if not, avoid passing a filter consisting of all sp's. Would be
-    " difference without distinction unless user had added sp's to global
-    " config since prior open...
     call call('s:open', args)
 endfu
 
 fu! s:close()
-    if exists('s:prj') && !empty(s:prj)
-        call s:prj.close()
-        unlet! s:prj
-        " TODO: General cleanup. E.g., delete commands (though this might be
-        " handled by prj.close()).
+    if exists('s:cfg')
+        " TODO: General cleanup. E.g., delete commands
+        unlet! s:cfg
     endif
 endfu
 " <<<
@@ -2831,7 +2881,7 @@ endfu
 " it too soon.
 " Open project (or subset thereof if sp specs are given), forcing file refresh
 " iff bang supplied.
-com! -bang -nargs=+ FPSOpen call s:open(<q-bang>, <f-args>)
+com! -bang -nargs=* FPSOpen call s:open(<q-bang>, <f-args>)
 " Reopen current project (taking into account any subset specified in
 " FPSOpen), forcing file refresh iff bang supplied.
 com! -bang -nargs=0 FPSReopen call s:reopen(<q-bang>)
