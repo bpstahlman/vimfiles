@@ -623,7 +623,9 @@ fu! s:process_config(sp_filter)
             let opt = deepcopy(g_opt)
             " Add any sprj-specific defaults.
             call s:add_sprj_opt_defaults(opt, s)
-            let s:cfg.sprjs[s] = {'opt': opt}
+            " Design Decision: Store name within object itself, since not all
+            " clients will be accessing by key.
+            let s:cfg.sprjs[s] = {'name': s, 'opt': opt}
             " Keep track of sp order
             echomsg "Adding..."
             call add(s:cfg.sprj_names, s)
@@ -887,6 +889,40 @@ fu! s:prj_init(force_refresh, sp_filter)
         call sf.destroy()
     endtry
 
+endfu
+" <<<
+" >>> Functions used to work with prj and sprjs
+fu! s:get_sprj(name)
+    let sp_name = s:get_name(a:name)
+    if sp_name != ''
+        return s:cfg.sprjs[sp_name]
+    else
+        " TODO: Throw or return something empty?
+        throw "Invalid subproject specification: `" . a:name . "'"
+    endif
+endfu
+" Takes a short or long name (s:x or l:somename) and returns corresponding
+" sprj
+fu! s:get_name(spec)
+    let [is_short, name] = [a:spec[0] == 's', a:spec[2:]]
+    if is_short
+        if has_key(s:cfg.snames, name)
+            return s:cfg.snames[name]
+        endif
+    else
+        " Look for name in self.longpats
+        for lpat in s:cfg.longpats
+            if name ==# lpat.name || name =~# lpat.re
+                return lpat.name
+            elseif name <# lpat.name
+                " We've passed the last possible match.
+                break
+            endif
+        endfor
+    endif
+    " Not found!
+    " TODO: Throw exception?
+    return ''
 endfu
 " <<<
 " >>> Functions used to start/stop/refresh the plugin
@@ -1587,16 +1623,8 @@ fu! s:parse_spec(opt, throw)
         let i = 0
         for opt in opts
             let is_short = i < num_short_opts
-            let sprj = s:prj.get_sp((is_short ? 's:' : 'l:') . opt)
-            " TODO: How to handle invalid specs? Originally, just skipped, but
-            " perhaps, in accordance with Design Decision above, we should
-            " abort...
-            " Yes! Need to abort, to prevent this seeming like unconstrained
-            " search!
-            if empty(sprj)
-                call s:warn("Invalid subproject spec: " . (is_short ? '-' : '--') . opt)
-                continue
-            endif
+            " UNDER CONSTRUCTION!!!!
+            let sprj = s:get_sprj((is_short ? 's:' : 'l:') . opt)
             " Add sprj to list if not already added.
             if (!has_key(dup, sprj.name))
                 call add(sprjs, sprj)
@@ -1626,7 +1654,7 @@ fu! s:process_spec(spec, has_glob, partial, throw)
     else
         " No subproject constraints
         " TODO: Better way to handle unconstrained. Perhaps just empty list?
-        let sprjs = s:prj.get_all_sps()
+        let sprjs = values(s:cfg.sprjs)
     endif
     if !a:has_glob
         return sprjs
