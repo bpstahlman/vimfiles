@@ -1,531 +1,4 @@
-
-" >>> Functions related to project/subproject object representations
-fu! s:prj_create(force_refresh, p_name, ...)
-    let sp_filts = a:0 > 0 ? a:1 : []
-    " Create dictionary to encapsulate the project config
-    " spsel - Object facilitating access to individual sp's.
-    " sprjs - Dict containing the following
-    "   rootdir
-    "   files
-    "   opt
-    let prj = {'name': a:p_name, 'spsel': {}, 'sprjs': {}}
-    " Convert a short or long partial name to corresponding subproject
-    " TODO: This should return an element of sprjs.
-    fu! prj.get_sp(name) dict
-        let sp_name = self.spsel.get_name(a:name)
-        if sp_name != ''
-            return self.sprjs[sp_name]
-        else
-            " TODO: Throw or return something empty?
-            throw "Invalid subproject specification: `" . a:name . "'"
-        endif
-    endfu
-    fu! prj.get_all_sps(...) dict
-        let inc_dis = a:0 > 0 ? a:1 : 0
-        let sprjs = []
-        call self.spsel.iter_init(inc_dis)
-        while self.spsel.iter_valid()
-            call add(sprjs, self.sprjs[self.spsel.iter_current()])
-            call self.spsel.iter_next()
-        endwhile
-        return sprjs
-    endfu
-    fu! prj.close() dict
-        " TODO
-    endfu
-    " Builds sp map.
-    fu! prj.open(force_refresh) dict
-        " Assumption: spsel member has already been created and initialized;
-        " thus, we've validated basic structure of g:fps_config.
-        let p_raw = g:fps_config.projects[self.name]
-        " Note: We don't need to preserve g_opt with s:var, as it will be
-        " accessible via prototype of project-level opt.
-        " TODO: Get this another way...
-        let ctx = {'proot': getcwd()}
-        let g_opt = s:opts_create(g:fps_config, 0, {}, ctx)
-        let p_opt = s:opts_create(p_raw, 1, g_opt, ctx)
-        " Note: Iterate spsel directly, as sprjs hasn't been built yet.
-        " While iterating, keep up with index into global subprojects list, of
-        " which the list processed by the iterator may be only a subset.
-        " Rationale: Making subprojects a Dictionary in global config would
-        " simplify implementation, but I want user to be able to order the
-        " subprojects, and specifying a List is the easiest way for him to do
-        " so.
-        call self.spsel.iter_init()
-        let sp_idx = 0
-        while self.spsel.iter_valid()
-            try
-                let sp_name = self.spsel.iter_current()
-                " Determine index into global subprojects list, of which the
-                " list processed by the iterator may be only a subset.
-                while p_raw.subprojects[sp_idx].name != sp_name
-                    let sp_idx += 1
-                endwhile
-                let sp_raw = p_raw.subprojects[sp_idx]
-                let sp_opt = s:opts_create(sp_raw, 2, p_opt, ctx)
-                " Accumulate the subproject.
-                let self.sprjs[sp_name] = s:sprj_create(self, sp_name, sp_opt, a:force_refresh)
-
-                "let dbg = {}
-                "echo "proot: " . sp_opt.get('proot', dbg)
-                "echo "flags: " . string(dbg)
-                "echo "bugaboo: " . sp_opt.get('bugaboo', dbg)
-                "echo "flags: " . string(dbg)
-                "echo "toodaloo: " . sp_opt.get('toodaloo', dbg)
-                "echo "flags: " . string(dbg)
-                "echo "foobaz: " . sp_opt.get('foobaz', dbg)
-                "echo "flags: " . string(dbg)
-            catch
-                " Invalid subproject
-                call s:warn("Warning: Skipping subproject `" . sp_name . " due to error: " . v:exception . " at " . v:throwpoint)
-                call self.spsel.disable(sp_name)
-            finally
-                call self.spsel.iter_next()
-                let sp_idx += 1
-            endtry
-        endwhile
-        " If no valid subprojects, no point in continuing...
-        if empty(self.sprjs)
-            throw "No valid subprojects. :help fps-config"
-        endif
-    endfu
-    " Iterator methods are mostly pass-throughs.
-    fu! prj.iter_init(...) dict
-        call call(self.spsel.iter_init, a:000, self.spsel)
-    endfu
-    fu! prj.iter_current() dict
-        return self.sprjs[self.spsel.iter_current()]
-    endfu
-    fu! prj.iter_valid() dict
-        return self.spsel.iter_valid()
-    endfu
-    fu! prj.iter_next() dict
-        call self.spsel.iter_next()
-    endfu
-    " Create the object that facilitates access to subprojects by name and via
-    " iterator.
-    let prj.spsel = s:spsel_create(a:p_name, sp_filts)
-    " Initialize the project (or subset thereof).
-    call prj.open(a:force_refresh)
-
-    return prj
-endfu
-fu! s:sprj_create(prj, name, opt, force_refresh)
-    let sprj = {'prj': a:prj, 'name': a:name, 'opt': a:opt}
-    " Canonicalize the filenames in listfile, converting to be relative to rootdir
-    " if possible.
-    " Format: Canonical form uses `/', and has no `.' or `..' components, leading
-    " or otherwise.
-    " Note: Nonexistent paths cannot be fully canonicalized; they will be retained
-    " in list in partially canonicalized form: expand converts slashes but not .
-    " and ..
-    " Path Conversion: If user specified path mappings in the 'pathconv' option,
-    " they will be tried as well; only the first applicable mapping is applied.
-    " Caveat: If there happen to be special chars in the pathname (unlikely),
-    " expand will attempt to expand, so it's best to ensure pathnames don't have
-    " `*', `**', $ENV, etc...
-    " Return: The canonicalized list.
-    " TODO: Have this done once at Refresh and initial load and saved in a
-    " persistent structure.
-    " Exceptions: Leave for caller.
-    " TODO: Perhaps replace sp_cfg/sp_opt with an sp_idx.
-    fu! sprj.cache_listfile(force_refresh)
-        " TODO: Possibly check for 'unset' on root, and avoid moving?
-        let root = self.opt.get('root')
-        let listfile_path = self.get_listfile_path()
-        let listfile_readable = filereadable(listfile_path)
-        let sf = s:sf_create()
-        try
-            " Both listfile generation and file canonicalization require us to
-            " be in root dir.
-            call sf.pushd(root)
-            " Do we need to create/update the listfile?
-            " Assumption: Either the if or elseif *will* be entered.
-            if !listfile_readable || a:force_refresh
-                " Caveat: Originally, used :! and > to put results in
-                " listfile; this can be problematic in some environments,
-                " due to need for abs path conversion. Circumvent issues by
-                " using system()/writefile() combination.
-                " Note: Alternatively, could use convert_path mechanism.
-                " TODO: Should we impose these sorts of constraints on
-                " (possibly system-dependent v:shell_error)?
-                " Assumption: Nonzero will never be returned for success, even
-                " if the external command doesn't give a meaningful error
-                " code...
-                silent! let files_raw = split(system(self.opt.get('find')), '\n')
-                "echo "files_raw: " . string(files_raw)
-                if v:shell_error != 0
-                    throw "Encountered error attempting to build listfile `" . listfile_path . "' for subproject "
-                        \. self.name . ": Shell error code=" . v:shell_error
-                endif
-                " Write the listfile.
-                " Note: We must set 'shellslash' for canonicalization.
-                call sf.setopt('shellslash', 1, {'boolean': 1})
-                " Build canonicalized list within loop.
-                let files = []
-                let flags = {}
-                let pathconv = self.opt.get('pathconv', flags)
-                let do_pathconv = !flags.unset
-                for file_raw in files_raw
-                    if do_pathconv
-                        " TODO: Either avoid object for this
-                        " performance-critical conversion, or perhaps cache
-                        " both internal and external forms to avoid conversion
-                        " altogether...
-                        let file_raw = pathconv.convert_path(file_raw, 'in')
-                    endif
-                    let file_raw = s:canonicalize_path(file_raw, root)
-                    " Add canonical name to list.
-                    call add(files, file_raw)
-                endfor
-                " TODO: Make sort optional so we can skip if user's find
-                " ensures sorted.
-                " TODO: Should we uniquify? Doing so could permit some optimizations
-                " (e.g., find_insert_idx).
-                call sort(files)
-                " Save the file to permit processing to be skipped next time.
-                let v:errmsg = ''
-                silent! let status = writefile(files, listfile_path)
-                if status == -1 || v:errmsg != ''
-                    " Warn user that listfile can't be saved for next time...
-                    " Rationale: Inability to write the file needn't disable
-                    " the subproject; although it's expensive, we can re-run
-                    " find whenever sp is opened.
-                    call s:warn("Unable to write listfile `" . listfile_path . "' for subproject "
-                        \. self.name . " due to the following error: " . v:errmsg . ". Until problem is corrected,"
-                        \. " subsequent subproject opens may take slightly longer than necessary.")
-                    " Note: delete() returns 0 on success, 1 on failure, so we
-                    " could warn on failure, but there's really no reason to
-                    if delete(listfile_path) == 1
-                        " Question: Does this warrant separate warning?
-                        call s:warn("Unable to delete stale listfile `" . listfile_path . "' for subproject " . self.name)
-                    endif
-                endif
-            elseif listfile_readable
-                " No need to run find or process listfile; simply read and use.
-                let files = readfile(listfile_path)
-            endif
-        " TODO: Probably remove the catch...
-        "catch
-            " TODO: Perhaps a Rethrow method to be used everywhere instead of
-            " this (for stripping extra Vim(echoerr) at head).
-            " Alternatively, a display function to strip them all from v:exception
-            " before output...
-            "echoerr v:exception
-        finally
-            call sf.destroy()
-        endtry
-        " Cache processed filelist on sprj object.
-        let self.files = files
-    endfu
-    " TODO: !!!! For sake of efficiency, define all dict functions separately,
-    " then add to the objects at construction... (Creates 1 instance instead
-    " of multiple.)
-    " Like tempname, but taking cachedir into account.
-    " Design Decision: In many cases, it would be ok to use a fixed name for
-    " the script; however, cachedir can be a global temp, or even the user's
-    " subjproject dir, so I'm erring on the side of caution by finding a
-    " unique filename.
-    fu! sprj.get_script_temppath()
-        let base = 'fpstmp'
-        " TODO: STOPPED HERE! Decide on directory format: store with trailing
-        " / or not: should relative to root be stored as '' or './'?
-        let cachedir = self.opt.get('cachedir')
-        let path = cachedir . '/' . base
-        let i = 1
-        while glob(path)
-            if i > 100
-                throw "Can't find suitable name for temporary file in `" . cachedir  . "'"
-            endif
-            let path = base . printf("%03d", i)
-            let i += 1
-        endwhile
-        " Write a placeholder to make sure we can write here.
-        " Note: Subsequent calls to writefile will overwrite. Caller responsible
-        " for deleting.
-        if writefile([], path, 1)
-            throw "Can't write temporary file in `" . getcwd() . "'"
-        endif
-        return path
-    endfu
-    fu! sprj.get_listfile_path()
-        " TODO: can/will cachedir have trailing slash?
-        let listfile_name = self.opt.get('cachedir') . '/' . self.prj.name . '-' . self.name . '-' . self.opt.get('listfile')
-    endfu
-    " Build cache, forcing refresh if appropriate.
-    call sprj.cache_listfile(a:force_refresh)
-    return sprj
-endfu
-
-fu! s:spsel_create(p_name, ...)
-    let sp_filts = a:0 > 0 ? a:1 : []
-    let spsel = {'longnames': [], 'longpats': [], 'shortnames': {}, 'disabled': {}, 'iter_idx': 0}
-    fu! spsel.disable(name)
-        let self.disabled[a:name] = 1
-    endfu
-    fu! spsel.enable(name) dict
-        " TODO: Perhaps delete...
-        let self.disabled[a:name] = 0
-    endfu
-    fu! spsel.is_disabled(name) dict
-        return has_key(self.disabled, a:name) && self.disabled[a:name]
-    endfu
-    fu! spsel.get_name(spec) dict
-        let [is_short, name] = [a:spec[0] == 's', a:spec[2:]]
-        if is_short
-            if has_key(self.shortnames, name)
-                return self.shortnames[name]
-            endif
-        else
-            " Look for name in self.longpats
-            for lpat in self.longpats
-                if name ==# lpat.name || name =~# lpat.re
-                    return lpat.name
-                elseif name <# lpat.name
-                    " We've passed the last possible match.
-                    break
-                endif
-            endfor
-        endif
-        " Not found!
-        " TODO: Throw exception?
-        return ''
-    endfu
-    " Iterator methods used to iterate the longnames in order.
-    fu! spsel.iter_init(...) dict
-        let self.iter = {'inc_dis': a:0 > 0 ? a:1 : 0, 'idx': -1}
-        " Use iter_next() to advance, throwing away return value.
-        call self.iter_next()
-    endfu
-    fu! spsel.iter_current() dict
-        return self.iter.idx == -2 ? '' : self.longnames[self.iter.idx]
-    endfu
-    fu! spsel.iter_next() dict
-        if self.iter.idx == -2
-            " Already passed end.
-            return 0
-        endif
-        " Is there a next element?
-        let [inc_dis, i, next, len] = [self.iter.inc_dis, self.iter.idx, -2, len(self.longnames)]
-        while i < len - 1
-            let i += 1 " pre-increment
-            if inc_dis || !self.is_disabled(self.longnames[i])
-                let next = i
-                break
-            endif
-        endwhile
-        " Save next, which may be -2, signifying iteration complete.
-        let self.iter.idx = next
-        return next != -2
-    endfu
-    fu! spsel.iter_valid() dict
-        return self.iter.idx != -2
-    endfu
-    " Extract information from global plugin config.
-    fu! spsel.init(p_name, ...) dict
-        let sp_filts = a:0 > 0 ? a:1 : []
-        " Make sure there's at least 1 project
-        if !has_key(g:fps_config, 'projects')
-            throw "No projects defined."
-        endif
-        if type(g:fps_config.projects) != 4
-            throw "Invalid project definition. Must be Dictionary."
-        endif
-        " Does the named project exist?
-        if !has_key(g:fps_config.projects, a:p_name)
-            throw "No configuration found. :help TODO fps_config???"
-        endif
-        " TODO: build_opts will throw on (eg) missing required args - handle
-        " somehow...
-        let p_raw = g:fps_config.projects[a:p_name]
-        " Make sure there's at least 1 subproject
-        if !has_key(p_raw, 'subprojects')
-            throw "No subprojects defined for project " . a:p_name
-        endif
-        if type(p_raw.subprojects) != 3
-            throw "Invalid subprojects definition for project " . a:p_name . ". Must be List."
-        endif
-
-        " Short (single-char) names stored in a hash
-        " Long names stored in sorted array of patterns employing \%[...]
-        let shortnames = {}
-        let longnames = []
-        let lname_to_index = {}
-        " TODO: I'm thinking perhaps I want subprojects to be ordered: i.e.,
-        " in List of dicts with mandatory name property.
-        " Rationale: As it is now, user can't control order in which sp's are
-        " searched.
-        for sp_raw in p_raw.subprojects
-            try
-                if !has_key(sp_raw, 'name')
-                    throw "Subproject missing name property."
-                endif
-                let sp_name = sp_raw.name
-                " TODO: Don't hardcode these patterns...
-                if (sp_name !~ '^[a-zA-Z0-9_]\+$')
-                    throw "Invalid subproject name `" . sp_name
-                        \. "': must be sequence of characters matching [a-zA-Z0-9_]."
-                else
-                    if !has_key(lname_to_index, sp_name)
-                        let lname_to_index[sp_name] = sp_name
-                        call add(longnames, sp_name)
-                    else
-                        call s:warn("Warning: Name " . sp_name . " used multiple times. All but first usage ignored.")
-                    endif
-                endif
-                if has_key(sp_raw, 'shortname')
-                    if (sp_raw.shortname !~ '^[a-zA-Z0-9_]$')
-                        call s:warn("Ignoring invalid shortname `" . sp_raw.shortname
-                            \. "': must be single character matching [a-zA-Z0-9_].")
-                    else
-                        if !has_key(shortnames, sp_raw.shortname)
-                            let shortnames[sp_raw.shortname] = sp_name
-                        else
-                            call s:warn("Warning: Name " . sp_raw.shortname . " used multiple times. All but first usage ignored.")
-                        endif
-                    endif
-                endif
-            catch
-                " Invalid subproject
-                call s:warn("Warning: Skipping invalid subproject config `" . sp_name . "': " . v:exception . " at " . v:throwpoint)
-            endtry
-        endfor
-        " If no valid subprojects, no point in continuing...
-        if empty(longnames)
-            throw "No valid subprojects. :help fps-config"
-        endif
-        " Mapping of short names to long.
-        let self.shortnames = shortnames
-        " Array defining enumeration order.
-        let self.longnames = longnames
-        " Array of dicts used to perform longname matching.
-        let self.longpats = self.process_longnames(longnames)
-        if !empty(sp_filts)
-            " Constrain project to subset of subprojects.
-            call self.apply_sp_filter(sp_filts)
-        endif
-    endfu
-    " Input: List of strings of following form:
-    " ['s:shortopt1', 'l:longopt1', 'l:longopt2', 's:shortopt2']
-    fu! spsel.apply_sp_filter(sp_filts) dict
-        if empty(a:sp_filts)
-            return
-        endif
-        " Build existence hash from input opts.
-        let sel_names = {}
-        for sp_filt in a:sp_filts
-            let [is_short, name] = [sp_filt[0] == 's', sp_filt[2:]]
-            if is_short && has_key(self.shortnames, name)
-                " Set key corresponding to longname.
-                let sel_names[self.shortnames[name]] = 1
-            else
-                " Get full long name.
-                let longname = self.get_name(sp_filt)
-                if longname == ''
-                    " TODO: Right way to handle?
-                    throw "Invalid subproject specification: " . name
-                else
-                    " Set key corresponding to *full* longname.
-                    let sel_names[name] = 1
-                endif
-            endif
-        endfor
-        " Use sel_names existence hash to cull entries from
-        " shortnames Dict and longnames List.
-        for [shortname, longname] in items(self.shortnames)
-            if !has_key(sel_names, longname)
-                call remove(self.shortnames, shortname)
-            endif
-        endfor
-        " Loop over longpats from end to simplify removal.
-        let i = len(self.longpats) - 1
-        while i >= 0
-            if !has_key(sel_names, self.longpats[i].name)
-                call remove(self.longpats, i)
-            endif
-            let i -= 1
-        endwhile
-        " Loop over longnames from end to simplify removal.
-        let i = len(self.longnames) - 1
-        while i >= 0
-            if !has_key(sel_names, self.longnames[i])
-                call remove(self.longnames, i)
-            endif
-            let i -= 1
-        endwhile
-    endfu
-    " Private utility function
-    " Process the long options to determine the portions required for
-    " uniqueness.
-    " Take raw input array of longnames and return array of the following:
-    " {'name': <longname>, 're': <regex>}
-    fu! spsel.process_longnames(longnames) dict
-        " Caveat: Copy the input array before destructive sort.
-        let longnames = a:longnames[:]
-        call sort(longnames)
-        let ln = len(longnames)
-        let i = 1
-        let reqs = [matchstr(longnames[0], '^.')]
-        while i < ln
-            " Get common portion + 1 char (if possible)
-            let ml = matchlist(longnames[i], '\(\%[' . longnames[i-1] . ']\)\(.\)\?')
-            let [cmn, nxt] = ml[1:2]
-            " Is it possible we need to lengthen previous req?
-            if len(cmn) >= len(reqs[i-1])
-                " Can we lengthen previous req?
-                if len(reqs[i-1]) < len(longnames[i-1])
-                    " Set to common portion + 1 char (if possible)
-                    let reqs[i-1] = matchstr(longnames[i-1], cmn . '.\?')
-                endif
-            endif
-            " Take only as much of current as is required for uniqueness:
-            " namely, common portion + 1 char.
-            call add(reqs, cmn . nxt)
-            let i = i + 1
-        endwhile
-        " Build an array of patterns and corresponding indices.
-        " Note: Arrays reqs and longnames are parallel.
-        let longpats = []
-        let i = 0
-        while i < ln
-            let re = reqs[i]
-            " Is the long name longer than the required portion?
-            if len(longnames[i]) > len(reqs[i])
-                " Append the optional part within \%[...]
-                let re .= '\%[' . longnames[i][len(reqs[i]):] . ']'
-            endif
-            call add(longpats, {'name': longnames[i], 're': re})
-            let i = i + 1
-        endwhile
-        return longpats
-    endfu
-    " Initialize.
-    call spsel.init(a:p_name, sp_filts)
-    return spsel
-endfu
-
-fu! Test_p_obj()
-    let prj = s:prj_create('asec', ['l:php', 's:f', 'l:boo', 's:z'])
-    let spsel = prj.spsel
-    " Dynamically disable one.
-    call spsel.disable('php')
-    echomsg "Iterating normally..."
-    call spsel.iter_init()
-    while spsel.iter_valid()
-        echo spsel.iter_current()
-        call spsel.iter_next()
-    endwhile
-    echomsg "Iterating all..."
-    call spsel.iter_init(1)
-    while spsel.iter_valid()
-        echo spsel.iter_current()
-        call spsel.iter_next()
-    endwhile
-endfu
-
-"<<<
-
-" >>> Functions used to start/stop/refresh the plugin
+" >>> Definitions
 " --Project directory structure--
 " .fps/
 "     config
@@ -553,6 +26,8 @@ let s:C_config_file = 'config'
 let s:C_tmp_dir = 'tmp'
 let s:C_cache_dir = 'cache'
 let s:C_listfiles_dir = 'cache/listfiles'
+" <<<
+" >>> Functions used to start/stop/refresh the plugin
 fu! s:find_prj_dir()
     " Temporarily clear 'path' to prevent searching anywhere but up from cwd
     let path_save = &path
@@ -649,6 +124,12 @@ endfu
 fu! s:is_abs_path(path)
     " TODO: This may not cover all corner cases... (Network paths?) Perhaps take 'shellslash' on Windows into account?
     return a:path =~? '^\%([a-z]:\)\?[\\/]'
+endfu
+fu! s:get_path_info(path)
+    let fr = filereadable(a:path)
+    let fw = filewritable(a:path)
+    let id = isdirectory(a:path)
+    return {'type': id ? 'd' : (fr || fw) ? 'f' : '', 'readonly': !fw}
 endfu
 " Directory Assumption: In plugin dir
 fu! s:post_process_config()
@@ -773,12 +254,6 @@ fu! s:process_longnames(longnames)
     endwhile
     return longpats
 endfu
-fu! s:get_path_info(path)
-    let fr = filereadable(a:path)
-    let fw = filewritable(a:path)
-    let id = isdirectory(a:path)
-    return {'type': id ? 'd' : (fr || fw) ? 'f' : '', 'readonly': !fw}
-endfu
 
 " Pre-condition: In plugin dir.
 fu! s:cache_listfile(sprj, force_refresh)
@@ -814,9 +289,6 @@ fu! s:cache_listfile(sprj, force_refresh)
             " Build canonicalized list within loop.
             let files = []
             " TODO: Decide whether to keep some sort of path conversion.
-            "let flags = {}
-            "let pathconv = self.opt.get('pathconv', flags)
-            "let do_pathconv = !flags.unset
             for file_raw in files_raw
                 "if do_pathconv
                 "    " TODO: Either avoid object for this
@@ -875,7 +347,7 @@ fu! s:cache_listfiles(force_refresh)
         call s:cache_listfile(sprj, a:force_refresh)
     endfor
 endfu
-fu! s:prj_init(force_refresh, sp_filter)
+fu! s:prj_init(sp_filter, force_refresh)
     let s:cfg = {}
     let sf = s:sf_create()
     try
@@ -935,7 +407,7 @@ endfu
 "   [<sp_spec>...]
 fu! s:open(bang, ...)
     " TODO: Close any open?
-    call s:prj_init(a:bang == '!', a:000)
+    call s:prj_init(a:000, a:bang == '!')
 endfu
 
 fu! s:reopen(bang)
@@ -1722,47 +1194,6 @@ fu! s:complete_filenames(arg_lead, cmd_line, cursor_pos)
 endfu
 " <<<
 " >>> Functions invoked by commands
-fu! s:refresh(...)
-    " Note: Input should be 0 or more specs represented as a single string.
-    " TODO: UNDER CONSTRUCTION!!!
-    let cmdline = !a:0 ? '' : a:1
-    " Parse cmdline into an array of specs (and hopefully, nothing else).
-    let [sprjs, argstr] = s:parse_cmdline(cmdline, 0)
-    echo sprjs
-    if !empty(argstr)
-        " Refresh command doesn't accept any non-spec args!
-        echoerr "Non pspec args not accepted by this command: " . argstr
-    endif
-    " TODO: Probably need something along the lines of sort_and_combine_pspecs
-    " here (to avoid multiple refreshes when same sp inadvertently specified
-    " multiple times); if so, need to parameterize sort_and_combine_pspecs to
-    " handle the case in which sprjs is a simple list of sp's rather than a
-    " list of objects, each of which contains an sprj and a list of files.
-    if empty(sprjs)
-        " No specs provided: refresh all subprojects...
-        let sprjs = values(s:cfg.sprjs)
-    endif
-    echo sprjs
-    let sf = s:sf_create()
-    try
-        for sprj in sprjs
-            " TODO - Fix this...
-            let root = sprj.root
-            " Note: An sf.cd (TODO) would make more sense here than pushd...
-            echo "About to call pushd " . getcwd()
-            call sf.pushd(root)
-            echo "Just called pushd " . getcwd()
-            call sprj.cache_listfile(sprj, 1)
-        endfor
-    "catch /Vim(echoerr)/
-        "echohl ErrorMsg|echomsg v:exception|echohl None
-    finally
-        echo "Calling destroy..."
-        call sf.destroy()
-        echo "Called destroy..."
-    endtry
-endfu
-
 " Input: List in following form...
 " [{sprj: <sprj>, files: <files>}, ...]
 " ...in which the sprj's are unordered and non-unique, with the same files
@@ -1927,16 +1358,9 @@ fu! s:do_int_grep(sf, pspecs, argstr, bang, use_ll, is_adding)
     let got_match = 0
     let add = a:is_adding ? 'add' : ''
     for pspec in a:pspecs
-        " TODO: Decide on this: caller has used convert_file_list_to_string to
-        " mutate the files member of sp_cfg. Is that best way? (Keep in mind
-        " that the mutated structure is not part of s:cfg, but a derivative.)
-        "let files = ''
-        "for file in sp_cfg.files
-        "    let files .= ' ' . fnameescape(file)
-        "endfor
         " Move to root of subproject to perform grep.
         " Rationale: File paths are relative to this directory.
-        call a:sf.pushd(pspec.sprj.opt.get('root'))
+        call a:sf.pushd(pspec.sprj.root)
 
         " Note: Always inhibit jump here, as that's handled by caller. Don't
         " use 'silent', as we want to see the periodic progress indicator
@@ -1986,8 +1410,8 @@ fu! s:do_ext_grep(sf, pspecs, argstr, bang, use_ll, is_adding)
         let scriptlines = []
         while idx < len && pspec_next.sprj is pspec.sprj
             " Accumulate another line for script
-            " TODO: Use grepprg option (parsing $* etc...)
-            call add(scriptlines, 'grep -n ' . a:argstr . ' ' . pspec_next.files)
+            " TODO: Use full grepprg option (parsing $* etc...)
+            call add(scriptlines, pspec.sprj.opt.grepprg . ' ' . a:argstr . ' ' . pspec_next.files)
             let idx += 1
             if idx < len
                 let pspec_next = a:pspecs[idx]
@@ -1995,7 +1419,6 @@ fu! s:do_ext_grep(sf, pspecs, argstr, bang, use_ll, is_adding)
         endwhile
         " Ready to process all batches for current sp.
         let sprj = pspec.sprj
-        call a:sf.setopt('grepprg', sprj.opt.grepprg)
         " Note: Plugin option grepformat corresponds to Vim option
         " 'errorformat' (because we're using cexpr et al.)
         call a:sf.setopt('errorformat', sprj.opt.grepformat)
@@ -2064,6 +1487,39 @@ fu! s:do_ext_grep(sf, pspecs, argstr, bang, use_ll, is_adding)
     return got_match
 endfu
 
+fu! s:refresh(...)
+    " Note: Input should be 0 or more specs represented as a single string.
+    " TODO: UNDER CONSTRUCTION!!!
+    let cmdline = !a:0 ? '' : a:1
+    " Parse cmdline into an array of specs (and hopefully, nothing else).
+    let [sprjs, argstr] = s:parse_cmdline(cmdline, 0)
+    if !empty(argstr)
+        " Refresh command doesn't accept any non-spec args!
+        echoerr "Non pspec args not accepted by this command: " . argstr
+    endif
+    " TODO: Probably need something along the lines of sort_and_combine_pspecs
+    " here (to avoid multiple refreshes when same sp inadvertently specified
+    " multiple times); if so, need to parameterize sort_and_combine_pspecs to
+    " handle the case in which sprjs is a simple list of sp's rather than a
+    " list of objects, each of which contains an sprj and a list of files.
+    if empty(sprjs)
+        " No specs provided: refresh all subprojects...
+        let sprjs = values(s:cfg.sprjs)
+    endif
+    let sf = s:sf_create()
+    try
+        for sprj in sprjs
+            " Note: An sf.cd (TODO) would make more sense here than pushd...
+            call sf.pushd(sprj.root)
+            call sprj.cache_listfile(sprj, 1)
+        endfor
+    "catch /Vim(echoerr)/
+        "echohl ErrorMsg|echomsg v:exception|echohl None
+    finally
+        call sf.destroy()
+    endtry
+endfu
+
 fu! s:grep(cmd, bang, cmdline)
     let sf = s:sf_create()
     try
@@ -2091,16 +1547,9 @@ fu! s:grep(cmd, bang, cmdline)
             echoerr "No file(s) to grep."
         endif
         if external
-            " TODO: pathconv can be defined per-sprj, so this can't go here,
-            " but I really don't want the expense of pathconv at all at grep
-            " time: if it needs to be done, should be done at load and
-            " cached...
-            "let flags = {}
-            "let pathconv = self.opt.get('pathconv', flags)
-            "if !flags.unset
-            "    " Perform any required path translations
-            "endif
-            " TODO: Where to configure max len? Also, calculate fixlen
+            " TODO: Calculate fixlen or ignore: note that the command-line is
+            " constructed in do_ext_grep, and I don't want duplicate logic for
+            " calculating - it's not worth it...
             " Note: xargify_pspecs handles sorting, combining, and uniquifying.
             let pspecs = s:xargify_pspecs(pspecs, 100)
         else
@@ -2565,57 +2014,6 @@ com! -bang -nargs=1 -complete=customlist,<SID>complete_filenames Lfindadd call s
 " The remainder of this file needn't be parsed.
 finish
 
-" >>> Code graveyard
-com! -nargs=* -complete=customlist,<SID>complete_filenames Spq call FA(<q-args>)
-" Quoted args play...
-com! -nargs=* QA FA <q-args>
-com! -nargs=+ FA call FA(<f-args>)
-com! -nargs=1 FA1 call FA(<f-args>)
-com! -nargs=1 QA1 call FA(<q-args>)
-com! -nargs=1 Eg call Eg(<f-args>)
-com! -nargs=1 Egr call Egr(<f-args>)
-com! -nargs=* CLR call CLR(<f-args>)
-com! -nargs=* CLG call CLG(<f-args>)
-fu! s:escape_args(args)
-    let s = ''
-    for arg in a:args
-        let s .= ' ' . shellescape(arg)
-    endfor
-    return s
-endfu
-fu! CLR(...)
-    echomsg 'Args: ' . s:escape_args(a:000)
-    exe '!C:/Users/stahlmanb/tmp/args.sh' . s:escape_args(a:000)
-endfu
-fu! CLG(...)
-    echomsg 'Args: ' . s:escape_args(a:000)
-    let gp_save = &l:grepprg
-    let &l:grepprg = 'C:/Users/stahlmanb/tmp/args.sh -n $* /dev/null'
-    exe 'grep ' . s:escape_args(a:000)
-    let &l:grepprg = gp_save
-endfu
-fu! Egr(cl)
-    exe '!C:/Users/stahlmanb/tmp/args.sh ' . a:cl
-endfu
-
-fu! FA(...)
-    for s in a:000
-        echon "|" . s . "|"
-    endfor
-endfu
-" Completion play...
-let ls = ["/usr/var/somefile.txt", "/usr/src/chicken-scheme/foo.c", "/usr/bin/someutil", "somedir/someotherdir/somefile.scm"]
-fu! Complete_customlist(A, L, P)
-    echomsg "Completing customlist`" . a:A . "', Leading part is `" . a:L . "'"
-    return g:ls
-endfu
-fu! Complete_custom(A, L, P)
-    echomsg "Completing custom `" . a:A . "', Leading part is `" . a:L . "'"
-    return join(g:ls, "\n")
-endfu
-com! -nargs=1 -complete=customlist,Complete_customlist CL call FA(<f-args>)
-com! -nargs=1 -complete=custom,Complete_custom C echo "foo"
-" <<<
 " >>> Running notes - (Probably should move this to a readme or something in
 "     Github)
 
