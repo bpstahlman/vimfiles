@@ -1,5 +1,4 @@
 
-
 " >>> Functions related to project/subproject object representations
 fu! s:prj_create(force_refresh, p_name, ...)
     let sp_filts = a:0 > 0 ? a:1 : []
@@ -780,105 +779,111 @@ fu! s:get_path_info(path)
     let id = isdirectory(a:path)
     return {'type': id ? 'd' : (fr || fw) ? 'f' : '', 'readonly': !fw}
 endfu
+
+" Pre-condition: In plugin dir.
+fu! s:cache_listfile(sprj, force_refresh)
+    let lf = a:sprj.listfile
+    let lf_readable = filereadable(lf)
+    let sf = s:sf_create()
+    try
+        " Both listfile generation and file canonicalization require us to
+        " be in sprj root dir.
+        call sf.pushd(a:sprj.root)
+        " Do we need to create/update the listfile?
+        " Assumption: Either the if or elseif *will* be entered.
+        if !lf_readable || a:force_refresh
+            " Caveat: Originally, used :! and > to put results in
+            " listfile; this can be problematic in some environments,
+            " due to need for abs path conversion. Circumvent issues by
+            " using system()/writefile() combination.
+            " Note: Alternatively, could use convert_path mechanism.
+            " TODO: Should we impose these sorts of constraints on
+            " (possibly system-dependent v:shell_error)?
+            " Assumption: Nonzero will never be returned for success, even
+            " if the external command doesn't give a meaningful error
+            " code...
+            silent! let files_raw = split(system(a:sprj.opt.find), '\n')
+            "echo "files_raw: " . string(files_raw)
+            if v:shell_error != 0
+                throw "Encountered error attempting to build listfile `" . lf . "' for subproject "
+                    \. a:sprj.name . ": Shell error code=" . v:shell_error
+            endif
+            " Write the listfile.
+            " Note: We must set 'shellslash' for canonicalization.
+            call sf.setopt('shellslash', 1, {'boolean': 1})
+            " Build canonicalized list within loop.
+            let files = []
+            " TODO: Decide whether to keep some sort of path conversion.
+            "let flags = {}
+            "let pathconv = self.opt.get('pathconv', flags)
+            "let do_pathconv = !flags.unset
+            for file_raw in files_raw
+                "if do_pathconv
+                "    " TODO: Either avoid object for this
+                "    " performance-critical conversion, or perhaps cache
+                "    " both internal and external forms to avoid conversion
+                "    " altogether...
+                "    let file_raw = pathconv.convert_path(file_raw, 'in')
+                "endif
+                let file_raw = s:canonicalize_path(file_raw, a:sprj.root)
+                " Add canonical name to list.
+                call add(files, file_raw)
+            endfor
+            " TODO: Make sort optional so we can skip if user's find
+            " ensures sorted.
+            " TODO: Should we uniquify? Doing so could permit some optimizations
+            " (e.g., find_insert_idx).
+            call sort(files)
+            " Save the file to permit processing to be skipped next time.
+            let v:errmsg = ''
+            silent! let status = writefile(files, lf)
+            if status == -1 || v:errmsg != ''
+                " Warn user that listfile can't be saved for next time...
+                " Rationale: Inability to write the file needn't disable
+                " the subproject; although it's expensive, we can re-run
+                " find whenever sp is opened.
+                call s:warn("Unable to write listfile `" . lf . "' for subproject "
+                    \. self.name . " due to the following error: " . v:errmsg . ". Until problem is corrected,"
+                    \. " subsequent subproject opens may take slightly longer than necessary.")
+                " Note: delete() returns 0 on success, 1 on failure, so we
+                " could warn on failure, but there's really no reason to
+                if delete(lf) == 1
+                    " Question: Does this warrant separate warning?
+                    call s:warn("Unable to delete stale listfile `" . lf . "' for subproject " . self.name)
+                endif
+            endif
+        elseif lf_readable
+            " No need to run find or process listfile; simply read and use.
+            let files = readfile(lf)
+        endif
+    " TODO: Probably remove the catch...
+    "catch
+        " TODO: Perhaps a Rethrow method to be used everywhere instead of
+        " this (for stripping extra Vim(echoerr) at head).
+        " Alternatively, a display function to strip them all from v:exception
+        " before output...
+        "echoerr v:exception
+    finally
+        call sf.destroy()
+    endtry
+    " Cache processed filelist on sprj object.
+    let a:sprj.files = files
+endfu
 " Pre-condition: In plugin dir.
 fu! s:cache_listfiles(force_refresh)
     for [sprj_name, sprj] in items(s:cfg.sprjs)
-        let lf = sprj.listfile
-        let lf_readable = filereadable(lf)
-        let sf = s:sf_create()
-        try
-            " Both listfile generation and file canonicalization require us to
-            " be in sprj root dir.
-            call sf.pushd(sprj.root)
-            " Do we need to create/update the listfile?
-            " Assumption: Either the if or elseif *will* be entered.
-            if !lf_readable || a:force_refresh
-                " Caveat: Originally, used :! and > to put results in
-                " listfile; this can be problematic in some environments,
-                " due to need for abs path conversion. Circumvent issues by
-                " using system()/writefile() combination.
-                " Note: Alternatively, could use convert_path mechanism.
-                " TODO: Should we impose these sorts of constraints on
-                " (possibly system-dependent v:shell_error)?
-                " Assumption: Nonzero will never be returned for success, even
-                " if the external command doesn't give a meaningful error
-                " code...
-                silent! let files_raw = split(system(sprj.opt.find), '\n')
-                "echo "files_raw: " . string(files_raw)
-                if v:shell_error != 0
-                    throw "Encountered error attempting to build listfile `" . lf . "' for subproject "
-                        \. sprj_name . ": Shell error code=" . v:shell_error
-                endif
-                " Write the listfile.
-                " Note: We must set 'shellslash' for canonicalization.
-                call sf.setopt('shellslash', 1, {'boolean': 1})
-                " Build canonicalized list within loop.
-                let files = []
-                " TODO: Decide whether to keep some sort of path conversion.
-                "let flags = {}
-                "let pathconv = self.opt.get('pathconv', flags)
-                "let do_pathconv = !flags.unset
-                for file_raw in files_raw
-                    "if do_pathconv
-                    "    " TODO: Either avoid object for this
-                    "    " performance-critical conversion, or perhaps cache
-                    "    " both internal and external forms to avoid conversion
-                    "    " altogether...
-                    "    let file_raw = pathconv.convert_path(file_raw, 'in')
-                    "endif
-                    let file_raw = s:canonicalize_path(file_raw, sprj.root)
-                    " Add canonical name to list.
-                    call add(files, file_raw)
-                endfor
-                " TODO: Make sort optional so we can skip if user's find
-                " ensures sorted.
-                " TODO: Should we uniquify? Doing so could permit some optimizations
-                " (e.g., find_insert_idx).
-                call sort(files)
-                " Save the file to permit processing to be skipped next time.
-                let v:errmsg = ''
-                silent! let status = writefile(files, lf)
-                if status == -1 || v:errmsg != ''
-                    " Warn user that listfile can't be saved for next time...
-                    " Rationale: Inability to write the file needn't disable
-                    " the subproject; although it's expensive, we can re-run
-                    " find whenever sp is opened.
-                    call s:warn("Unable to write listfile `" . lf . "' for subproject "
-                        \. self.name . " due to the following error: " . v:errmsg . ". Until problem is corrected,"
-                        \. " subsequent subproject opens may take slightly longer than necessary.")
-                    " Note: delete() returns 0 on success, 1 on failure, so we
-                    " could warn on failure, but there's really no reason to
-                    if delete(lf) == 1
-                        " Question: Does this warrant separate warning?
-                        call s:warn("Unable to delete stale listfile `" . lf . "' for subproject " . self.name)
-                    endif
-                endif
-            elseif lf_readable
-                " No need to run find or process listfile; simply read and use.
-                let files = readfile(lf)
-            endif
-        " TODO: Probably remove the catch...
-        "catch
-            " TODO: Perhaps a Rethrow method to be used everywhere instead of
-            " this (for stripping extra Vim(echoerr) at head).
-            " Alternatively, a display function to strip them all from v:exception
-            " before output...
-            "echoerr v:exception
-        finally
-            call sf.destroy()
-        endtry
-
+        call s:cache_listfile(sprj, a:force_refresh)
     endfor
 endfu
 fu! s:prj_init(force_refresh, sp_filter)
-    echo string(a:sp_filter)
-    " TODO: Set cdpath?
-    call s:find_prj_dir()
+    let s:cfg = {}
     let sf = s:sf_create()
     try
+        " TODO: Set cdpath?
+        call s:find_prj_dir()
         call s:process_config(a:sp_filter)
         " Move to the plugin dir for post-processing and validation.
-        exe 'cd ' . s:cfg.fps_dir
+        call sf.pushd(s:cfg.fps_dir)
         call s:post_process_config()
         " Cache (creating if necessary) listfiles.
         call s:cache_listfiles(a:force_refresh)
@@ -906,8 +911,8 @@ endfu
 fu! s:get_name(spec)
     let [is_short, name] = [a:spec[0] == 's', a:spec[2:]]
     if is_short
-        if has_key(s:cfg.snames, name)
-            return s:cfg.snames[name]
+        if has_key(s:cfg.sprj_snames, name)
+            return s:cfg.sprj_snames[name]
         endif
     else
         " Look for name in self.longpats
@@ -1267,7 +1272,7 @@ fu! s:get_matching_files(sprj, glob, partial)
     let sf = s:sf_create()
     try
         let anchor_dir = ''
-        let root = a:sprj.opt.get('root')
+        let root = a:sprj.root
         " Handle leading anchor (if any)
         " ./ works just like Vim
         " .// specifies the current working dir
@@ -1735,19 +1740,19 @@ fu! s:refresh(...)
     " list of objects, each of which contains an sprj and a list of files.
     if empty(sprjs)
         " No specs provided: refresh all subprojects...
-        let sprjs = s:get_unconstrained_pspecs(1)
+        let sprjs = values(s:cfg.sprjs)
     endif
     echo sprjs
     let sf = s:sf_create()
     try
         for sprj in sprjs
             " TODO - Fix this...
-            let root = sprj.opt.get('root')
+            let root = sprj.root
             " Note: An sf.cd (TODO) would make more sense here than pushd...
             echo "About to call pushd " . getcwd()
             call sf.pushd(root)
             echo "Just called pushd " . getcwd()
-            call sprj.cache_listfile(1)
+            call sprj.cache_listfile(sprj, 1)
         endfor
     "catch /Vim(echoerr)/
         "echohl ErrorMsg|echomsg v:exception|echohl None
@@ -1774,6 +1779,7 @@ fu! s:sort_and_combine_pspecs(pspecs)
         if !has_key(pspec_map, sp_name)
             let pspec_map[sp_name] = []
         endif
+        " Get ref to the current map entry.
         let files = pspec_map[sp_name]
         " Interleave current pspec.files with all previously-encountered files
         " for same subproject.
@@ -1797,20 +1803,17 @@ fu! s:sort_and_combine_pspecs(pspecs)
             let idx += 1
         endfor
     endfor
-    " Convert pspec_map to a List for output, using prj's iterator to ensure
-    " proper sp order.
+    " Convert pspec_map to a List for output, iterating over sp's to ensure
+    " deterministic (sp) order.
     let _pspecs = []
-    call s:prj.iter_init()
-    while s:prj.iter_valid()
-        let sprj = s:prj.iter_current()
-        if has_key(pspec_map, sprj.name)
+    for [sprj_name, sprj] in items(s:cfg.sprjs)
+        if has_key(pspec_map, sprj_name)
             " Discard empty subprojects.
-            if !empty(pspec_map[sprj.name])
-                call add(_pspecs, {'sprj': sprj, 'files': pspec_map[sprj.name]})
+            if !empty(pspec_map[sprj_name])
+                call add(_pspecs, {'sprj': sprj, 'files': pspec_map[sprj_name]})
             endif
         endif
-        call s:prj.iter_next()
-    endwhile
+    endfor
     return _pspecs
 endfu
 " TODO: Test only
@@ -1856,7 +1859,7 @@ fu! s:xargify_pspecs(pspecs, fixlen)
             let _pspec = {'sprj': pspec.sprj, 'files': ''}
             let cumlen = a:fixlen
         endif
-        let maxgrepsize = pspec.sprj.opt.get('maxgrepsize')
+        let maxgrepsize = pspec.sprj.opt.maxgrepsize
         " Accumulate as many files as possible without exceeding maxgrepsize
         for f in pspec.files
             " Perform any required path conversions before length test.
@@ -1992,21 +1995,21 @@ fu! s:do_ext_grep(sf, pspecs, argstr, bang, use_ll, is_adding)
         endwhile
         " Ready to process all batches for current sp.
         let sprj = pspec.sprj
-        let grepprg = sprj.opt.get('grepprg')
-        call a:sf.setopt('grepprg', grepprg)
+        call a:sf.setopt('grepprg', sprj.opt.grepprg)
         " Note: Plugin option grepformat corresponds to Vim option
         " 'errorformat' (because we're using cexpr et al.)
-        let grepformat = sprj.opt.get('grepformat')
-        call a:sf.setopt('errorformat', grepformat)
+        call a:sf.setopt('errorformat', sprj.opt.grepformat)
         " Move to root of subproject and create the temporary script file.
         " Rationale: Avoid potential cross-platform issues with absolute
         " paths.
-        call a:sf.pushd(sprj.opt.get('root'))
+        call a:sf.pushd(sprj.root)
         " This try and associated 'finally' ensures cleanup of tempfile
         " Note: Intentionally placing call to get_script_temppath outside try.
         " Rationale: Abnormal return from get_script_temppath obviates need
         " for cleanup.
-        let scriptpath = sprj.get_script_temppath()
+        " TODO: Use tempname()? Note that it always uses `/', just as I'm
+        " currently doing, so there's probably no advantage to using tmp_dir.
+        let scriptpath = s:cfg.tmp_dir . "run"
         try
             call writefile(scriptlines, scriptpath)
             " TODO: Introduce plugin-specific shell/shellcmdflag options.
@@ -2016,7 +2019,7 @@ fu! s:do_ext_grep(sf, pspecs, argstr, bang, use_ll, is_adding)
             " Caveat: Some shells won't have ./ in PATH, so we can't simply
             " use bare tempfile name.
             " NOTE: scriptpath is now absolute: TODO: Adjust comment above...
-            let result = system(&shell . ' ' . &shellcmdflag . ' ' . scriptpath)
+            let result = system(&shell . ' ' . scriptpath)
             if !empty(result)
                 let got_match = 1
             endif
@@ -2183,7 +2186,7 @@ fu! s:find(cmd, bang, cmdline)
             let [files, sprj] = [pspecs[0].files, pspecs[0].sprj]
             " Move temporarily to sp root to open file.
             " Note: Unnecessary but safe if filename happens to be absolute.
-            call sf.pushd(sprj.opt.get('root'))
+            call sf.pushd(sprj.root)
             " Run applicable file open command without bang to ensure safety.
             exe (!empty(win_cmd) ? win_cmd : 'edit') . ' ' . fnameescape(files[0])
             " Note: try-finally will handle state restoration.
@@ -2214,7 +2217,7 @@ fu! s:find(cmd, bang, cmdline)
             " qf/ll was updated, and will keep the qf/ll list in sync as
             " cwd is subsequently changed.
             " TODO: cd semantics make more sense than pushd in loop...
-            call sf.pushd(sprj.opt.get('root'))
+            call sf.pushd(sprj.root)
             " Use one of the following to add files: cexpr!, lexpr!, caddexpr, laddexpr
             " Note: Use bang (if supported) to inhibit jump, and silent to suppress its output.
             " Rationale: Both jump and output will be handled in command-
