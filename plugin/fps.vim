@@ -1343,13 +1343,10 @@ endfu
 fu! s:get_unconstrained_pspecs(...)
     let omit_files = a:0 && a:1
     let ret = []
-    call s:prj.iter_init()
-    while s:prj.iter_valid()
-        let sprj = s:prj.iter_current()
+    for [sprj_name, sprj] in items(s:cfg.sprjs)
         " TODO: Make copy of files? Better way to handle unconstrained?
         call add(ret, omit_files ? sprj : {'sprj': sprj, 'files': sprj.files[:]})
-        call s:prj.iter_next()
-    endwhile
+    endfor
     return ret
 endfu
 
