@@ -1066,9 +1066,10 @@ endfu
 " have it return a list of s:<short-opt> and l:<long-opt> strings, or a list
 " of lists or dicts.
 fu! s:parse_spec(opt, throw)
+    let glob_sep = '\%(\([$^]\+\):\?\|:\)'
     let oc = '[a-zA-Z0-9_]' " chars that can appear in option
-    "                  <sopts>              <lopts>                            <glob>
-    let re_opt = '^\%(-\('.oc.'\+\)\)\?\%(--\('.oc.'\+\%(,'.oc.'\+\)*\)\)\?\%(:\(.*\)\)\?$'
+    "                  <sopts>              <lopts>                                      <anchors> <glob>
+    let re_opt = '^\%(-\('.oc.'\+\)\)\?\%(--\('.oc.'\+\%(,'.oc.'\+\)*\)\)\?\%(\([$^]*\)'.glob_sep.'\(.*\)\)\?$'
     let ms = matchlist(a:opt, re_opt)
     if empty(ms)
         if a:throw
@@ -1079,7 +1080,7 @@ fu! s:parse_spec(opt, throw)
     endif
     let g:dbgms = ms
     " We have a valid spec.
-    let [all, soptstr, loptstr, glob; rest] = ms
+    let [all, soptstr, loptstr, anchors, glob; rest] = ms
     " Extract the various short and long options.
     if empty(soptstr) && empty(loptstr)
         " Special case: Nothing before the `:' means no subproject
@@ -1110,7 +1111,7 @@ fu! s:parse_spec(opt, throw)
         endfor
     endif
     " Note: sprjs will be either a list of sprj objects or -1 for unconstrained.
-    return {'sprjs': sprjs, 'glob': glob}
+    return {'sprjs': sprjs, 'sanch': anchors =~ '\^', 'eanch': anchors =~ '\$', 'glob': glob}
 endfu
 " Process input spec, returning list of subprojects, and (if has_glob is set)
 " a list of matching files.
