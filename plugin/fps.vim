@@ -436,6 +436,7 @@ endfu
 " relative location of fixed strings within the glob (which can be used to
 " prevent costly regex matches when a simple string match is sufficient to
 " disqualify a candidate match target).
+" TODO: Rework these comments...
 " Note: 'partial' argument determines whether the generated pattern will be
 " anchored at end.
 " CAVEAT: partial and end_anchor are mutually exclusive (since we don't know
@@ -488,10 +489,38 @@ endfu
 "   'constraints'
 "     List of constraint strings, which must match exactly somewhere within
 "     region that excludes any start/end anchors.
-fu! s:glob_to_patt(glob, partial)
+fu! s:glob_to_patt(glob)
     let re_star = '\%(^\|[^*]\)\@<=\*\%([^*]\|$\)\@='
     let star = '[^/]*'
     let re_starstar = '\%(^\|/\)\@<=\%(\*\*\)\%(\([-+]\)\?\(0\|[1-9][0-9]*\)\)\?\(/\|$\)'
+
+    let anchor_dir = ''
+    let root = a:sprj.root
+    " Handle leading anchor (if any)
+    " ./ works just like Vim
+    " .// specifies the current working dir
+    " TODO: Add support for any number of ../ just after the ./ or .//
+    " Rationale: Very useful, as there are times when you want to start
+    " the search from a near ancestor of the cwd or the current file's
+    " dir.
+    let glob = a:glob.patt
+    let sanch = a:glob.sanch
+    let eanch = a:glob.eanch
+    if glob =~ '^\.//'
+        " Use fnamemodify to ensure trailing slash.
+        let anchor_dir = s:canonicalize_path(getcwd(), root)
+        let glob = anchor_dir . glob[3:] " strip .//
+        let sanch = 1
+    elseif a:glob =~ '^\./'
+        " Note: This will default to same as .// if no current file.
+        let anchor_dir = s:canonicalize_path(expand('%:h'), root)
+        let glob = anchor_dir . glob[2:] " strip ./
+        let sanch = 1
+    elseif a:glob =~ '^\%('.re_star.'\|'.re_starstar.'\)'
+        let sanch = 1
+    elseif a:glob =~ '\%('.re_star.'\|'.re_starstar.'\)$'
+        let eanch = 1
+    endif
     " Extract the fixed string constraints.
     " TODO: Consider integrating this into the * and ** processing (as part of
     " refactoring that combines their processing).
@@ -502,12 +531,12 @@ fu! s:glob_to_patt(glob, partial)
     " Assumption: Because keepempty was set in call to split, non-empty
     " leading/trailing strings imply start/end anchors (subject to caveat
     " below).
-    " Caveat: If partial matching, end_anchor will be treated as normal fixed
-    " constraint.
+    " Caveat: If not anchored at end, end_anchor will be treated as normal
+    " fixed constraint.
     let nf = len(fixeds)
-    let start_anchor = nf > 0 ? fixeds[0] : ''
-    let end_anchor = !a:partial && nf > 1 ? fixeds[-1] : ''
-    " Loop over interior fixeds: skip leading (and trailing if not partial).
+    let start_anchor = sanch && nf > 0 ? fixeds[0] : ''
+    let end_anchor = eanch && nf > 1 ? fixeds[-1] : ''
+    " Loop over interior fixeds: skip leading (and trailing if end anchored).
     " Note: Loop won't be entered if there are 0 or 1 fixeds.
     let [i, ln] = [1, nf - (empty(end_anchor) ? 0 : 1)]
     while i < ln
@@ -572,8 +601,10 @@ fu! s:glob_to_patt(glob, partial)
     " Assumption: There can be no alternation in the top-level of pattern
     " (hence, no need for grouping parens).
     " Rationale: Globs don't support alternation.
-    let patt = '^' . patt
-    if !a:partial
+    if sanch
+        let patt = '^' . patt
+    endif
+    if eanch
         let patt .= '$'
     endif
     return {'patt': patt,
@@ -739,30 +770,10 @@ fu! s:get_matching_files_match(patt_info, files)
     return matches
 endfu
 
-fu! s:get_matching_files(sprj, glob, partial)
+fu! s:get_matching_files(sprj, glob)
     let matches = []
     let sf = s:sf_create()
     try
-        let anchor_dir = ''
-        let root = a:sprj.root
-        " Handle leading anchor (if any)
-        " ./ works just like Vim
-        " .// specifies the current working dir
-        " all other paths must match from the beginning
-        " TODO: Add support for any number of ../ just after the ./ or .//
-        " Rationale: Very useful, as there are times when you want to start
-        " the search from a near ancestor of the cwd or the current file's
-        " dir.
-        let glob = a:glob
-        if glob =~ '^\.//'
-            " Use fnamemodify to ensure trailing slash.
-            let anchor_dir = s:canonicalize_path(getcwd(), root)
-            let glob = anchor_dir . glob[3:] " strip .//
-        elseif a:glob =~ '^\./'
-            " Note: This will default to same as .// if no current file.
-            let anchor_dir = s:canonicalize_path(expand('%:h'), root)
-            let glob = anchor_dir . glob[2:] " strip ./
-        endif
         " Convert * and ** in glob, and extract fixed string constraints into
         " a special structure to be used for optimization.
         " Rationale: A fixed string at head allows us to delineate (using
@@ -1038,7 +1049,13 @@ endfu
 " following keys:
 "   sprjs:  List of sprj objects corresponding to selected subprojects, -1 if
 "           unconstrained (i.e., subproject spec omitted)
-"   glob:   file glob as string, '' if glob omitted
+"   glob:   Dict representing the file glob in following form:
+"           patt
+"               pattern as string, '' if glob omitted
+"           sanch
+"               boolean true if glob anchored at start
+"           eanch
+"               boolean true if glob anchored at end
 "           Note: Omitted glob effectively selects all files in selected
 "           subproject(s).
 " Rationale: Here are some specs that would be ambiguous if the `:' were not
@@ -1068,8 +1085,8 @@ endfu
 fu! s:parse_spec(opt, throw)
     let glob_sep = '\%(\([$^]\+\):\?\|:\)'
     let oc = '[a-zA-Z0-9_]' " chars that can appear in option
-    "                  <sopts>              <lopts>                                      <anchors> <glob>
-    let re_opt = '^\%(-\('.oc.'\+\)\)\?\%(--\('.oc.'\+\%(,'.oc.'\+\)*\)\)\?\%(\([$^]*\)'.glob_sep.'\(.*\)\)\?$'
+    "                  <sopts>              <lopts>                          <anchors> <glob>
+    let re_opt = '^\%(-\('.oc.'\+\)\)\?\%(--\('.oc.'\+\%(,'.oc.'\+\)*\)\)\?'.glob_sep.'\(.*\)\)\?$'
     let ms = matchlist(a:opt, re_opt)
     if empty(ms)
         if a:throw
@@ -1111,7 +1128,9 @@ fu! s:parse_spec(opt, throw)
         endfor
     endif
     " Note: sprjs will be either a list of sprj objects or -1 for unconstrained.
-    return {'sprjs': sprjs, 'sanch': anchors =~ '\^', 'eanch': anchors =~ '\$', 'glob': glob}
+    " TODO: Decide whether to leave start/end anchors embedded (in a fiducial
+    " form) within the glob.
+    return {'sprjs': sprjs, 'glob': {'sanch': anchors =~ '\^', 'eanch': anchors =~ '\$', 'patt': glob}}
 endfu
 " Process input spec, returning list of subprojects, and (if has_glob is set)
 " a list of matching files.
@@ -1121,7 +1140,7 @@ endfu
 " false:
 "     [<sprj>...]
 " TODO: Consider whether to dispense with all the 'throw' args...
-fu! s:process_spec(spec, has_glob, partial, throw)
+fu! s:process_spec(spec, has_glob, throw)
     let opt = s:parse_spec(a:spec, a:throw)
     if type(opt) != 4 " Dict
         echoerr "Bad spec: " . a:spec
@@ -1139,7 +1158,7 @@ fu! s:process_spec(spec, has_glob, partial, throw)
     else
         let ret = []
         for sprj in sprjs
-            let files = s:get_matching_files(sprj, opt.glob, a:partial)
+            let files = s:get_matching_files(sprj, opt.glob)
             " Accumulate subproject-specific object.
             call add(ret, {'sprj': sprj, 'files': files})
         endfor
@@ -1158,7 +1177,7 @@ fu! s:parse_cmdline(cmdline, has_glob)
     let pspecs = []
     for spec in specs
         " TODO: Decide about partial
-        let pspec = s:process_spec(spec, a:has_glob, 1, 1)
+        let pspec = s:process_spec(spec, a:has_glob, 1)
         call extend(pspecs, pspec)
     endfor
     return [pspecs, argstr]
@@ -1183,7 +1202,7 @@ endfu
 fu! s:complete_filenames(arg_lead, cmd_line, cursor_pos)
     " Get matching file sets, each of which is represented by an sprj and a
     " List containing a subset of its files.
-    let fsets = s:process_spec(a:arg_lead, 1, 1, 1)
+    let fsets = s:process_spec(a:arg_lead, 1, 1)
     let files = []
     for fset in fsets
         let sp_name = fset.sprj.name
