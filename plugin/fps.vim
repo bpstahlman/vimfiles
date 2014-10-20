@@ -493,6 +493,7 @@ fu! s:glob_to_patt(glob)
     let re_star = '\%(^\|[^*]\)\@<=\*\%([^*]\|$\)\@='
     let star = '[^/]*'
     let re_starstar = '\%(^\|/\)\@<=\%(\*\*\)\%(\([-+]\)\?\(0\|[1-9][0-9]*\)\)\?\(/\|$\)'
+    " TODO: Add re_anystar to match either * or ** and factor out below...
 
     let anchor_dir = ''
     let root = a:sprj.root
@@ -780,7 +781,8 @@ fu! s:get_matching_files(sprj, glob)
         " adaptive search) a region within file list, outside of which matches
         " cannot exist. Limiting search to this region can speed things up
         " considerably.
-        let patt_info = s:glob_to_patt(glob, a:partial)
+        let patt_info = s:glob_to_patt(glob)
+        echo string(patt_info)
         let matches = s:get_matching_files_match(patt_info, a:sprj.files)
     catch
         " TODO: What error?
@@ -1042,9 +1044,13 @@ endfu
 " Input spec format:
 " [-<sopts>][--<lopt>[,<lopt>]...][:<glob>]
 " Note: Both the subproject and glob components are optional, but if non-null
-" glob is specified, it is always preceded by a `:', to remove potential
-" ambiguities, which arise because of the possibility of both `-' and `:'
-" appearing in filenames.
+" glob is specified, it is always preceded by at least one of `^$:', to remove
+" potential ambiguities, which arise because of the possibility of both `-'
+" and `:' appearing in filenames.
+" Also Note: A single char in `^$:' is sufficient to separate subproject specs
+" from glob, but since ^ and $ are used as non-mutually-exclusive flags, you
+" might have several; also, if either ^ or $ needs to be matched as literal
+" filename char (highly unusual), you can terminate the flag(s) with `:'.
 " Returns: An object representation of the input spec, containing the
 " following keys:
 "   sprjs:  List of sprj objects corresponding to selected subprojects, -1 if
@@ -1085,8 +1091,8 @@ endfu
 fu! s:parse_spec(opt, throw)
     let glob_sep = '\%(\([$^]\+\):\?\|:\)'
     let oc = '[a-zA-Z0-9_]' " chars that can appear in option
-    "                  <sopts>              <lopts>                          <anchors> <glob>
-    let re_opt = '^\%(-\('.oc.'\+\)\)\?\%(--\('.oc.'\+\%(,'.oc.'\+\)*\)\)\?'.glob_sep.'\(.*\)\)\?$'
+    "                  <sopts>              <lopts>                             <anchors> <glob>
+    let re_opt = '^\%(-\('.oc.'\+\)\)\?\%(--\('.oc.'\+\%(,'.oc.'\+\)*\)\)\?\%('.glob_sep.'\(.*\)\)\?$'
     let ms = matchlist(a:opt, re_opt)
     if empty(ms)
         if a:throw
