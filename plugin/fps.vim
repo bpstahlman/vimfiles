@@ -81,7 +81,6 @@ fu! s:process_config(sp_filter)
     for line in readfile(s:cfg.config_file)
         let lineno += 1
         if line =~ re_section
-            echomsg "Inside section"
             let s = substitute(line, re_section, '\1', '')
             if s:cfg.has_filter
                 if index(a:sp_filter, s) == -1
@@ -101,7 +100,6 @@ fu! s:process_config(sp_filter)
             " clients will be accessing by key.
             let s:cfg.sprjs[s] = {'name': s, 'opt': opt}
             " Keep track of sp order
-            echomsg "Adding..."
             call add(s:cfg.sprj_names, s)
             let section = s
         elseif skipping_section
@@ -216,7 +214,6 @@ endfu
 fu! s:process_longnames(longnames)
     " Caveat: Copy the input array before destructive sort.
     let longnames = a:longnames[:]
-    echo string(longnames)
     call sort(longnames)
     let ln = len(longnames)
     let i = 1
@@ -489,7 +486,7 @@ endfu
 "   'constraints'
 "     List of constraint strings, which must match exactly somewhere within
 "     region that excludes any start/end anchors.
-fu! s:glob_to_patt(glob)
+fu! s:glob_to_patt(sprj, glob_info)
     let re_star = '\%(^\|[^*]\)\@<=\*\%([^*]\|$\)\@='
     let star = '[^/]*'
     let re_starstar = '\%(^\|/\)\@<=\%(\*\*\)\%(\([-+]\)\?\(0\|[1-9][0-9]*\)\)\?\(/\|$\)'
@@ -504,22 +501,22 @@ fu! s:glob_to_patt(glob)
     " Rationale: Very useful, as there are times when you want to start
     " the search from a near ancestor of the cwd or the current file's
     " dir.
-    let glob = a:glob.patt
-    let sanch = a:glob.sanch
-    let eanch = a:glob.eanch
-    if glob =~ '^\.//'
+    let patt = a:glob_info.patt
+    let sanch = a:glob_info.sanch
+    let eanch = a:glob_info.eanch
+    if patt =~ '^\.//'
         " Use fnamemodify to ensure trailing slash.
         let anchor_dir = s:canonicalize_path(getcwd(), root)
-        let glob = anchor_dir . glob[3:] " strip .//
+        let patt = anchor_dir . patt[3:] " strip .//
         let sanch = 1
-    elseif a:glob =~ '^\./'
+    elseif patt =~ '^\./'
         " Note: This will default to same as .// if no current file.
         let anchor_dir = s:canonicalize_path(expand('%:h'), root)
-        let glob = anchor_dir . glob[2:] " strip ./
+        let patt = anchor_dir . patt[2:] " strip ./
         let sanch = 1
-    elseif a:glob =~ '^\%('.re_star.'\|'.re_starstar.'\)'
+    elseif patt =~ '^\%('.re_star.'\|'.re_starstar.'\)'
         let sanch = 1
-    elseif a:glob =~ '\%('.re_star.'\|'.re_starstar.'\)$'
+    elseif patt =~ '\%('.re_star.'\|'.re_starstar.'\)$'
         let eanch = 1
     endif
     " Extract the fixed string constraints.
@@ -527,7 +524,7 @@ fu! s:glob_to_patt(glob)
     " refactoring that combines their processing).
     " Note: Deferring putting the constraint generation into separate function
     " because of refactoring possibility.
-    let fixeds = split(a:glob, re_star . '\|' . re_starstar, 1)
+    let fixeds = split(patt, re_star . '\|' . re_starstar, 1)
     let constraints = []
     " Assumption: Because keepempty was set in call to split, non-empty
     " leading/trailing strings imply start/end anchors (subject to caveat
@@ -549,31 +546,31 @@ fu! s:glob_to_patt(glob)
     " Design Decision: Returned pattern excludes any fixed strings at
     " start/end, which are represented by start_anchor/end_anchor.
     " Note: end_anchor will be empty string here if unused.
-    let glob = a:glob[len(start_anchor) : -len(end_anchor) - 1]
+    let patt = patt[len(start_anchor) : -len(end_anchor) - 1]
     " Process *
-    let glob = substitute(glob, re_star, star, 'g')
+    let patt = substitute(patt, re_star, star, 'g')
     " Process **
     " Design Decision: Defer grouping of dir_seg to avoid redundant grouping.
     " TODO: Is there any point in supporting backslash-escaping of
     " non-filename chars? Possibly not, as they might not be handled correctly
     " elsewhere...
     let dir_seg = '\%(\\\%(\f\)\@!.\|[^/]\)\+'
-    let patt = ''
+    let re_patt = ''
     let [si, sio] = [0, 0]
     while si >= 0
-        let si = match(glob, re_starstar, sio)
+        let si = match(patt, re_starstar, sio)
         if si > 0
             " Accumulate part before the match.
-            let patt .= glob[sio : si - 1]
+            let re_patt .= patt[sio : si - 1]
         elseif si < 0
             " No more matches: accumulate remainder of string
-            let patt .= glob[sio : -1]
+            let re_patt .= patt[sio : -1]
         endif
         if si >= 0
             " Assumption: matchlist guaranteed to succeed.
             " Note: matchlist seems to return a minimum of 10 elements, even
             " when fewer submatches...
-            let [match, sign, number, slash; rest] = matchlist(glob, re_starstar, si)
+            let [match, sign, number, slash; rest] = matchlist(patt, re_starstar, si)
             if number == ''
                 let number = 100
             elseif sign == '-'
@@ -593,7 +590,7 @@ fu! s:glob_to_patt(glob)
                 " Note: In the number==1 case, brace quantifier will be {,0}:
                 " pointless, but valid.
                 " Note: ** syntax never requires match of any directories.
-                let patt .= '\%(' . dir_seg . '\%(/' . dir_seg . '\)\{,' . (number - 1) . '}' . slash . '\)\?'
+                let re_patt .= '\%(' . dir_seg . '\%(/' . dir_seg . '\)\{,' . (number - 1) . '}' . slash . '\)\?'
             endif
             " Advance past match
             let sio = si + strlen(match)
@@ -603,12 +600,12 @@ fu! s:glob_to_patt(glob)
     " (hence, no need for grouping parens).
     " Rationale: Globs don't support alternation.
     if sanch
-        let patt = '^' . patt
+        let re_patt = '^' . re_patt
     endif
     if eanch
-        let patt .= '$'
+        let re_patt .= '$'
     endif
-    return {'patt': patt,
+    return {'patt': re_patt,
         \'start_anchor': start_anchor,
         \'end_anchor': end_anchor,
         \'constraints': constraints}
@@ -695,7 +692,12 @@ fu! s:get_matching_files_match(patt_info, files)
     " already precluded a match.
     if sanch != ''
         let [f_s_i, f_e_i] = s:bracket(f_lst, sanch, s:compare_file_fn)
+        if f_e_i < 0
+            return []
+        endif
     else
+        " Note: Empty file list will produce [0, -1] range, which naturally
+        " prevents loop entry.
         let [f_s_i, f_e_i] = [0, len(f_lst) - 1]
     endif
     "echo "sanch: " . sanch
@@ -771,7 +773,7 @@ fu! s:get_matching_files_match(patt_info, files)
     return matches
 endfu
 
-fu! s:get_matching_files(sprj, glob)
+fu! s:get_matching_files(sprj, glob_info)
     let matches = []
     let sf = s:sf_create()
     try
@@ -781,12 +783,8 @@ fu! s:get_matching_files(sprj, glob)
         " adaptive search) a region within file list, outside of which matches
         " cannot exist. Limiting search to this region can speed things up
         " considerably.
-        let patt_info = s:glob_to_patt(glob)
-        echo string(patt_info)
+        let patt_info = s:glob_to_patt(a:sprj, a:glob_info)
         let matches = s:get_matching_files_match(patt_info, a:sprj.files)
-    catch
-        " TODO: What error?
-        echohl ErrorMsg|echomsg v:exception|echohl None
     finally
         call sf.destroy()
     endtry
@@ -1093,7 +1091,9 @@ fu! s:parse_spec(opt, throw)
     let oc = '[a-zA-Z0-9_]' " chars that can appear in option
     "                  <sopts>              <lopts>                             <anchors> <glob>
     let re_opt = '^\%(-\('.oc.'\+\)\)\?\%(--\('.oc.'\+\%(,'.oc.'\+\)*\)\)\?\%('.glob_sep.'\(.*\)\)\?$'
+    "echomsg "Inside parse_spec..."
     let ms = matchlist(a:opt, re_opt)
+    "echo "ms: " . string(ms)
     if empty(ms)
         if a:throw
             throw "parse_spec: Bad option: " . a:opt
