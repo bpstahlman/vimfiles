@@ -15,7 +15,7 @@
 
 let s:default_opt = {
     \'maxgrepsize': 4095,
-    \'grepprg': 'grep -n',
+    \'grepprg': 'grep -nH',
     \'grepformat': '%f:%l:%m,%f:%l%m,%f  %l%m'
 \}
 
@@ -692,6 +692,8 @@ fu! s:get_matching_files_match(patt_info, files)
     " already precluded a match.
     if sanch != ''
         let [f_s_i, f_e_i] = s:bracket(f_lst, sanch, s:compare_file_fn)
+        " TODO: Perhaps have s:bracket return special empty range [0, -1]
+        " instead of [-1, -1] to harmonize the if/else cases.
         if f_e_i < 0
             return []
         endif
@@ -1135,7 +1137,7 @@ fu! s:parse_spec(opt, throw)
     endif
     " Note: sprjs will be either a list of sprj objects or -1 for unconstrained.
     " TODO: Decide whether to leave start/end anchors embedded (in a fiducial
-    " form) within the glob.
+    " form) within the glob. If so, perhaps change key to 'glob_info'.
     return {'sprjs': sprjs, 'glob': {'sanch': anchors =~ '\^', 'eanch': anchors =~ '\$', 'patt': glob}}
 endfu
 " Process input spec, returning list of subprojects, and (if has_glob is set)
