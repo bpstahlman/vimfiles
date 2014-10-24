@@ -436,7 +436,7 @@ endfu
 " TODO: Rework these comments...
 " Note: 'partial' argument determines whether the generated pattern will be
 " anchored at end.
-" CAVEAT: partial and end_anchor are mutually exclusive (since we don't know
+" CAVEAT: partial and end_anch are mutually exclusive (since we don't know
 " where to apply end anchor if we're not anchoring at end).
 " Note: The * and ** constructs are treated in a manner nearly identical to
 " what is described in Vim help on 'file-searching': in a nutshell...
@@ -477,11 +477,11 @@ endfu
 "   'patt'
 "     the regex pattern corresponding to the input glob
 "     Note: If input glob contained leading/trailing fixed strings, they will
-"     not be represented in patt, but in start_anchor/end_anchor,
+"     not be represented in patt, but in beg_anch/end_anch,
 "     respectively.
-"   'start_anchor'
+"   'beg_anch'
 "     If non-empty, string that must match at start of canonical path.
-"   'end_anchor'
+"   'end_anch'
 "     If non-empty, string that must match at end of canonical path.
 "   'constraints'
 "     List of constraint strings, which must match exactly somewhere within
@@ -490,7 +490,7 @@ fu! s:glob_to_patt(sprj, glob_info)
     let re_star = '\%(^\|[^*]\)\@<=\*\%([^*]\|$\)\@='
     let star = '[^/]*'
     let re_starstar = '\%(^\|/\)\@<=\%(\*\*\)\%(\([-+]\)\?\(0\|[1-9][0-9]*\)\)\?\(/\|$\)'
-    " TODO: Add re_anystar to match either * or ** and factor out below...
+    let re_anystar = '\%('.re_star.'\|'.re_starstar.'\)'
 
     let anchor_dir = ''
     let root = a:sprj.root
@@ -502,51 +502,56 @@ fu! s:glob_to_patt(sprj, glob_info)
     " the search from a near ancestor of the cwd or the current file's
     " dir.
     let patt = a:glob_info.patt
-    let sanch = a:glob_info.sanch
-    let eanch = a:glob_info.eanch
+    let anch_beg = a:glob_info.anch_beg
+    let anch_end = a:glob_info.anch_end
     if patt =~ '^\.//'
         " Use fnamemodify to ensure trailing slash.
         let anchor_dir = s:canonicalize_path(getcwd(), root)
         let patt = anchor_dir . patt[3:] " strip .//
-        let sanch = 1
+        let anch_beg = 1
     elseif patt =~ '^\./'
         " Note: This will default to same as .// if no current file.
         let anchor_dir = s:canonicalize_path(expand('%:h'), root)
         let patt = anchor_dir . patt[2:] " strip ./
-        let sanch = 1
-    elseif patt =~ '^\%('.re_star.'\|'.re_starstar.'\)'
-        let sanch = 1
-    elseif patt =~ '\%('.re_star.'\|'.re_starstar.'\)$'
-        let eanch = 1
+        let anch_beg = 1
+    elseif patt =~ '^'.re_anystar
+        let anch_beg = 1
+    elseif patt =~ re_anystar.'$'
+        let anch_end = 1
     endif
     " Extract the fixed string constraints.
     " TODO: Consider integrating this into the * and ** processing (as part of
     " refactoring that combines their processing).
     " Note: Deferring putting the constraint generation into separate function
     " because of refactoring possibility.
-    let fixeds = split(patt, re_star . '\|' . re_starstar, 1)
+    let fixeds = split(patt, re_anystar, 1)
     let constraints = []
-    " Assumption: Because keepempty was set in call to split, non-empty
-    " leading/trailing strings imply start/end anchors (subject to caveat
-    " below).
-    " Caveat: If not anchored at end, end_anchor will be treated as normal
-    " fixed constraint.
+    " Important Note: Because keepempty was set in call to split, an empty
+    " leading/trailing string precludes existence of the corresponding
+    " start/end anchor. A non-empty first/last fixed is treated as beg/end
+    " anchor iff the corresponding anchor flag is set; otherwise, it's simply
+    " a floating constraint.
     let nf = len(fixeds)
-    let start_anchor = sanch && nf > 0 ? fixeds[0] : ''
-    let end_anchor = eanch && nf > 1 ? fixeds[-1] : ''
-    " Loop over interior fixeds: skip leading (and trailing if end anchored).
-    " Note: Loop won't be entered if there are 0 or 1 fixeds.
-    let [i, ln] = [1, nf - (empty(end_anchor) ? 0 : 1)]
+    " Note: Either branch of ternary can produce empty string.
+    let beg_anch = anch_beg && nf > 0 ? fixeds[0] : ''
+    let end_anch = anch_end && nf > (empty(beg_anch) ? 0 : 1) ? fixeds[-1] : ''
+    " Loop over interior fixeds: i.e., those not already used as start/end
+    " anchor.
+    let [i, ln] = [empty(beg_anch) ? 0 : 1, nf - (empty(end_anch) ? 0 : 1)]
     while i < ln
+        " Skip over unused leading trailing empty strings produced by
+        " keepempty arg to split.
+        " TODO: Consider discarding bare `/' as well, as they have dubious
+        " value as constraints.
         if fixeds[i] != ''
             call add(constraints, fixeds[i])
         endif
         let i += 1
     endwhile
     " Design Decision: Returned pattern excludes any fixed strings at
-    " start/end, which are represented by start_anchor/end_anchor.
-    " Note: end_anchor will be empty string here if unused.
-    let patt = patt[len(start_anchor) : -len(end_anchor) - 1]
+    " start/end, which are represented by beg_anch/end_anch.
+    " Note: end_anch will be empty string here if unused.
+    let patt = patt[len(beg_anch) : -len(end_anch) - 1]
     " Process *
     let patt = substitute(patt, re_star, star, 'g')
     " Process **
@@ -599,15 +604,21 @@ fu! s:glob_to_patt(sprj, glob_info)
     " Assumption: There can be no alternation in the top-level of pattern
     " (hence, no need for grouping parens).
     " Rationale: Globs don't support alternation.
-    if sanch
+    " TODO: How to handle empty pattern (which is valid use-case)...
+    if anch_beg
         let re_patt = '^' . re_patt
     endif
-    if eanch
+    if anch_end
         let re_patt .= '$'
     endif
+    " !!!!!UNDER CONSTRUCTION!!!!!!
+    echo string({'patt': re_patt,
+        \'beg_anch': beg_anch,
+        \'end_anch': end_anch,
+        \'constraints': constraints})
     return {'patt': re_patt,
-        \'start_anchor': start_anchor,
-        \'end_anchor': end_anchor,
+        \'beg_anch': beg_anch,
+        \'end_anch': end_anch,
         \'constraints': constraints}
 endfu
 
@@ -685,13 +696,13 @@ fu! s:get_matching_files_match(patt_info, files)
     "echo c_lst
     "echo "patt: " . patt
     " Note: We don't apply patt to portions of filename covered by anchors.
-    let [sanch, eanch] = [a:patt_info.start_anchor, a:patt_info.end_anchor]
-    let [c_sanch_len, c_eanch_len] = [len(sanch), len(eanch)]
+    let [beg_anch, end_anch] = [a:patt_info.beg_anch, a:patt_info.end_anch]
+    let [c_sanch_len, c_eanch_len] = [len(beg_anch), len(end_anch)]
     " If possible, narrow the region of file list to be searched.
     " Rationale: No point in checking constraints where the start anchor has
     " already precluded a match.
-    if sanch != ''
-        let [f_s_i, f_e_i] = s:bracket(f_lst, sanch, s:compare_file_fn)
+    if beg_anch != ''
+        let [f_s_i, f_e_i] = s:bracket(f_lst, beg_anch, s:compare_file_fn)
         " TODO: Perhaps have s:bracket return special empty range [0, -1]
         " instead of [-1, -1] to harmonize the if/else cases.
         if f_e_i < 0
@@ -702,8 +713,8 @@ fu! s:get_matching_files_match(patt_info, files)
         " prevents loop entry.
         let [f_s_i, f_e_i] = [0, len(f_lst) - 1]
     endif
-    "echo "sanch: " . sanch
-    "echo "eanch: " . eanch
+    "echo "beg_anch: " . beg_anch
+    "echo "end_anch: " . end_anch
     " TODO: Consider returning List of indices instead of actual files.
     " !!!!!! UNDER CONSTRUCTION !!!!!!!! (27Feb2014)
     let matches = []
@@ -717,8 +728,8 @@ fu! s:get_matching_files_match(patt_info, files)
             " Filename too short.
             let f_i += 1 | continue
         endif
-        if sanch != '' && f_raw[0 : c_sanch_len - 1] != sanch ||
-            \eanch != '' && f_raw[-c_eanch_len : ] != eanch
+        if beg_anch != '' && f_raw[0 : c_sanch_len - 1] != beg_anch ||
+            \end_anch != '' && f_raw[-c_eanch_len : ] != end_anch
             " Skip to next file.
             "echo "Skipping due to start/end anchor fail"
             let f_i += 1 | continue
@@ -761,8 +772,8 @@ fu! s:get_matching_files_match(patt_info, files)
         endif
         " If here, match can't be precluded; time to try regex pattern match.
         " Note: Match target is the portion of file excluding any
-        " start/end anchor. The patt must match at start of this portion;
-        " whether it must match at end is determined by patt itself.
+        " start/end anchor.
+        " Whether patt must match at start/end is determined by patt itself.
         " TODO: Should let user's fileignorecase or wildignorecase setting
         " determine =~ or =~?.
         "echo "Matching " . f . " against " . patt
@@ -793,6 +804,8 @@ fu! s:get_matching_files(sprj, glob_info)
     return matches
 endfu
 
+" TODO: Update this to work off a static file (don't remember how it even
+" worked prior to this), and use for performance benchmarks...
 fu! Test_get_matching_files(cfg_idx, glob, partial)
     let matches = s:get_matching_files(s:sp_cfg[a:cfg_idx], a:glob, a:partial)
     for m in matches
@@ -1058,9 +1071,9 @@ endfu
 "   glob:   Dict representing the file glob in following form:
 "           patt
 "               pattern as string, '' if glob omitted
-"           sanch
+"           anch_beg
 "               boolean true if glob anchored at start
-"           eanch
+"           anch_end
 "               boolean true if glob anchored at end
 "           Note: Omitted glob effectively selects all files in selected
 "           subproject(s).
@@ -1138,7 +1151,7 @@ fu! s:parse_spec(opt, throw)
     " Note: sprjs will be either a list of sprj objects or -1 for unconstrained.
     " TODO: Decide whether to leave start/end anchors embedded (in a fiducial
     " form) within the glob. If so, perhaps change key to 'glob_info'.
-    return {'sprjs': sprjs, 'glob': {'sanch': anchors =~ '\^', 'eanch': anchors =~ '\$', 'patt': glob}}
+    return {'sprjs': sprjs, 'glob': {'anch_beg': anchors =~ '\^', 'anch_end': anchors =~ '\$', 'patt': glob}}
 endfu
 " Process input spec, returning list of subprojects, and (if has_glob is set)
 " a list of matching files.
