@@ -519,7 +519,27 @@ fu! s:glob_to_patt(sprj, glob_info)
     elseif patt =~ re_anystar.'$'
         let anch_end = 1
     endif
+    " Short-circuit if no pattern supplied. In such cases, anchors determine
+    " whether all files or none match.
+    " Rule: Empty strings are valid values for 'patt', 'beg_anch' and
+    " 'end_anch'. An empty string matches anywhere in the absence of anchors,
+    " but cannot match in multiple places (e.g., at both beginning and end of
+    " a file path); thus, an empty path matches all files if 0 or 1 anchors,
+    " but matches nothing if both beg/end anchors.
+    if empty(patt)
+        return {
+            \'patt': '',
+            \'match_all': empty(beg_anch) && empty(end_anch) && (!anch_beg || !anch_end)
+            \'match_none': empty(beg_anch) && empty(end_anch) && (anch_beg && anch_end)
+            \'beg_anch': '',
+            \'end_anch': '',
+            \'constraints': []}
+    endif
     " Extract the fixed string constraints.
+    " Terminology: "fixeds" means fixed strings - could be either floating or
+    " anchored constraints. "constraints" array is for floating constraints
+    " only.
+    " TODO: Perhaps change names...
     " TODO: Consider integrating this into the * and ** processing (as part of
     " refactoring that combines their processing).
     " Note: Deferring putting the constraint generation into separate function
@@ -528,95 +548,99 @@ fu! s:glob_to_patt(sprj, glob_info)
     let constraints = []
     " Important Note: Because keepempty was set in call to split, an empty
     " leading/trailing string precludes existence of the corresponding
-    " start/end anchor. A non-empty first/last fixed is treated as beg/end
-    " anchor iff the corresponding anchor flag is set; otherwise, it's simply
-    " a floating constraint.
+    " beg/end anchor. A non-empty first/last fixed is treated as beg/end
+    " anchor if and only if the corresponding anchor flag is set; otherwise,
+    " it's simply a floating constraint.
     let nf = len(fixeds)
     " Note: Either branch of ternary can produce empty string.
     let beg_anch = anch_beg && nf > 0 ? fixeds[0] : ''
     let end_anch = anch_end && nf > (empty(beg_anch) ? 0 : 1) ? fixeds[-1] : ''
-    " Loop over interior fixeds: i.e., those not already used as start/end
+    " Loop over any interior fixeds: i.e., those not already used as beg/end
     " anchor.
     let [i, ln] = [empty(beg_anch) ? 0 : 1, nf - (empty(end_anch) ? 0 : 1)]
     while i < ln
         " Skip over unused leading trailing empty strings produced by
         " keepempty arg to split.
-        " TODO: Consider discarding bare `/' as well, as they have dubious
-        " value as constraints.
-        if fixeds[i] != ''
+        " TODO: Consider discarding bare `/', which has dubious value as a
+        " constraint. Perhaps benchmarks are in order...
+        " TODO: Also, consider limiting number of floating constraints to
+        " avoid passing point-of-diminishing-returns w.r.t. performance.
+        if !empty(fixeds[i])
             call add(constraints, fixeds[i])
         endif
         let i += 1
     endwhile
-    " Design Decision: Returned pattern excludes any fixed strings at
-    " start/end, which are represented by beg_anch/end_anch.
-    " Note: end_anch will be empty string here if unused.
+    " Design Decision: Returned patt excludes any anchored constraints
+    " (reflected in beg_anch/end_anch).
     let patt = patt[len(beg_anch) : -len(end_anch) - 1]
-    " Process *
-    let patt = substitute(patt, re_star, star, 'g')
-    " Process **
-    " Design Decision: Defer grouping of dir_seg to avoid redundant grouping.
-    " TODO: Is there any point in supporting backslash-escaping of
-    " non-filename chars? Possibly not, as they might not be handled correctly
-    " elsewhere...
-    let dir_seg = '\%(\\\%(\f\)\@!.\|[^/]\)\+'
     let re_patt = ''
-    let [si, sio] = [0, 0]
-    while si >= 0
-        let si = match(patt, re_starstar, sio)
-        if si > 0
-            " Accumulate part before the match.
-            let re_patt .= patt[sio : si - 1]
-        elseif si < 0
-            " No more matches: accumulate remainder of string
-            let re_patt .= patt[sio : -1]
-        endif
-        if si >= 0
-            " Assumption: matchlist guaranteed to succeed.
-            " Note: matchlist seems to return a minimum of 10 elements, even
-            " when fewer submatches...
-            let [match, sign, number, slash; rest] = matchlist(patt, re_starstar, si)
-            if number == ''
-                let number = 100
-            elseif sign == '-'
-                " Assumption: Presence of sign implies non-empty number.
-                let number = 30
-            else
-                let number = number + 0
-                if number > 100
+    if !empty(patt)
+        " Process *
+        let patt = substitute(patt, re_star, star, 'g')
+        " Process **
+        " Design Decision: Defer grouping of dir_seg to avoid redundant grouping.
+        " TODO: Is there any point in supporting backslash-escaping of
+        " non-filename chars? Probably not, as they probably wouldn't be
+        " handled correctly elsewhere...
+        let dir_seg = '\%(\\\%(\f\)\@!.\|[^/]\)\+'
+        let [si, sio] = [0, 0]
+        while si >= 0
+            let si = match(patt, re_starstar, sio)
+            if si > 0
+                " Accumulate part before the match.
+                let re_patt .= patt[sio : si - 1]
+            elseif si < 0
+                " No more matches: accumulate remainder of string
+                let re_patt .= patt[sio : -1]
+            endif
+            if si >= 0
+                " Assumption: matchlist guaranteed to succeed.
+                " Note: matchlist seems to return a minimum of 10 elements, even
+                " when fewer submatches...
+                let [match, sign, number, slash; rest] = matchlist(patt, re_starstar, si)
+                if number == ''
                     let number = 100
+                elseif sign == '-'
+                    " Assumption: Presence of sign implies non-empty number.
+                    let number = 30
+                else
+                    let number = number + 0
+                    if number > 100
+                        let number = 100
+                    endif
                 endif
+                " Build the pattern.
+                " Note: Omission of number == 0 case ensures removal of a **0 and
+                " any subsequent slash.
+                if number >= 1
+                    " Number between 1 and 100 inclusive
+                    " Note: In the number==1 case, brace quantifier will be {,0}:
+                    " pointless, but valid.
+                    " Note: ** syntax never requires match of any directories.
+                    let re_patt .= '\%(' . dir_seg . '\%(/' . dir_seg . '\)\{,' . (number - 1) . '}' . slash . '\)\?'
+                endif
+                " Advance past match
+                let sio = si + strlen(match)
             endif
-            " Build the pattern.
-            " Note: Omission of number == 0 case ensures removal of a **0 and
-            " any subsequent slash.
-            if number >= 1
-                " Number between 1 and 100 inclusive
-                " Note: In the number==1 case, brace quantifier will be {,0}:
-                " pointless, but valid.
-                " Note: ** syntax never requires match of any directories.
-                let re_patt .= '\%(' . dir_seg . '\%(/' . dir_seg . '\)\{,' . (number - 1) . '}' . slash . '\)\?'
-            endif
-            " Advance past match
-            let sio = si + strlen(match)
+        endwhile
+        " Assumption: There can be no alternation in the top-level of pattern
+        " (hence, no need for grouping parens).
+        " Rationale: Globs don't support alternation.
+        " Assumption: Enclosing 'if' guarantees non-empty patt.
+        if anch_beg
+            let re_patt = '^' . re_patt
         endif
-    endwhile
-    " Assumption: There can be no alternation in the top-level of pattern
-    " (hence, no need for grouping parens).
-    " Rationale: Globs don't support alternation.
-    " TODO: How to handle empty pattern (which is valid use-case)...
-    if anch_beg
-        let re_patt = '^' . re_patt
+        if anch_end
+            let re_patt .= '$'
+        endif
     endif
-    if anch_end
-        let re_patt .= '$'
-    endif
-    " !!!!!UNDER CONSTRUCTION!!!!!!
-    echo string({'patt': re_patt,
-        \'beg_anch': beg_anch,
-        \'end_anch': end_anch,
-        \'constraints': constraints})
-    return {'patt': re_patt,
+    " Earlier short-circuit returns handled match_all/match_none special
+    " cases. Arrival here implies something to match: either patt and/or
+    " constraint(s).
+    return {
+        \'patt': re_patt,
+        \'match_all': 0,
+        \'match_none': 0,
         \'beg_anch': beg_anch,
         \'end_anch': end_anch,
         \'constraints': constraints}
@@ -687,21 +711,25 @@ endfu
 
 " Helper routine for get_matching_files
 fu! s:get_matching_files_match(patt_info, files)
+    " Check for short-circuit.
+    if a:patt_info.match_all
+        return a:files[:]
+    elseif a:patt_info.match_none
+        return []
+    endif
     " Cache some vars for efficiency.
     let c_lst = a:patt_info.constraints
-    let patt = a:patt_info.patt
     let c_len = len(c_lst)
+    let patt = a:patt_info.patt
+    let patt_len = len(patt)
     let f_lst = a:files
-    "echo "constraints:"
-    "echo c_lst
-    "echo "patt: " . patt
-    " Note: We don't apply patt to portions of filename covered by anchors.
+    " Cache anchor vars.
     let [beg_anch, end_anch] = [a:patt_info.beg_anch, a:patt_info.end_anch]
-    let [c_sanch_len, c_eanch_len] = [len(beg_anch), len(end_anch)]
+    let [banch_len, eanch_len] = [len(beg_anch), len(end_anch)]
     " If possible, narrow the region of file list to be searched.
     " Rationale: No point in checking constraints where the start anchor has
     " already precluded a match.
-    if beg_anch != ''
+    if !empty(beg_anch)
         let [f_s_i, f_e_i] = s:bracket(f_lst, beg_anch, s:compare_file_fn)
         " TODO: Perhaps have s:bracket return special empty range [0, -1]
         " instead of [-1, -1] to harmonize the if/else cases.
@@ -713,8 +741,6 @@ fu! s:get_matching_files_match(patt_info, files)
         " prevents loop entry.
         let [f_s_i, f_e_i] = [0, len(f_lst) - 1]
     endif
-    "echo "beg_anch: " . beg_anch
-    "echo "end_anch: " . end_anch
     " TODO: Consider returning List of indices instead of actual files.
     " !!!!!! UNDER CONSTRUCTION !!!!!!!! (27Feb2014)
     let matches = []
@@ -722,42 +748,42 @@ fu! s:get_matching_files_match(patt_info, files)
     while f_i <= f_e_i
         let f_raw = f_lst[f_i]
         let f_raw_len = len(f_raw)
-        " Start/end anchor checks are quickest to check, and may permit
+        " Beg/end anchor checks are quickest to check, and may permit
         " short-circuiting.
-        if c_sanch_len + c_eanch_len > f_raw_len
+        if banch_len + eanch_len > f_raw_len
             " Filename too short.
             let f_i += 1 | continue
         endif
-        if beg_anch != '' && f_raw[0 : c_sanch_len - 1] != beg_anch ||
-            \end_anch != '' && f_raw[-c_eanch_len : ] != end_anch
-            " Skip to next file.
-            "echo "Skipping due to start/end anchor fail"
+        if banch_len && f_raw[0 : banch_len - 1] != beg_anch ||
+            \eanch_len && f_raw[-eanch_len : ] != end_anch
+            " Beg/end anchor precludes match on this file.
             let f_i += 1 | continue
         endif
-        if f_raw_len == c_sanch_len + c_eanch_len
+        if !patt_len && !c_len && f_raw_len == banch_len + eanch_len
             " Anchored constraints were sufficient to determine match.
-            " Note: Couldn't be any floating constraints or glob.
-            " Note: In theory, we could get here because of empty pattern, but
-            " we should probably check that before calling this method.
             call add(matches, f_raw)
             let f_i += 1 | continue
         endif
         " Couldn't confirm or deny match using only anchored constraints.
-        " Discard any anchored portions before subsequent processing.
-        let f = f_raw[c_sanch_len : -1 - c_eanch_len]
+        " Discard what's already matched against anchored constraint(s) before
+        " subsequent processing.
+        let f = f_raw[banch_len : -1 - eanch_len]
         if c_len > 0
-            " Loop through the unanchored constraints, short-circuiting on
+            " Loop through the floating constraints, short-circuiting upon
             " disqualification.
-            " Keep up with earliest point at which constraint could match.
-            " Rationale: Unanchored constraint match can't start before end of
-            " earliest possible match of preceding unanchored constraint.
+            " Keep up with earliest point at which constraint *could* match.
+            " Rationale: Floating constraint can't match before end of
+            " earliest possible match of preceding floating constraint.
+            " Important Note: This is not done primarily for performance
+            " reasons; rather, it's necessary to prevent 2 distinct floating
+            " constraints that happen to represent the same sequence of chars
+            " from matching at the same location.
             let ms_ci = 0
             for c in c_lst
                 let c_slen = len(c)
                 let i = stridx(f, c, ms_ci)
                 if i == -1
-                    "echo "Skipping due to floating anchor "
-                    "echo "f: " . f . "  c: " . c . "  ms_ci: " . ms_ci
+                    " Floating anchor precludes match.
                     break
                 else
                     " Don't search the matched portion (or anything prior) again.
@@ -770,15 +796,14 @@ fu! s:get_matching_files_match(patt_info, files)
                 let f_i += 1 | continue
             endif
         endif
-        " If here, match can't be precluded; time to try regex pattern match.
-        " Note: Match target is the portion of file excluding any
-        " start/end anchor.
-        " Whether patt must match at start/end is determined by patt itself.
+        " If here, match can't be precluded by constraints; we're going to
+        " have to resort to more expensive regex.
+        " Note: Match target is the portion of file excluding any beg/end
+        " anchor; any ^ or $ in patt match against this portion.
         " TODO: Should let user's fileignorecase or wildignorecase setting
         " determine =~ or =~?.
         "echo "Matching " . f . " against " . patt
         if f =~ patt
-            "echo "Success!"
             call add(matches, f_raw)
         endif
         let f_i += 1 " Advance to next file.
