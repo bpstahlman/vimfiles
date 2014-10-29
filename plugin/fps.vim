@@ -519,8 +519,9 @@ fu! s:glob_to_patt(sprj, glob_info)
     elseif patt =~ re_anystar.'$'
         let anch_end = 1
     endif
-    " Short-circuit if no pattern supplied. In such cases, anchors determine
-    " whether all files or none match.
+    " Short-circuit if no pattern supplied (noting that special constructs
+    " such as ./ and .// are part of pattern at this point). In such cases,
+    " anchors determine whether all files or none match.
     " Rule: Empty strings are valid values for 'patt', 'beg_anch' and
     " 'end_anch'. An empty string matches anywhere in the absence of anchors,
     " but cannot match in multiple places (e.g., at both beginning and end of
@@ -529,8 +530,8 @@ fu! s:glob_to_patt(sprj, glob_info)
     if empty(patt)
         return {
             \'patt': '',
-            \'match_all': empty(beg_anch) && empty(end_anch) && (!anch_beg || !anch_end)
-            \'match_none': empty(beg_anch) && empty(end_anch) && (anch_beg && anch_end)
+            \'match_all': !anch_beg || !anch_end,
+            \'match_none': anch_beg && anch_end,
             \'beg_anch': '',
             \'end_anch': '',
             \'constraints': []}
