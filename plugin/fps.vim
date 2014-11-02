@@ -492,33 +492,18 @@ fu! s:glob_to_patt(sprj, glob_info)
     let re_starstar = '\%(^\|/\)\@<=\%(\*\*\)\%(\([-+]\)\?\(0\|[1-9][0-9]*\)\)\?\(/\|$\)'
     let re_anystar = '\%('.re_star.'\|'.re_starstar.'\)'
 
-    let anchor_dir = ''
-    let root = a:sprj.root
-    " Handle leading anchor (if any)
-    " ./ works just like Vim
-    " .// specifies the current working dir
-    " TODO: Add support for any number of ../ just after the ./ or .//
-    " Rationale: Very useful, as there are times when you want to start
-    " the search from a near ancestor of the cwd or the current file's
-    " dir.
-    let patt = a:glob_info.patt
-    let anch_beg = a:glob_info.anch_beg
-    let anch_end = a:glob_info.anch_end
-    if patt =~ '^\.//'
-        " Use fnamemodify to ensure trailing slash.
-        let anchor_dir = s:canonicalize_path(getcwd(), root)
-        let patt = anchor_dir . patt[3:] " strip .//
+    " Handle any leading anchor, as well as any subsequent ..[N]/ sequence.
+    let [patt, anch_beg, anch_end] = s:preprocess_glob(a:glob_info, a:sprj.root)
+
+    " Since star(star)s make no sense when the corresponding end is unanchored...
+    " Note: anch_beg is already set if s:preprocess_glob processed leading dot
+    if !anch_beg && patt =~ '^'.re_anystar
         let anch_beg = 1
-    elseif patt =~ '^\./'
-        " Note: This will default to same as .// if no current file.
-        let anchor_dir = s:canonicalize_path(expand('%:h'), root)
-        let patt = anchor_dir . patt[2:] " strip ./
-        let anch_beg = 1
-    elseif patt =~ '^'.re_anystar
-        let anch_beg = 1
-    elseif patt =~ re_anystar.'$'
+    endif
+    if !anch_end && patt =~ re_anystar.'$'
         let anch_end = 1
     endif
+
     " Short-circuit if no pattern supplied (noting that special constructs
     " such as ./ and .// are part of pattern at this point). In such cases,
     " anchors determine whether all files or none match.
@@ -645,6 +630,98 @@ fu! s:glob_to_patt(sprj, glob_info)
         \'beg_anch': beg_anch,
         \'end_anch': end_anch,
         \'constraints': constraints}
+endfu
+
+" Convert dotdot strings to numeric equivalents: E.g.,
+" ../..       => 2
+" ../../      => 2
+" ..3/        => 3
+" ..3/../     => 4
+" ..2/../..2/ => 5
+fu! s:get_num_dotdots(dotdots)
+    " Remove any trailing / to prevent spurious trailing component.
+    " Caveat: Vim backwards-compatibility precludes use of [-1] with strings.
+    let dotdots = a:dotdots[-1:] == '/' ? a:dotdots[0:-2] : a:dotdots
+    let nums = split(dotdots, '/\?\.\.', 1)
+    let cnt = 0
+    " Note: Pattern guarantees empty leading component; skip it but count an
+    " empty trailing component.
+    for num in nums[1:]
+        let cnt += empty(num) ? 1 : num
+    endfor
+    return cnt
+endfu
+
+" Expand any leading anchor (./ or .//) and any subsequent ..[N]/ constructs
+" in the input glob_info, returning the result as an ordered list of values
+" (as convenience to caller).
+" ./      Works just like Vim, specifies current file
+" .//     Specifies the current working dir
+" ..[N]/  Removes N (default 1) trailing directory components from the
+"         directory specified by ./ or .//
+"         Multiple may be specified, but only in unbroken sequence.
+"         Must follow either ./ or .//
+"         Rationale: Very useful, as there are times when you want to start
+"         the search from a near ancestor of the cwd or the current file's
+"         dir.
+" Exception: Throw exception in case of invalid glob: e.g., a number of ..'s
+" that would move us above sp root.
+" TODO: Need access to regexes: e.g., re_anystar
+fu! s:preprocess_glob(glob_info, sp_root)
+    let [patt, anch_beg, anch_end] = [a:glob_info['patt'], a:glob_info['anch_beg'], a:glob_info['anch_end']]
+    let re_dot = '\.//\?'
+    let re_num = '[1-9][0-9]*'
+    let re_dotdot = '\.\.\%('.re_num.'\)\?'
+    " Note: The .. list must end with either / or end-of-string. Any trailing
+    " / is consumed.
+    let re_dotdots = re_dotdot . '\%(/' . re_dotdot . '\)*\%(/\|$\)'
+    let re_all = '^\('.re_dot.'\)\('.re_dotdots.'\)\(.*\)'
+    let m = matchlist(patt, re_all)
+    if !empty(m)
+        " Leading ./ or .//
+        let anch_beg = 1
+        " Decompose patt, which is about to be rebuilt.
+        " Note: Leave patt var intact until rebuild complete in case it's
+        " needed for error display.
+        let [dot, dotdots, rest] = m[1:3]
+        " Validation: Make sure rest doesn't begin with /
+        " Rationale: We normally don't validate the glob pattern, but a / at
+        " head of rest implies absolute path, which makes no sense, given that
+        " ./ and .// imply relative paths.
+        if rest[0] == '/'
+            throw "Too many consecutive path separators in pattern: " . patt
+        endif
+        if dot == './/'
+            " Use fnamemodify to ensure trailing slash.
+            let anch_dir = s:canonicalize_path(getcwd(), a:sp_root)
+        else
+            " Note: This will default to same as .// if no current file.
+            let anch_dir = s:canonicalize_path(expand('%:h'), a:sp_root)
+        endif
+        " Assumption: A non-empty anch_dir has trailing /
+        " Process any ..[N]/ construct(s) following the leading dot slash(es)
+        if !empty(dotdots)
+            " Strip trailing slash; otherwise, initial fnamemodify with :h
+            " flag will remove only a trailing slash.
+            let dir = anch_dir[-1:] == '/' ? anch_dir[0:-1] : anch_dir
+            let cnt = s:get_num_dotdots(dotdots)
+            while cnt
+                " Strip another component unless too many ..'s specified.
+                if empty(dir) || dir == '.'
+                    throw "Too many ../'s applied to anchor dir `".anch_dir."' in glob `".patt."': ".dotdots
+                endif
+                let dir = fnamemodify(dir, ':h')
+                let cnt -= 1
+            endwhile
+            " Note: When fnamemodify strips final path component, it leaves a
+            " single `.'; we want to get back any trailing slash removed by :h
+            " but no leading dot.
+            let dir = dir == '' || dir == '.' ? '' : dir . '/'
+        endif
+        " Append any non-special text to complete rebuild of patt.
+        let patt = dir . rest
+    endif
+    return [patt, anch_beg, anch_end]
 endfu
 
 fu! Test_Convert_stars(glob)
