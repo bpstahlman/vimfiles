@@ -16,7 +16,8 @@
 let s:default_opt = {
     \'maxgrepsize': 4095,
     \'grepprg': 'grep -nH',
-    \'grepformat': '%f:%l:%m,%f:%l%m,%f  %l%m'
+    \'grepformat': '%f:%l:%m,%f:%l%m,%f  %l%m',
+    \'too_big_dotdot_is_err': 0
 \}
 
 " TODO: Don't hardcode this: allow user to set a global option (e.g.,
@@ -491,10 +492,8 @@ fu! s:glob_to_patt(sprj, glob_info)
     let star = '[^/]*'
     let re_starstar = '\%(^\|/\)\@<=\%(\*\*\)\%(\([-+]\)\?\(0\|[1-9][0-9]*\)\)\?\(/\|$\)'
     let re_anystar = '\%('.re_star.'\|'.re_starstar.'\)'
-
     " Handle any leading anchor, as well as any subsequent ..[N]/ sequence.
-    let [patt, anch_beg, anch_end] = s:preprocess_glob(a:glob_info, a:sprj.root)
-
+    let [patt, anch_beg, anch_end] = s:preprocess_glob(a:glob_info, a:sprj)
     " Since star(star)s make no sense when the corresponding end is unanchored...
     " Note: anch_beg is already set if s:preprocess_glob processed leading dot
     if !anch_beg && patt =~ '^'.re_anystar
@@ -503,7 +502,6 @@ fu! s:glob_to_patt(sprj, glob_info)
     if !anch_end && patt =~ re_anystar.'$'
         let anch_end = 1
     endif
-
     " Short-circuit if no pattern supplied (noting that special constructs
     " such as ./ and .// are part of pattern at this point). In such cases,
     " anchors determine whether all files or none match.
@@ -577,7 +575,7 @@ fu! s:glob_to_patt(sprj, glob_info)
                 let re_patt .= patt[sio : si - 1]
             elseif si < 0
                 " No more matches: accumulate remainder of string
-                let re_patt .= patt[sio : -1]
+                let re_patt .= patt[sio : ]
             endif
             if si >= 0
                 " Assumption: matchlist guaranteed to succeed.
@@ -667,7 +665,7 @@ endfu
 " Exception: Throw exception in case of invalid glob: e.g., a number of ..'s
 " that would move us above sp root.
 " TODO: Need access to regexes: e.g., re_anystar
-fu! s:preprocess_glob(glob_info, sp_root)
+fu! s:preprocess_glob(glob_info, sprj)
     let [patt, anch_beg, anch_end] = [a:glob_info['patt'], a:glob_info['anch_beg'], a:glob_info['anch_end']]
     let re_dot = '\.//\?'
     let re_num = '[1-9][0-9]*'
@@ -675,7 +673,7 @@ fu! s:preprocess_glob(glob_info, sp_root)
     " Note: The .. list must end with either / or end-of-string. Any trailing
     " / is consumed.
     let re_dotdots = re_dotdot . '\%(/' . re_dotdot . '\)*\%(/\|$\)'
-    let re_all = '^\('.re_dot.'\)\('.re_dotdots.'\)\(.*\)'
+    let re_all = '^\('.re_dot.'\)\('.re_dotdots.'\)\?\(.*\)'
     let m = matchlist(patt, re_all)
     if !empty(m)
         " Leading ./ or .//
@@ -691,24 +689,37 @@ fu! s:preprocess_glob(glob_info, sp_root)
         if rest[0] == '/'
             throw "Too many consecutive path separators in pattern: " . patt
         endif
+        echomsg "a:sprj.root: " . a:sprj.root
         if dot == './/'
             " Use fnamemodify to ensure trailing slash.
-            let anch_dir = s:canonicalize_path(getcwd(), a:sp_root)
+            " TODO: Bug!!!!: If cwd is higher than sprj root, use the latter!
+            " Rationale: Search will actually be performed from sprj root, so
+            " it doesn't make sense to allow anything higher.
+            " UNDER CONSTRUCTION!!!!
+            let anch_dir = s:canonicalize_path(getcwd(), a:sprj.root)
+            echomsg "getcwd(): " . getcwd()
+            echomsg "anch_dir: " . anch_dir
         else
             " Note: This will default to same as .// if no current file.
-            let anch_dir = s:canonicalize_path(expand('%:h'), a:sp_root)
+            echomsg "expand('%:h'): " . getcwd()
+            let anch_dir = s:canonicalize_path(expand('%:h'), a:sprj.root)
         endif
         " Assumption: A non-empty anch_dir has trailing /
         " Process any ..[N]/ construct(s) following the leading dot slash(es)
         if !empty(dotdots)
             " Strip trailing slash; otherwise, initial fnamemodify with :h
             " flag will remove only a trailing slash.
-            let dir = anch_dir[-1:] == '/' ? anch_dir[0:-1] : anch_dir
+            let dir = anch_dir[-1:] == '/' ? anch_dir[0:-2] : anch_dir
             let cnt = s:get_num_dotdots(dotdots)
             while cnt
                 " Strip another component unless too many ..'s specified.
                 if empty(dir) || dir == '.'
-                    throw "Too many ../'s applied to anchor dir `".anch_dir."' in glob `".patt."': ".dotdots
+                    if a:sprj.opt.too_big_dotdot_is_err
+                        throw "Too many ../'s applied to anchor dir `".anch_dir."' in glob `".patt."': ".dotdots
+                    else
+                        " Stop at sprj root (silently ignoring extra ../'s)
+                        break
+                    endif
                 endif
                 let dir = fnamemodify(dir, ':h')
                 let cnt -= 1
@@ -716,10 +727,11 @@ fu! s:preprocess_glob(glob_info, sp_root)
             " Note: When fnamemodify strips final path component, it leaves a
             " single `.'; we want to get back any trailing slash removed by :h
             " but no leading dot.
-            let dir = dir == '' || dir == '.' ? '' : dir . '/'
+            let anch_dir = dir == '' || dir == '.' ? '' : dir . '/'
         endif
         " Append any non-special text to complete rebuild of patt.
-        let patt = dir . rest
+        let patt = anch_dir . rest
+        echomsg "patt: " . patt
     endif
     return [patt, anch_beg, anch_end]
 endfu
