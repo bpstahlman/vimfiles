@@ -17,7 +17,7 @@ let s:default_opt = {
     \'maxgrepsize': 4095,
     \'grepprg': 'grep -nH',
     \'grepformat': '%f:%l:%m,%f:%l%m,%f  %l%m',
-    \'too_big_dotdot_is_err': 0
+    \'allow_infinite_dotdot': 1
 \}
 
 " TODO: Don't hardcode this: allow user to set a global option (e.g.,
@@ -673,7 +673,17 @@ fu! s:preprocess_glob(glob_info, sprj)
     " Note: The .. list must end with either / or end-of-string. Any trailing
     " / is consumed.
     let re_dotdots = re_dotdot . '\%(/' . re_dotdot . '\)*\%(/\|$\)'
-    let re_all = '^\('.re_dot.'\)\('.re_dotdots.'\)\?\(.*\)'
+    " Vim Bug Workaround: The non-backtracking assertion is used to circumvent
+    " a bug in the new (Vim 7.4) NFA regex engine, which, when given the
+    " choice between matching a trailing .. in the dotdot list or the final
+    " catchall \(...\), incorrectly chooses the latter.
+    " Alternative Fix: Could simply use \%#=1 to force use of old engine,
+    " which has been verified to handle the pattern correctly.
+    " TODO: Report to Vim list.
+    " Here are the 2 patterns
+    " Orig: ^\(\.//\?\)\(\.\.\%([1-9][0-9]*\)\?\%(/\.\.\%([1-9][0-9]*\)\?\)*\%(/\|$\)\)\?\(.*\)
+    " Workaround: ^\(\.//\?\)\%(\(\.\.\%([1-9][0-9]*\)\?\%(/\.\.\%([1-9][0-9]*\)\?\)*\%(/\|$\)\)\?\)\@>\(.*\)
+    let re_all = '^\('.re_dot.'\)\%(\('.re_dotdots.'\)\?\)\@>\(.*\)'
     let m = matchlist(patt, re_all)
     if !empty(m)
         " Leading ./ or .//
@@ -714,7 +724,7 @@ fu! s:preprocess_glob(glob_info, sprj)
             while cnt
                 " Strip another component unless too many ..'s specified.
                 if empty(dir) || dir == '.'
-                    if a:sprj.opt.too_big_dotdot_is_err
+                    if !a:sprj.opt.allow_infinite_dotdot
                         throw "Too many ../'s applied to anchor dir `".anch_dir."' in glob `".patt."': ".dotdots
                     else
                         " Stop at sprj root (silently ignoring extra ../'s)
