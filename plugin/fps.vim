@@ -1674,7 +1674,7 @@ fu! s:refresh(...)
         for sprj in sprjs
             " Note: An sf.cd (TODO) would make more sense here than pushd...
             call sf.pushd(sprj.root)
-            call sprj.cache_listfile(sprj, 1)
+            call s:cache_listfile(sprj, 1)
         endfor
     "catch /Vim(echoerr)/
         "echohl ErrorMsg|echomsg v:exception|echohl None
