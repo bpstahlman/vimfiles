@@ -247,7 +247,8 @@ fu! s:process_longnames(longnames)
             " Append the optional part within \%[...]
             let re .= '\%[' . longnames[i][len(reqs[i]):] . ']'
         endif
-        call add(longpats, {'name': longnames[i], 're': re})
+        " Note: Could alternatively apply the anchors at the point of use.
+        call add(longpats, {'name': longnames[i], 're': '^' . re . '$'})
         let i = i + 1
     endwhile
     return longpats
@@ -706,6 +707,9 @@ fu! s:preprocess_glob(glob_info, sprj)
             " Rationale: Search will actually be performed from sprj root, so
             " it doesn't make sense to allow anything higher.
             " UNDER CONSTRUCTION!!!!
+            " TODO: Consider having canonicalize_path return a flag indicating
+            " whether it's relative to root: otherwise, need to test for that,
+            " which involves looking at slashes and such...
             let anch_dir = s:canonicalize_path(getcwd(), a:sprj.root)
             echomsg "getcwd(): " . getcwd()
             echomsg "anch_dir: " . anch_dir
@@ -1105,7 +1109,12 @@ endfu
 " Example:
 " --php -abc --js
 " ==> ['l:php', 's:a', 's:b', 's:c', 'l:js']
+" !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+" TODO: This appears to be obsolete! Remove after confirmation!!!
+" !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 fu! s:extract_opts(optstr)
+    " Leave it like this a bit before removal...
+    return
     let opts = []
     let uniq = {}
     let segs = split(a:optstr, '\s\+')
