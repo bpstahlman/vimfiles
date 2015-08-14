@@ -163,6 +163,9 @@ fu! s:post_process_config()
         " Convert to absolute path.
         " Discovery: fnamemodify with :p *always* produces trailing / for
         " existing dir.
+        " TODO: Consider relativizing if possible... The problem is, find is
+        " optimally expressed relative to the project root, but will be run
+        " from the sprj root...
         let sprj.opt.find = fnamemodify(sprj.opt.find, ':p')
 
         " Ensure existence of cache and tmp dirs.
@@ -682,9 +685,10 @@ fu! s:preprocess_glob(glob_info, sprj)
     " which has been verified to handle the pattern correctly.
     " TODO: Report to Vim list.
     " Here are the 2 patterns
-    " Orig: ^\(\.//\?\)\(\.\.\%([1-9][0-9]*\)\?\%(/\.\.\%([1-9][0-9]*\)\?\)*\%(/\|$\)\)\?\(.*\)
-    " Workaround: ^\(\.//\?\)\%(\(\.\.\%([1-9][0-9]*\)\?\%(/\.\.\%([1-9][0-9]*\)\?\)*\%(/\|$\)\)\?\)\@>\(.*\)
-    let re_all = '^\('.re_dot.'\)\%(\('.re_dotdots.'\)\?\)\@>\(.*\)'
+    " Orig:       ^\(\.//\?\)\(\.\.\%([1-9][0-9]*\)\?\%(/\.\.\%([1-9][0-9]*\)\?\)*\%(/\|$\)\)\?\(.*\)
+    " Workaround: ^\(\.//\?\)\@>\%(\(\.\.\%([1-9][0-9]*\)\?\%(/\.\.\%([1-9][0-9]*\)\?\)*\%(/\|$\)\)\?\)\@>\(.*\)
+    " Note: The use of \@> around 2 separate groups to prevent back-tracking.
+    let re_all = '^\('.re_dot.'\)\@>\%(\('.re_dotdots.'\)\?\)\@>\(.*\)'
     let m = matchlist(patt, re_all)
     if !empty(m)
         " Leading ./ or .//
@@ -700,7 +704,6 @@ fu! s:preprocess_glob(glob_info, sprj)
         if rest[0] == '/'
             throw "Too many consecutive path separators in pattern: " . patt
         endif
-        echomsg "a:sprj.root: " . a:sprj.root
         if dot == './/'
             " Use fnamemodify to ensure trailing slash.
             " TODO: Bug!!!!: If cwd is higher than sprj root, use the latter!
@@ -710,12 +713,20 @@ fu! s:preprocess_glob(glob_info, sprj)
             " TODO: Consider having canonicalize_path return a flag indicating
             " whether it's relative to root: otherwise, need to test for that,
             " which involves looking at slashes and such...
-            let anch_dir = s:canonicalize_path(getcwd(), a:sprj.root)
-            echomsg "getcwd(): " . getcwd()
-            echomsg "anch_dir: " . anch_dir
+            let flags = {}
+            let anch_dir = s:canonicalize_path(getcwd(), a:sprj.root, flags)
+            if !flags.relative
+                " Design Decision: If outside sprj root, make search relative
+                " to sprj root.
+                " Rationale: It's the only thing that makes sense for .//
+                " Make anchor dir empty because path is relative to sprj root.
+                " Assumption: File matching code knows how to handle this (by
+                " treating an immediately following fixed string as the
+                " anchor.)
+                let anch_dir = ''
+            endif
         else
             " Note: This will default to same as .// if no current file.
-            echomsg "expand('%:h'): " . getcwd()
             let anch_dir = s:canonicalize_path(expand('%:h'), a:sprj.root)
         endif
         " Assumption: A non-empty anch_dir has trailing /
@@ -745,7 +756,6 @@ fu! s:preprocess_glob(glob_info, sprj)
         endif
         " Append any non-special text to complete rebuild of patt.
         let patt = anch_dir . rest
-        echomsg "patt: " . patt
     endif
     return [patt, anch_beg, anch_end]
 endfu
@@ -942,8 +952,9 @@ fu! Test_get_matching_files(cfg_idx, glob, partial)
     endfor
 endfu
 
-" Canonicalize the input path, attempting to make relative to rootdir (if
-" non-empty).
+" Canonicalize the input path. If rootdir non-empty, attempt to make path
+" relative to rootdir and (if caller has provided a Dict as optional 3rd arg),
+" set a flag indicating whether the path is relative.
 " Note: Use fnamemodify and expand in 2-step process to canonicalize:
 " 1. fnamemodify with :p gets full path (but possibly with incorrect slashes)
 "    Note: If path exists and is a directory, fnamemodify will add trailing
@@ -964,20 +975,45 @@ endfu
 " systems, Vim can handle either type of slash internally! The only thing Vim
 " wouldn't be able to handle is abs paths like /cygdrive/c/... in the find
 " results, but I already have the pathconv option to handle that...
-fu! s:canonicalize_path(path, rootdir)
+fu! s:canonicalize_path(path, rootdir, ...)
     let path = expand(fnamemodify(a:path, ':p'))
-    "echo "path: " . path
     if (a:rootdir != '')
         let rootdir = expand(fnamemodify(a:rootdir, ':p'))
-        "echo "rootdir: " . rootdir
-        " Can we make it relative to rootdir?
-        let ei = matchend(path, '^' . rootdir)
-        if ei > 0
-            " Keep only the relative part.
-            let path = path[ei :]
+        " To avoid complicating logic, just assign flags to bitbucket if
+        " caller doesn't want them.
+        let flags = {}
+        if a:0 && type(a:1) == 4
+            " Grab ref to flags by-ref param.
+            let flags = a:000[0]
         endif
+        let flags.relative = 0
+        " Try to make relative to rootdir?
+        let rel_info = s:relativize_canonical_path(rootdir, path, !has('fname_case'))
+        let [flags.relative, path] = [rel_info.isRel, rel_info.path]
     endif
     return path
+endfu
+
+" Attempt to make input path relative to base, ignoring (but preserving) case
+" if ic arg is set.
+" Return: a Dict of the following form:
+" {
+"   'isRel': true|false
+"   'path: {relativized or original path}
+" Inputs:
+" base - Base path (in canonical form) serving as basis for relativization
+" path - the path to relativize to base (also in canonical form)
+" ic   - if true, case is ignored (but preserved)
+" Assumption: Both inputs are non-empty.
+fu! s:relativize_canonical_path(base, path, ic)
+    let re = '^' . (a:ic ? '\c' : '') . s:escape_patt(a:base)
+    let idx = matchend(a:path, re)
+    return idx >= 0 ? {'isRel': 1, 'path': a:path[idx :]} : {'isRel': 0, 'path': a:path}
+endfu
+
+" Assumption: Patterns will be evaluated with 'magic' set.
+fu! s:escape_patt(patt)
+    return escape(a:patt, '$.*\')
 endfu
 " <<<
 " >>> Functions used to read/write internal data structures.
