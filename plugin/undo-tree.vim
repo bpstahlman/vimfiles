@@ -1,65 +1,3 @@
-fu! s:Make_node(e)
-	return {
-		\ 'seq': a:e.seq
-		\,'time': a:e.time
-		\,'children': []
-		\}
-endfu
-fu! s:Insert_sorted(ls, o)
-	let i = 0
-	for x in a:ls
-		if a:o.seq < x.seq
-			call insert(a:ls, a:o, i)
-			return a:ls
-		endif
-		let i += 1
-	endfor
-	return add(a:ls, a:o)
-endfu
-fu! s:Recur_tree(entries)
-	let ret = []
-	for e in a:entries
-		let o = s:Make_node(e)
-		if has_key(e, 'alt')
-			" Build sibs recursively and add self, keeping list sorted.
-			let sibs = s:Insert_sorted(s:Recur_tree(e.alt), o)
-		else
-			" Any sibs are at higher level.
-			let sibs = [o]
-		endif
-		if empty(ret)
-			" First child represents the level to be returned.
-			let ret = sibs
-		else
-			" Assumption: can't get here before tail set.
-			let tail.children = sibs
-		endif
-		" Note: tail can point anywhere within sibs list.
-		let tail = o
-	endfor
-	return ret
-endfu
-fu! s:Display_undo_tree(tree, ...)
-	let lvl = a:0 ? a:1 : 0
-	" Print the node itself
-	" TODO: Special format for root node, or just handle with ternaries?
-	echo printf("%s%4d: %s"
-		\, repeat("\t", lvl)
-		\, a:tree.seq
-		\, (lvl ? strftime("%T", a:tree.time) : "origin"))
-	" Recurse on any children.
-	for child in a:tree.children
-		call s:Display_undo_tree(child, lvl + 1)
-	endfor
-endfu
-fu! s:Build_undo_tree()
-	let tree = undotree()
-	let root = {'seq': 0, 'children': []}
-	if has_key(tree, 'entries')
-		let root.children = s:Recur_tree(tree.entries)
-	endif
-	return root
-endfu
 
 " 1: Fri 14 Oct 2016 09:30:10 AM CDT: |  |
 " 2: Fri 14 Oct 2016 09:30:11 AM CDT: |  |
@@ -96,6 +34,105 @@ fu! s:Show_undo_tree()
 	echo printf("synced:\t%d", t.synced)
 
 	call s:Recurse_tree(t.entries, 0)
+endfu
+
+fu! s:Make_node(e, parent)
+	return {
+		\ 'seq': a:e.seq
+		\,'time': a:e.time
+		\,'children': []
+		\,'prev': {},
+		\,'next': {},
+		\,'parent': a:parent
+		\}
+endfu
+fu! s:Insert_sorted(ls, o)
+	" TODO: Review this...
+	let x = ls.fst
+	let a:ls.cur = a:o
+	while !empty(x)
+		if a:o.seq < x.seq
+			" TODO: Handle fst and cur
+			" Insert before
+			if x == a:ls.fst
+				let a:ls.fst = a:o
+			endif
+			let o.prev = x.prev
+			let o.prev.next = o
+			let x.prev = o
+			let o.next = x
+			return
+		endif
+		let x = x.next
+	endwhile
+	" Append
+	let a:ls.lst.next = a:o
+	let a:o.prev = a:ls.lst
+	let a:ls.lst = a:o
+	return
+endfu
+fu! s:Recur_tree(entries, ...)
+	if !a:0
+		" Top-level call
+		let tree = undotree()
+		let root = {'seq': 0, 'children': {'fst': {}, 'cur': {}, 'lst': {}}}
+		let parent = root
+	else
+		let parent = a:1
+	endif
+
+	let ret = {}
+	for e in a:entries
+		" TODO: Consider changing name parent to parent.
+		let o = s:Make_node(e, parent)
+		if has_key(e, 'alt')
+			" Build sibs recursively and add self, keeping list sorted.
+			let sibs = s:Insert_sorted(s:Recur_tree(e.alt, parent), o)
+		else
+			" Any sibs are at higher level.
+			let sibs = {'fst': o, 'cur': o, 'lst': o}
+		endif
+		if empty(ret)
+			" First child represents the level to be returned.
+			if exists('l:root')
+				" Root is special case: no one to return siblings to. Make child of
+				" root, and return root.
+				let root.children = sibs
+				let ret = root
+			else
+				let ret = sibs
+			endif
+		else
+			" Assumption: can't get here before parent set.
+			let parent.children = sibs
+		endif
+		" Note: parent can point anywhere within sibs list.
+		let parent = o
+	endfor
+	return ret
+endfu
+fu! s:Display_undo_tree(tree, ...)
+	let lvl = a:0 ? a:1 : 0
+	" Print the node itself
+	" TODO: Special format for root node, or just handle with ternaries?
+	echo printf("%s%4d: %s"
+		\, repeat("\t", lvl)
+		\, a:tree.seq
+		\, (lvl ? strftime("%T", a:tree.time) : "origin"))
+	" Recurse on any children.
+	for child in a:tree.children
+		call s:Display_undo_tree(child, lvl + 1)
+	endfor
+endfu
+fu! s:Build_undo_tree()
+	let tree = undotree()
+	let root = {'seq': 0, 'children': []}
+	if has_key(tree, 'entries')
+		let root.children = s:Recur_tree(tree.entries)
+	endif
+	echo string(undotree())
+	call s:Show_undo_tree()
+	return root
 endfu
 
 nmap <F7> :call <SID>Show_undo_tree()<CR>
