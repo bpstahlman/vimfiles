@@ -35,108 +35,130 @@ fu! s:Show_undo_tree()
 
 	call s:Recurse_tree(t.entries, 0)
 endfu
-
+" =============================================================
 fu! s:Make_node(e, parent)
 	return {
 		\ 'seq': a:e.seq
 		\,'time': a:e.time
-		\,'children': []
-		\,'prev': {},
-		\,'next': {},
+		\,'children': {'fst': {}, 'cur': {}, 'lst': {}}
+		\,'prev': {}
+		\,'next': {}
 		\,'parent': a:parent
 		\}
 endfu
+fu! s:Make_root(tree, ...)
+	let ret = a:0 ? a:1 : {}
+	for k in filter(keys(a:tree), 'v:val != "entries"')
+		let ret[k] = a:tree[k]
+	endfor
+	return ret
+endfu
 fu! s:Insert_sorted(ls, o)
-	" TODO: Review this...
-	let x = ls.fst
+	" Note: cur may be changed at higher level.
 	let a:ls.cur = a:o
+	let x = a:ls.fst
 	while !empty(x)
 		if a:o.seq < x.seq
-			" TODO: Handle fst and cur
-			" Insert before
-			if x == a:ls.fst
+			" Insert before.
+			" Assumption: Can't get here if lst empty.
+			let a:o.next = x
+			let a:o.prev = x.prev
+			let x.prev.next = a:o
+			let x.prev = a:o
+			if x is a:ls.fst
+				" List has new head.
 				let a:ls.fst = a:o
 			endif
-			let o.prev = x.prev
-			let o.prev.next = o
-			let x.prev = o
-			let o.next = x
-			return
+			return a:ls
 		endif
 		let x = x.next
 	endwhile
-	" Append
+	" Either empty list, or object must be appended.
+	if empty(a:ls.fst)
+		" Empty list
+		let [a:ls.fst, a:ls.lst, a:ls.cur] = [a:o, a:o, a:o]
+		let [a:o.prev, a:o.next] = [{}, {}]
+		return a:ls
+	endif
+	" Append to non-empty list
 	let a:ls.lst.next = a:o
 	let a:o.prev = a:ls.lst
+	let a:o.next = {}
 	let a:ls.lst = a:o
-	return
+	return a:ls
 endfu
-fu! s:Recur_tree(entries, ...)
+fu! s:Build_undo_tree(...)
 	if !a:0
 		" Top-level call
 		let tree = undotree()
-		let root = {'seq': 0, 'children': {'fst': {}, 'cur': {}, 'lst': {}}}
+		let entries = tree.entries
+		" Create root, merging in undotree() properties.
+		let root = s:Make_root(tree,
+			\{'seq': 0, 'children': {'fst': {}, 'cur': {}, 'lst': {}}})
 		let parent = root
 	else
-		let parent = a:1
+		let [entries, parent] = a:000
 	endif
 
 	let ret = {}
-	for e in a:entries
-		" TODO: Consider changing name parent to parent.
+	for e in entries
 		let o = s:Make_node(e, parent)
 		if has_key(e, 'alt')
 			" Build sibs recursively and add self, keeping list sorted.
-			let sibs = s:Insert_sorted(s:Recur_tree(e.alt, parent), o)
+			" TODO: Consider whether to assign to parent.children instead
+			let sibs = s:Insert_sorted(s:Build_undo_tree(e.alt, parent), o)
 		else
 			" Any sibs are at higher level.
 			let sibs = {'fst': o, 'cur': o, 'lst': o}
 		endif
+		let parent.children = sibs
 		if empty(ret)
 			" First child represents the level to be returned.
-			if exists('l:root')
-				" Root is special case: no one to return siblings to. Make child of
-				" root, and return root.
-				let root.children = sibs
-				let ret = root
-			else
-				let ret = sibs
-			endif
-		else
-			" Assumption: can't get here before parent set.
-			let parent.children = sibs
+			" Note: This should be equivalent to parent.children.
+			let ret = sibs
 		endif
 		" Note: parent can point anywhere within sibs list.
 		let parent = o
 	endfor
-	return ret
+	" Root (seq==0) is special case: no one to return siblings to. In that case,
+	" we make sibs child of root, and return root itself.
+	return exists('l:root') ? root : ret
 endfu
 fu! s:Display_undo_tree(tree, ...)
-	let lvl = a:0 ? a:1 : 0
+	if a:tree.seq == 0
+		let [root, lvl, is_main] = [a:tree, 0, 1]
+	else
+		" Non-root
+		let [root, lvl, is_main] = a:000
+	endif
 	" Print the node itself
 	" TODO: Special format for root node, or just handle with ternaries?
+	if is_main
+		if a:tree.seq == root.seq_cur
+			echohl Error
+		else
+			echohl Todo
+		endif
+	endif
 	echo printf("%s%4d: %s"
 		\, repeat("\t", lvl)
 		\, a:tree.seq
 		\, (lvl ? strftime("%T", a:tree.time) : "origin"))
-	" Recurse on any children.
-	for child in a:tree.children
-		call s:Display_undo_tree(child, lvl + 1)
-	endfor
-endfu
-fu! s:Build_undo_tree()
-	let tree = undotree()
-	let root = {'seq': 0, 'children': []}
-	if has_key(tree, 'entries')
-		let root.children = s:Recur_tree(tree.entries)
+	if is_main
+		echohl None
 	endif
-	echo string(undotree())
-	call s:Show_undo_tree()
-	return root
+	" Recurse on any children.
+	let [x, cur] = [a:tree.children.fst, a:tree.children.cur]
+	while !empty(x)
+		" Can't get back on main branch once we've left it.
+		call s:Display_undo_tree(x, root, lvl + 1, is_main && x is cur)
+		let x = x.next
+	endwhile
 endfu
 
 nmap <F7> :call <SID>Show_undo_tree()<CR>
 nmap <F8> :call <SID>Display_undo_tree(<SID>Build_undo_tree())<CR>
-nmap <F9> :echo string(<SID>Build_undo_tree())<CR>
+nmap <F9> :echo string(<SID>Show_undo_tree())<CR>
+nmap <F10> :let g:tr = <SID>Build_undo_tree()<CR>
 " vim:ts=4:sw=4:tw=80
 
