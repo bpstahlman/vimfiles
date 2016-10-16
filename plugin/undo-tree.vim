@@ -48,9 +48,16 @@ fu! s:Make_node(e, parent)
 endfu
 fu! s:Make_root(tree, ...)
 	let ret = a:0 ? a:1 : {}
+	" Note: Hide Vim's data under 'meta' key to future-proof.
+	" TODO: Cleaner (loopless) way in Vim script to do this?
+	let ret.meta = {}
 	for k in filter(keys(a:tree), 'v:val != "entries"')
-		let ret[k] = a:tree[k]
+		let ret.meta[k] = a:tree[k]
 	endfor
+	let ret.parent = {}
+	" This will be set later in build traversal unless cur is root, so go ahead
+	" and initialize to root.
+	let ret.cur = ret
 	return ret
 endfu
 fu! s:Insert_sorted(ls, o)
@@ -97,16 +104,21 @@ fu! s:Build_undo_tree(...)
 			\{'seq': 0, 'children': {'fst': {}, 'cur': {}, 'lst': {}}})
 		let parent = root
 	else
-		let [entries, parent] = a:000
+		let [entries, parent, root] = a:000
 	endif
 
 	let ret = {}
 	for e in entries
 		let o = s:Make_node(e, parent)
+		if o.seq == root.meta.seq_cur
+			" Store a ptr to the current node on the root.
+			" Note: This is what will be manipulated henceforth.
+			let root.cur = o
+		endif
 		if has_key(e, 'alt')
 			" Build sibs recursively and add self, keeping list sorted.
 			" TODO: Consider whether to assign to parent.children instead
-			let sibs = s:Insert_sorted(s:Build_undo_tree(e.alt, parent), o)
+			let sibs = s:Insert_sorted(s:Build_undo_tree(e.alt, parent, root), o)
 		else
 			" Any sibs are at higher level.
 			let sibs = {'fst': o, 'cur': o, 'lst': o}
@@ -122,7 +134,7 @@ fu! s:Build_undo_tree(...)
 	endfor
 	" Root (seq==0) is special case: no one to return siblings to. In that case,
 	" we make sibs child of root, and return root itself.
-	return exists('l:root') ? root : ret
+	return !a:0 ? root : ret
 endfu
 fu! s:Display_undo_tree(tree, ...)
 	if a:tree.seq == 0
@@ -134,7 +146,7 @@ fu! s:Display_undo_tree(tree, ...)
 	" Print the node itself
 	" TODO: Special format for root node, or just handle with ternaries?
 	if is_main
-		if a:tree.seq == root.seq_cur
+		if a:tree is root.cur
 			echohl Error
 		else
 			echohl Todo
@@ -156,9 +168,54 @@ fu! s:Display_undo_tree(tree, ...)
 	endwhile
 endfu
 
-nmap <F7> :call <SID>Show_undo_tree()<CR>
-nmap <F8> :call <SID>Display_undo_tree(<SID>Build_undo_tree())<CR>
+" Define methods for tree navigation
+fu! s:Move_up() dict
+	if !empty(self.cur.parent)
+		let self.cur = self.cur.parent
+		" Undo
+		normal! u
+	endif
+endfu
+fu! s:Move_down() dict
+	if !empty(self.cur.children.cur)
+		let self.cur = self.cur.children.cur
+		" Redo
+		exe "normal! \<C-R>"
+	endif
+endfu
+fu! s:Move_left() dict
+	" If current node has children, and the node on current undo/redo branch
+	" isn't the left-most, attempt to move cur ptr leftward.
+	let children = self.cur.children
+	if !empty(children.cur) && !empty(children.cur.prev)
+		let children.cur = children.cur.prev
+	endif
+endfu
+fu! s:Move_right() dict
+	" If current node has children, and the node on current undo/redo branch
+	" isn't the right-most, attempt to move cur ptr rightward.
+	let children = self.cur.children
+	if !empty(children.cur) && !empty(children.cur.next)
+		let children.cur = children.cur.next
+	endif
+endfu
+
+fu! Make_undo_tree()
+	let me = s:Build_undo_tree()
+	let me.up = function('s:Move_up')
+	let me.down = function('s:Move_down')
+	let me.left = function('s:Move_left')
+	let me.right = function('s:Move_right')
+	return me
+endfu
+
+nmap <F7> :let ut = Make_undo_tree()<CR>
+nmap <F8> :call <SID>Display_undo_tree(ut)<CR>
+nmap <C-Up> :call ut.up()<CR>
+nmap <C-Down> :call ut.down()<CR>
+nmap <C-Left> :call ut.left()<CR>
+nmap <C-Right> :call ut.right()<CR>
+
 nmap <F9> :echo string(<SID>Show_undo_tree())<CR>
-nmap <F10> :let g:tr = <SID>Build_undo_tree()<CR>
 " vim:ts=4:sw=4:tw=80
 
