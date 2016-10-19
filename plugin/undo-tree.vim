@@ -209,6 +209,84 @@ fu! Make_undo_tree()
 	return me
 endfu
 
+" Implementation of 'Drawing Trees' algorithm (Andrew Kennedy)
+" Since Vim has no zip function.
+" Note: If one array is shorter than the other, missing elements are {}.
+fu! s:Zip(xs, ys)
+	let [nx, ny, n] = [len(xs), len(ys), max(nx, ny)]
+	let ret = []
+	let i = 0
+	while i < n
+		call add(ret, [i < nx ? xs[i] : {}, i < ny ? ys[i] : {}])
+		let i += 1
+	endwhile
+	return ret
+endfu
+
+fu! s:Unzip(xs)
+	let n = len(xs)
+	let ret = [[], []]
+	for x in xs
+		call add(ret[0], x[0])
+		call add(ret[1], x[1])
+	endfor
+	return ret
+endfu
+
+fu! s:Move_tree(t, dx)
+	" TODO_ENCAPSULATE
+	let t.x += dx
+endfu
+
+fu! s:Move_extent(e, dx)
+	" TODO: Is copy needed? Do it for now to be safe, but re-evaluate later.
+	return map(copy(e), '[v:val[0] + dx, v:val[1] + dx]')
+endfu
+
+fu! s:Merge(e1, e2)
+	let [n1, n2, n] = [len(e1), len(e2), max(nx, ny)]
+	let ret = []
+	let i = 0
+	while i < n
+		" Note: When one array shorter than the other, take both values from the
+		" longer one.
+		" TODO: There are more efficient ways, especially if one is much longer.
+		call add(ret, [i < n1 ? e1[0] : e2[0], i < n2 ? e2[1] : e1[1]])
+	endwhile
+	return ret
+endfu
+
+fu! s:Merge_list(es)
+	let [i, n] = [1, len(es)]
+	" Note: Although s:Merge could handle 1st element of [], handling first
+	" element specially is more efficient.
+	let ret = n ? copy(es[0]) : []
+	while i < n
+		let ret = s:Merge(ret, es[i])
+	endwhile
+	return ret
+endfu
+
+fu! s:Fit(e1, e2)
+endfu
+
+" Caveat: Vim doesn't do TCO, so implement both left and right folds without
+" recursion.
+fu! s:Fitlistl(es)
+endfu
+
+fu! s:Fitlistr(es)
+endfu
+
+fu! s:Mean(x, y)
+endfu
+
+fu! s:Fitlist(es)
+endfu
+
+fu! s:Design(t)
+endfu
+
 nmap <F7> :let ut = Make_undo_tree()<CR>
 nmap <F8> :call <SID>Display_undo_tree(ut)<CR>
 nmap <C-Up> :call ut.up()<CR>
