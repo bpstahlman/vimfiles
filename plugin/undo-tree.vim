@@ -213,20 +213,20 @@ endfu
 " Since Vim has no zip function.
 " Note: If one array is shorter than the other, missing elements are {}.
 fu! s:Zip(xs, ys)
-	let [nx, ny, n] = [len(xs), len(ys), max(nx, ny)]
+	let [nx, ny, n] = [len(a:xs), len(a:ys), max(nx, ny)]
 	let ret = []
 	let i = 0
 	while i < n
-		call add(ret, [i < nx ? xs[i] : {}, i < ny ? ys[i] : {}])
+		call add(ret, [i < nx ? a:xs[i] : {}, i < ny ? a:ys[i] : {}])
 		let i += 1
 	endwhile
 	return ret
 endfu
 
 fu! s:Unzip(xs)
-	let n = len(xs)
+	let n = len(a:xs)
 	let ret = [[], []]
-	for x in xs
+	for x in a:xs
 		call add(ret[0], x[0])
 		call add(ret[1], x[1])
 	endfor
@@ -235,12 +235,12 @@ endfu
 
 fu! s:Move_tree(t, dx)
 	" TODO_ENCAPSULATE
-	let t.x += dx
+	let a:t.x += a:dx
 endfu
 
 fu! s:Move_extent(e, dx)
 	" TODO: Is copy needed? Do it for now to be safe, but re-evaluate later.
-	return map(copy(e), '[v:val[0] + dx, v:val[1] + dx]')
+	return map(copy(a:e), '[v:val[0] + dx, v:val[1] + a:dx]')
 endfu
 
 fu! s:Merge(e1, e2)
@@ -251,40 +251,126 @@ fu! s:Merge(e1, e2)
 		" Note: When one array shorter than the other, take both values from the
 		" longer one.
 		" TODO: There are more efficient ways, especially if one is much longer.
-		call add(ret, [i < n1 ? e1[0] : e2[0], i < n2 ? e2[1] : e1[1]])
+		call add(ret, [i < n1 ? a:e1[0] : a:e2[0], i < n2 ? a:e2[1] : a:e1[1]])
 	endwhile
 	return ret
 endfu
 
 fu! s:Merge_list(es)
-	let [i, n] = [1, len(es)]
+	let [i, n] = [1, len(a:es)]
 	" Note: Although s:Merge could handle 1st element of [], handling first
 	" element specially is more efficient.
-	let ret = n ? copy(es[0]) : []
+	let ret = n ? copy(a:es[0]) : []
 	while i < n
-		let ret = s:Merge(ret, es[i])
+		let ret = s:Merge(ret, a:es[i])
 	endwhile
 	return ret
 endfu
 
 fu! s:Fit(e1, e2)
+	let ret = 0
+	" Note: Use min() in lieu of max() since unmatched levels aren't constrained
+	" by neighboring child.
+	let [n1, n2, n] = [len(a:e1), len(a:e2), min(nx, ny)]
+	let i = 0
+	while i < n
+		" TODO: Make min separation (1) configurable? At least, don't hard-code.
+		let d = a:e1[i][1] - a:e2[i][0] + 1
+		if d > ret
+			let ret = d
+		endif
+	endwhile
+	return ret
 endfu
 
 " Caveat: Vim doesn't do TCO, so implement both left and right folds without
 " recursion.
 fu! s:Fitlistl(es)
+	let [ret, acc] = [[], []]
+	for e in a:es
+		let x = s:Fit(acc, e)
+		" TODO: Doesn't appear that the original extent will be needed after the
+		" move, so there's probably potential for optimization.
+		let acc = s:Merge(acc, s:Move_extent(e, x))
+		call add(ret, x)
+	endfor
+	return ret
 endfu
 
+fu! s:Flip_extent(e)
+	return map(a:e, '[-v:val[1], -v:val[0]]')
+endfu
+
+" TODO: Consider whether it's better to implement in terms of Fitlistl, or to
+" implement Fitlistr independently.
 fu! s:Fitlistr(es)
+	let es = reverse(a:es)
+	let es = map(es, 's:Flip_extent(v:val)')
+	let es = s:Fitlistl(es)
+	let es = map(es, '-v:val')
+	let es = reverse(es)
+	return es
 endfu
 
+" TODO: Perhaps inline this.
 fu! s:Mean(x, y)
+	return (a:x + a:y) / 2.0
 endfu
 
 fu! s:Fitlist(es)
+	" Note: Avoid extra function call to s:Mean.
+	" TODO: A less functional style would probably render this more efficient.
+	return map(s:Zip(s:Fitlistl(a:es), s:Fitlistr(a:es)),
+		\ '(v:val[0] + v:val[1]) / 2.0')
 endfu
 
 fu! s:Design(t)
+	let returning = 0
+	let t = a:t
+	let tc = t.children.fst
+	let lvl = 0
+	let ret = {}
+	while t
+		while 1
+			if returning
+				if len(stack) == 0
+					" Done
+					let t = {}
+					break
+				endif
+				if empty(ret)
+					" Base case: i.e., no lower level, so use initial value.
+					let ret = [[], []]
+				else
+					" Pop back up to higher level.
+					" TODO: Check this...
+					" UNDER CONSTRUCTION
+					let [t, tc] = remove(stack, -1)
+				endif
+				if empty(tc.next)
+					" No more children. Do final processing and return.
+					" Do stuff...
+					let ret = 42
+					" Note: Intentionally leaving returning set.
+					break
+				endif
+				let returning = 0
+			else
+				" Not returning. Descend?
+				if !empty(tc.children.fst)
+					call add(stack, [t, tc])
+					let t = tc.children.fst
+					let tc = t.children.fst
+					break
+				else
+					let returning = 1
+					let ret = {}
+				endif
+			endif
+
+			let tc = tc.next
+		endwhile
+	endwhile
 endfu
 
 nmap <F7> :let ut = Make_undo_tree()<CR>
