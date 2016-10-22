@@ -235,7 +235,7 @@ endfu
 
 fu! s:Move_tree(t, dx)
 	" TODO_ENCAPSULATE
-	let a:t.x += a:dx
+	return {'node': a:t.node, 'x': a:t.x + a:dx, 'children': a:t.children}
 endfu
 
 fu! s:Move_extent(e, dx)
@@ -324,52 +324,70 @@ fu! s:Fitlist(es)
 		\ '(v:val[0] + v:val[1]) / 2.0')
 endfu
 
+" Note: Input tree is the undo-tree object. From that, build one that looks like
+" this:
+" {'node': <ut-node>, 'x': <position relative to parent>, 'children': <array of these nodes>}
+" TODO: Convert arrays used in these methods from Vim lists to singly-linked
+" lists. (Perhaps wait till I've tested basic algorithm.)
 fu! s:Design(t)
-	let returning = 0
-	let t = a:t
-	let tc = t.children.fst
 	let lvl = 0
-	let ret = {}
-	while t
-		while 1
-			if returning
-				if len(stack) == 0
-					" Done
-					let t = {}
-					break
-				endif
-				if empty(ret)
-					" Base case: i.e., no lower level, so use initial value.
-					let ret = [[], []]
-				else
-					" Pop back up to higher level.
-					" TODO: Check this...
-					" UNDER CONSTRUCTION
-					let [t, tc] = remove(stack, -1)
-				endif
-				if empty(tc.next)
-					" No more children. Do final processing and return.
-					" Do stuff...
-					let ret = 42
-					" Note: Intentionally leaving returning set.
-					break
-				endif
-				let returning = 0
-			else
-				" Not returning. Descend?
+	let descend = 0
+	let [t, tc] = [a:t, t.children.fst]
+	let [ret, sret] = [[], []]
+	while 1
+		if descend
+			let [trees, extents, ret] = [[], [], []]
+			let lvl += 1
+		elseif !empty(sret)
+			" Return from lower level
+			let lvl -= 1
+			if len(stack) == 0
+				" Done
+				return sret[0]
+			endif
+			" Pop back up to higher level.
+			" TODO: Check this...
+			" UNDER CONSTRUCTION
+			let [t, tc, trees, extents, ret] = remove(stack, -1)
+		endif
+		let descend = 0
+
+		while tc
+			if empty(sret)
+				" Not handling return: either descending or base case
 				if !empty(tc.children.fst)
-					call add(stack, [t, tc])
-					let t = tc.children.fst
-					let tc = t.children.fst
+					call add(stack, [t, tc, trees, extents, ret])
+					let t = tc
+					let tc = tc.children.fst
+					let descend = 1
 					break
 				else
-					let returning = 1
-					let ret = {}
+					" Base case: i.e., no lower level, so use initial value, and
+					" no need to bother with stack.
+					let sret = [[], []]
 				endif
 			endif
+			" Either we've just returned (ascending) or we've reached base case.
+			" Accumulate the subtree representred by sret
+			call add(trees, stree[0])
+			call add(extents, stree[1])
 
 			let tc = tc.next
 		endwhile
+		if !descend && empty(tc.next)
+			" No more children.
+			" Do final processing and return.
+			" Note: Everything here is built from trees and extents, which are
+			" unique to a level.
+			let positions = s:Fitlist(extents)
+			let ptrees = map(s:Zip(trees, positions), 's:Move_tree(v:val)')
+			let pextents = map(s:Zip(extents, positions), 's:Move_extent(v:val)')
+			" TODO: Calculate label width instead of this silly hardcode.
+			let resultextent = insert(s:Merge_list(pextents), [-2, 2])
+			let resulttree = {'node': t, 'x': 0, 'children': ptrees}
+			" Setting sret causes return processing at head of loop.
+			let sret = [resulttree, resultextent]
+		endif
 	endwhile
 endfu
 
