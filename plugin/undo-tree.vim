@@ -36,6 +36,10 @@ fu! s:Show_undo_tree()
 	call s:Recurse_tree(t.entries, 0)
 endfu
 " =============================================================
+" TODO: Consider pulling everything but 'next' under an 'el' property so that
+" these elements can be used with the list functions further down. Hmm... Not
+" yet clear whether structural members like children and parent would also need
+" to be in el.
 fu! s:Make_node(e, parent)
 	return {
 		\ 'seq': a:e.seq
@@ -212,76 +216,180 @@ endfu
 " Implementation of 'Drawing Trees' algorithm (Andrew Kennedy)
 " Since Vim has no zip function.
 " Note: If one array is shorter than the other, missing elements are {}.
-fu! s:Zip(xs, ys)
-	let [nx, ny, n] = [len(a:xs), len(a:ys), max(nx, ny)]
-	let ret = []
-	let i = 0
-	while i < n
-		call add(ret, [i < nx ? a:xs[i] : {}, i < ny ? a:ys[i] : {}])
-		let i += 1
-	endwhile
-	return ret
+" List implementation:
+" {'el': <element1>, 'next': {'el': <element2>, 'next': {...'next': {}
+fu! S_Cons(val, xs)
+	return {'el': a:val, 'next': a:xs}
 endfu
-
-fu! s:Unzip(xs)
-	let n = len(a:xs)
-	let ret = [[], []]
-	for x in a:xs
-		call add(ret[0], x[0])
-		call add(ret[1], x[1])
+" Note: Best when you maintain pointer to final element of list.
+fu! S_Conc(val, xs)
+	let x = a:xs
+	while !empty(x)
+		let x = x.next
+	endwhile
+	" Modify the (previously empty) tail in place.
+	let [x.el, x.next] = [a:val, {}]
+	" Return new tail el
+	return x
+endfu
+fu! S_Set_cdr(val, cons)
+	let a:cons.next = {'el': a:val, 'next': {}}
+	return a:cons.next
+endfu
+fu! S_Foldl(f, acc, xs)
+	" Note: Take type of xs into account, handling both arrays and lists.
+	" TODO: More efficient way than converting to list.
+	let [x, acc] = [type(a:xs) == 3 ? S_To_list(a:xs) : a:xs, a:acc]
+	while !empty(x)
+		let acc = a:f(acc, x.el)
+		let x = x.next
+	endwhile
+	return acc
+endfu
+fu! S_To_list(ary)
+	let ret = {}
+	let tail = ret
+	for x in a:ary
+		let tail = S_Conc(x, tail)
 	endfor
 	return ret
 endfu
-
+fu! S_Reverse(xs)
+	let [x, ret] = [a:xs, {}]
+	while !empty(x)
+		let ret = S_Cons(x.el, ret)
+		let x = x.next
+	endwhile
+	return ret
+endfu
+fu! S_Map(f, xs)
+	let [x, ret] = [a:xs, {}]
+	" Note: tail will advance, ret will not.
+	let tail = ret
+	while !empty(x)
+		let val = call(a:f, [x.el])
+		" Note: Something tricky's going on here: ret and tail will be
+		" equivalent after first iteration only.
+		let tail = S_Conc(val, tail)
+		let x = x.next
+	endwhile
+	return ret
+endfu
+fu! S_Zip(xs, ys, ...)
+	let [x, y, ret] = [a:xs, a:ys, {}]
+	let discard_unmatched = a:0 && a:1
+	let tail = ret
+	while !empty(x) || !empty(y)
+		if discard_unmatched && (empty(x) || empty(y))
+			" Special case: Certain applications don't need unmatched elements.
+			break
+		endif
+		let tail = S_Conc([empty(x) ? {} : x.el, empty(y) ? {} : y.el], tail)
+		if !empty(x) | let x = x.next | endif
+		if !empty(y) | let y = y.next | endif
+	endwhile
+	return ret
+endfu
+fu! S_Unzip(xs)
+	let [x, ret] = [a:xs, [{}, {}]]
+	let tail = [ret[0], ret[1]]
+	while !empty(x)
+		let tail[0] = S_Conc(x.el[0], tail[0])
+		let tail[1] = S_Conc(x.el[1], tail[1])
+		let x = x.next
+	endwhile
+	return ret
+endfu
 fu! s:Move_tree(t, dx)
 	" TODO_ENCAPSULATE
 	return {'node': a:t.node, 'x': a:t.x + a:dx, 'children': a:t.children}
 endfu
 
+" Note: Meant to be used with S_Map
+fu! s:Move_extent_fn(dx, e_el)
+	return [a:e_el[0] + a:dx,  a:e_el[1] + a:dx]
+endfu
 fu! s:Move_extent(e, dx)
-	" TODO: Is copy needed? Do it for now to be safe, but re-evaluate later.
-	return map(copy(a:e), '[v:val[0] + dx, v:val[1] + a:dx]')
+	" Create a partial that passes dx as first arg.
+	return S_Map(function('s:Move_extent_fn', [a:dx]), a:e)
 endfu
 
-fu! s:Merge(e1, e2)
-	let [n1, n2, n] = [len(e1), len(e2), max(nx, ny)]
-	let ret = []
-	let i = 0
-	while i < n
-		" Note: When one array shorter than the other, take both values from the
-		" longer one.
-		" TODO: There are more efficient ways, especially if one is much longer.
-		call add(ret, [i < n1 ? a:e1[0] : a:e2[0], i < n2 ? a:e2[1] : a:e1[1]])
-	endwhile
-	return ret
+fu! s:Merge_fn(e_pair)
+	return [
+		\ empty(a:e_pair[0]) ? a:e_pair[1][0] : a:e_pair[0][0],
+		\ empty(a:e_pair[1]) ? a:e_pair[0][1] : a:e_pair[1][1]]
+endfu
+fu! S_Merge(e1, e2)
+	return S_Map(function('s:Merge_fn'), S_Zip(a:e1, a:e2))
 endfu
 
 fu! s:Merge_list(es)
-	let [i, n] = [1, len(a:es)]
-	" Note: Although s:Merge could handle 1st element of [], handling first
-	" element specially is more efficient.
-	let ret = n ? copy(a:es[0]) : []
-	while i < n
-		let ret = s:Merge(ret, a:es[i])
-	endwhile
-	return ret
+	return S_Foldl(function('S_Merge'), {}, a:es)
 endfu
 
-fu! s:Fit(e1, e2)
-	let ret = 0
-	" Note: Use min() in lieu of max() since unmatched levels aren't constrained
-	" by neighboring child.
-	let [n1, n2, n] = [len(a:e1), len(a:e2), min(nx, ny)]
-	let i = 0
-	while i < n
-		" TODO: Make min separation (1) configurable? At least, don't hard-code.
-		let d = a:e1[i][1] - a:e2[i][0] + 1
-		if d > ret
-			let ret = d
-		endif
-	endwhile
-	return ret
+
+fu! s:Fit_fn(max, e_pair)
+	" Assumption: Caller ensures matched pairs (using discard_unmatched optional
+	" arg to Zip).
+	" TODO: Make min separation (1) configurable? At least, don't hard-code.
+	let d = a:e_pair[0][1] - a:e_pair[1][0] + 1
+	return d > a:max ? d : a:max
 endfu
+fu! s:Fit(e1, e2)
+	return s:Foldl(function('s:Fit_fn'), 0, S_Zip(a:e1, a:e2, 1))
+
+	"let ret = 0
+	"" Note: Use min() in lieu of max() since unmatched levels aren't constrained
+	"" by neighboring child.
+	"let [n1, n2, n] = [len(a:e1), len(a:e2), min(nx, ny)]
+	"let i = 0
+	"while i < n
+	"	" TODO: Make min separation (1) configurable? At least, don't hard-code.
+	"	let d = a:e1[i][1] - a:e2[i][0] + 1
+	"	if d > ret
+	"		let ret = d
+	"	endif
+	"endwhile
+	"return ret
+endfu
+
+let xs = S_Cons("baz", {})
+let xs = S_Cons("bar", xs)
+let xs = S_Cons("foo", xs)
+let xs_upper = S_Map(function('toupper'), xs)
+let xs_rev = S_Reverse(xs)
+let xs_zipped = S_Zip(xs_upper, xs_rev)
+fu! Swap_tuple_fn(x)
+	return [a:x[1], a:x[0]]
+endfu
+let xs_zswapped = S_Map(function('Swap_tuple_fn'), xs_zipped)
+let xs_unzipped = S_Unzip(xs_zswapped)
+let es = [[
+		\ [1, 3], [-1, 4], [8, 10]], [
+		\ [4, 5], [5, 8],  [10, 14], [9, 11]], [
+		\ [6, 9], [8, 9],  [15, 19], [11, 16]]]
+let es = map(es, 'S_To_list(v:val)')
+let em = S_Merge(es[0], es[1])
+let em = S_Merge(em, es[2])
+let em2 = s:Merge_list(es)
+let em_moved = s:Move_extent(em2, 100)
+let es2 = [[
+		\ [-3, 3], [-4, 5], [-7, 6]], [
+		\ [-2, 5], [-1, 6],  [-5, 14], [-3, 11]], [
+		\ [-5, 4], [-4, 5],  [-2, 15], [-1, 16]]]
+let es2 = map(es2, 'S_To_list(v:val)')
+let e_fit = s:Fit(es2[0], es2[1])
+
+echo "xs: " . string(xs)
+echo "xs_upper: " . string(xs_upper)
+echo "xs_rev: " . string(xs_rev)
+echo "xs_zipped: " . string(xs_zipped)
+echo "xs_zswapped: " . string(xs_zswapped)
+echo "xs_unzipped: " . string(xs_unzipped)
+echo "em: " . string(em)
+echo "em2: " . string(em2)
+echo "em_moved: " . string(em_moved)
+echo "e_fit: " . string(e_fit)
 
 " Caveat: Vim doesn't do TCO, so implement both left and right folds without
 " recursion.
@@ -291,7 +399,7 @@ fu! s:Fitlistl(es)
 		let x = s:Fit(acc, e)
 		" TODO: Doesn't appear that the original extent will be needed after the
 		" move, so there's probably potential for optimization.
-		let acc = s:Merge(acc, s:Move_extent(e, x))
+		let acc = S_Merge(acc, s:Move_extent(e, x))
 		call add(ret, x)
 	endfor
 	return ret
@@ -368,7 +476,7 @@ fu! s:Design(t)
 				endif
 			endif
 			" Either we've just returned (ascending) or we've reached base case.
-			" Accumulate the subtree representred by sret
+			" Accumulate the subtree represented by sret
 			call add(trees, stree[0])
 			call add(extents, stree[1])
 
