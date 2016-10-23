@@ -300,18 +300,24 @@ fu! S_Unzip(xs)
 	endwhile
 	return ret
 endfu
-fu! s:Move_tree(t, dx)
-	" TODO_ENCAPSULATE
-	return {'node': a:t.node, 'x': a:t.x + a:dx, 'children': a:t.children}
+fu! s:Move_tree_fn(tree_pos)
+	" Note: Copy the node but with changed x.
+	return {
+		\ 'node': a:tree_pos[0].node,
+		\ 'x': a:tree_pos[0].x + a:tree_pos[1],
+		\ 'ptrees': a:tree_pos[0].ptrees}
 endfu
 
 " Note: Meant to be used with S_Map
 fu! s:Move_extent_fn(dx, e_el)
 	return [a:e_el[0] + a:dx,  a:e_el[1] + a:dx]
 endfu
-fu! s:Move_extent(e, dx)
+fu! s:Move_extent(arg, ...)
+	" Args: e, dx - may be passed either as regular args, or in array.
+	" contained in an array.
+	let [e, dx] = a:0 ? [a:arg, a:1] : [a:arg[0], a:arg[1]]
 	" Create a partial that passes dx as first arg.
-	return S_Map(function('s:Move_extent_fn', [a:dx]), a:e)
+	return S_Map(function('s:Move_extent_fn', [dx]), e)
 endfu
 
 fu! s:Merge_fn(e_pair)
@@ -352,6 +358,74 @@ fu! s:Fit(e1, e2)
 	"endwhile
 	"return ret
 endfu
+" Caveat: Vim doesn't do TCO, so implement both left and right folds without
+" recursion.
+fu! s:Fitlistl_fn(acc, e)
+	let [tail, acc] = a:acc
+	let dx = s:Fit(acc, a:e)
+	let tail = S_Conc(dx, tail)
+	let acc = S_Merge(acc, s:Move_extent(a:e, dx))
+	return [tail, acc]
+endfu
+fu! s:Fitlistl(es)
+	let ret = {}
+	let tail = ret
+	let es = type(a:es) == 3 ? S_To_list(a:es) : a:es
+	call s:Foldl(function('s:Fitlistl_fn'), [tail, {}], es)
+	return ret
+endfu
+fu! s:Negate_fn(val)
+	return -a:val
+endfu
+fu! s:Flip_extent_fn(e_el)
+	return [-a:e_el[1], -a:e_el[0]]
+endfu
+fu! s:Flip_extent(e)
+	return S_Map(function('s:Flip_extent_fn'), a:e)
+endfu
+
+" TODO: Consider whether it's better to implement in terms of Fitlistl, or to
+" implement Fitlistr independently.
+" TODO: Pick up here... Still implement in terms of Fitlistl?
+" TODO: Test this one...
+fu! s:Fitlistr(es)
+	let es = type(a:es) == 3 ? S_To_list(a:es) : a:es
+	let es = S_Reverse(es)
+	let es = S_Map(function('s:Flip_extent'), es)
+	let es = s:Fitlistl(es)
+	let es = S_Map(function('s:Negate_fn'), es)
+	let es = S_Reverse(es)
+	return es
+endfu
+
+fu! s:Mean_fn(pair)
+	return (a:pair[0] + a:pair[1]) / 2
+endfu
+
+fu! s:Fitlist(es)
+	" Note: Avoid extra function call to s:Mean.
+	return S_Map(function('s:Mean_fn'), S_Zip(s:Fitlistl(a:es), s:Fitlistr(a:es)))
+endfu
+
+fu! s:Design(t)
+	" Walk the children.
+	let [trees, extents] = [{}, {}]
+	let [trees_tail, extents_tail] = [trees, extents]
+	let tc = a:t.children.fst
+	while !empty(tc)
+		let [tree, extent] = s:Design(tc)
+		let trees_tail = S_Conc(tree, trees_tail)
+		let extents_tail = S_Conc(extent, extents_tail)
+		let tc = tc.next
+	endwhile
+	let positions = s:Fitlist(extents)
+	let ptrees = S_Map(function('s:Move_tree_fn'), S_Zip(trees, positions))
+	let pextents = S_Map(function('s:Move_extent'), S_Zip(extents, positions))
+	let [w, e] = [len(t.seq), [-w/2, w/2 + w%2]]
+	let resultextent = S_Cons(e, s:Merge_list(pextents))
+	let resulttree = {'node': t, 'x': 0, 'ptrees': ptrees}
+	return [resulttree, resultextent]
+endfu
 
 let xs = S_Cons("baz", {})
 let xs = S_Cons("bar", xs)
@@ -378,7 +452,11 @@ let es2 = [[
 		\ [-2, 5], [-1, 6],  [-5, 14], [-3, 11]], [
 		\ [-5, 4], [-4, 5],  [-2, 15], [-1, 16]]]
 let es2 = map(es2, 'S_To_list(v:val)')
-let e_fit = s:Fit(es2[0], es2[1])
+let e_fit01 = s:Fit(es2[0], es2[1])
+let e_fit12 = s:Fit(es2[1], es2[2])
+let e_fitlistl = s:Fitlistl(es2)
+let e_fitlistr = s:Fitlistr(es2)
+let e_fitlist = s:Fitlist(es2)
 
 echo "xs: " . string(xs)
 echo "xs_upper: " . string(xs_upper)
@@ -389,55 +467,19 @@ echo "xs_unzipped: " . string(xs_unzipped)
 echo "em: " . string(em)
 echo "em2: " . string(em2)
 echo "em_moved: " . string(em_moved)
-echo "e_fit: " . string(e_fit)
+echo "e_fit01: " . string(e_fit01)
+echo "e_fit12: " . string(e_fit12)
+echo "e_fitlistl: " . string(e_fitlistl)
+echo "e_fitlistr: " . string(e_fitlistr)
+echo "e_fitlist: " . string(e_fitlist)
 
-" Caveat: Vim doesn't do TCO, so implement both left and right folds without
-" recursion.
-fu! s:Fitlistl(es)
-	let [ret, acc] = [[], []]
-	for e in a:es
-		let x = s:Fit(acc, e)
-		" TODO: Doesn't appear that the original extent will be needed after the
-		" move, so there's probably potential for optimization.
-		let acc = S_Merge(acc, s:Move_extent(e, x))
-		call add(ret, x)
-	endfor
-	return ret
-endfu
-
-fu! s:Flip_extent(e)
-	return map(a:e, '[-v:val[1], -v:val[0]]')
-endfu
-
-" TODO: Consider whether it's better to implement in terms of Fitlistl, or to
-" implement Fitlistr independently.
-fu! s:Fitlistr(es)
-	let es = reverse(a:es)
-	let es = map(es, 's:Flip_extent(v:val)')
-	let es = s:Fitlistl(es)
-	let es = map(es, '-v:val')
-	let es = reverse(es)
-	return es
-endfu
-
-" TODO: Perhaps inline this.
-fu! s:Mean(x, y)
-	return (a:x + a:y) / 2.0
-endfu
-
-fu! s:Fitlist(es)
-	" Note: Avoid extra function call to s:Mean.
-	" TODO: A less functional style would probably render this more efficient.
-	return map(s:Zip(s:Fitlistl(a:es), s:Fitlistr(a:es)),
-		\ '(v:val[0] + v:val[1]) / 2.0')
-endfu
 
 " Note: Input tree is the undo-tree object. From that, build one that looks like
 " this:
 " {'node': <ut-node>, 'x': <position relative to parent>, 'children': <array of these nodes>}
 " TODO: Convert arrays used in these methods from Vim lists to singly-linked
 " lists. (Perhaps wait till I've tested basic algorithm.)
-fu! s:Design(t)
+fu! s:Design_nr(t)
 	let lvl = 0
 	let descend = 0
 	let [t, tc] = [a:t, t.children.fst]
