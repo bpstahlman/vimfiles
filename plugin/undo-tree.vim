@@ -421,9 +421,10 @@ fu! s:Design(t)
 	let positions = s:Fitlist(extents)
 	let ptrees = S_Map(function('s:Move_tree_fn'), S_Zip(trees, positions))
 	let pextents = S_Map(function('s:Move_extent'), S_Zip(extents, positions))
-	let [w, e] = [len(t.seq), [-w/2, w/2 + w%2]]
+	let w = len(a:t.seq)
+	let e = [-w/2, w/2 + w%2]
 	let resultextent = S_Cons(e, s:Merge_list(pextents))
-	let resulttree = {'node': t, 'x': 0, 'ptrees': ptrees}
+	let resulttree = {'node': a:t, 'x': 0, 'ptrees': ptrees}
 	return [resulttree, resultextent]
 endfu
 
@@ -541,12 +542,46 @@ fu! s:Design_nr(t)
 	endwhile
 endfu
 
-nmap <F7> :let ut = Make_undo_tree()<CR>
-nmap <F8> :call <SID>Display_undo_tree(ut)<CR>
-nmap <C-Up> :call ut.up()<CR>
-nmap <C-Down> :call ut.down()<CR>
-nmap <C-Left> :call ut.left()<CR>
-nmap <C-Right> :call ut.right()<CR>
+fu! s:Extent_min_fn(min, e_el)
+	return a:e_el[0] < a:min ? a:e_el[0] : a:min
+endfu
+" Convert tree/extent pair built by Design to a list of lines.
+fu! s:Build_tree_display(tree, extent)
+	" Tree is centered at 0, but we need its left edge at 0. Determine the bias.
+	let x = abs(S_Foldl(function('s:Extent_min_fn'), 0, a:extent))
+	" Breadth-first traversal
+	let fifo = [[tree, x, 0]]
+	while !empty(fifo)
+		let [t, x, lvl] = remove(fifo, 0)
+		" Add this node's children
+		let tc = t.children.fst
+		while !empty(tc)
+			call add(fifo, [tc, x + tc.x, lvl + 1])
+			let tc = tc.next
+		endwhile
+		" Process current node.
+		let ret[lvl] = ?
+	endwhile
+
+
+endfu
+
+fu! s:Refresh_undo_tree()
+	let b:undo_tree = Make_undo_tree()
+	let [tree, extent] = s:Design(b:undo_tree)
+	let tree_lines = s:Build_tree_display(tree)
+	echo "tree:"
+	echo tree
+	echo "extent:"
+	echo extent
+endfu
+
+nmap <F7> :call <SID>Refresh_undo_tree()<CR>
+nmap <F8> :call <SID>Display_undo_tree(b:undo_tree)<CR>
+nmap <C-Up> :call b:undo_tree.up()<CR>
+nmap <C-Down> :call b:undo_tree.down()<CR>
+nmap <C-Left> :call b:undo_tree.left()<CR>
+nmap <C-Right> :call b:undo_tree.right()<CR>
 
 nmap <F9> :echo string(<SID>Show_undo_tree())<CR>
 " vim:ts=4:sw=4:tw=80
