@@ -547,29 +547,45 @@ fu! s:Extent_min_fn(min, e_el)
 endfu
 " Convert tree/extent pair built by Design to a list of lines.
 fu! s:Build_tree_display(tree, extent)
+	let lines = []
 	" Tree is centered at 0, but we need its left edge at 0. Determine the bias.
 	let x = abs(S_Foldl(function('s:Extent_min_fn'), 0, a:extent))
 	" Breadth-first traversal
-	let fifo = [[tree, x, 0]]
+	let fifo = [[a:tree, x, 0]]
 	while !empty(fifo)
 		let [t, x, lvl] = remove(fifo, 0)
 		" Add this node's children
-		let tc = t.children.fst
+		let tc = t.ptrees
 		while !empty(tc)
-			call add(fifo, [tc, x + tc.x, lvl + 1])
+			call add(fifo, [tc.el, x + tc.el.x, lvl + 1])
 			let tc = tc.next
 		endwhile
 		" Process current node.
-		let ret[lvl] = ?
+		" TODO: Testing shows I need more spacing.
+		let node = t.node
+		let row = lvl * 2 + 1
+		if len(lines) <= row
+			" Add 2 more lines. Note that this is junk code.
+			" TODO: Rewrite this function.
+			call extend(lines, ['', ''])
+		endif
+		let len = len(lines[row])
+		let x1 = x - len(node.seq) / 2
+		let lines[row] .= repeat(' ', x1 - len)
+		let lines[row] .= node.seq
+
 	endwhile
 
-
+	return lines
 endfu
 
 fu! s:Refresh_undo_tree()
 	let b:undo_tree = Make_undo_tree()
 	let [tree, extent] = s:Design(b:undo_tree)
-	let tree_lines = s:Build_tree_display(tree)
+	let tree_lines = s:Build_tree_display(tree, extent)
+	let g:tree_lines = tree_lines
+	let g:tree = tree
+	let g:extent = extent
 	echo "tree:"
 	echo tree
 	echo "extent:"
