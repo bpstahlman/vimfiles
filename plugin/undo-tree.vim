@@ -337,8 +337,10 @@ endfu
 fu! s:Fit_fn(max, e_pair)
 	" Assumption: Caller ensures matched pairs (using discard_unmatched optional
 	" arg to Zip).
-	" TODO: Make min separation (1) configurable? At least, don't hard-code.
-	let d = a:e_pair[0][1] - a:e_pair[1][0] + 1
+	" TODO: Make min separation (4) configurable? At least, don't hard-code.
+	" Note: For now, you need screen positions (to get space separation) and 2
+	" parens.
+	let d = a:e_pair[0][1] - a:e_pair[1][0] + 4
 	return d > a:max ? d : a:max
 endfu
 fu! s:Fit(e1, e2)
@@ -552,28 +554,78 @@ fu! s:Build_tree_display(tree, extent)
 	let x = abs(S_Foldl(function('s:Extent_min_fn'), 0, a:extent))
 	" Breadth-first traversal
 	let fifo = [[a:tree, x, 0]]
+	let [lvl_prev, node_prev] = [-1, {}]
+	let rows_per_lvl = 4
 	while !empty(fifo)
-		let [t, x, lvl] = remove(fifo, 0)
+		let [parent, node, parent_x, x, lvl] = remove(fifo, 0)
+		if lvl_prev != lvl
+			" Start of group of rows corresponding to this level.
+			let row = lvl * rows_per_lvl
+		endif
 		" Add this node's children
-		let tc = t.ptrees
+		let tc = node.ptrees
 		while !empty(tc)
-			call add(fifo, [tc.el, x + tc.el.x, lvl + 1])
+			call add(fifo, [node, tc.el, x, x + tc.el.x, lvl + 1])
 			let tc = tc.next
 		endwhile
 		" Process current node.
 		" TODO: Testing shows I need more spacing.
-		let node = t.node
-		let row = lvl * 2 + 1
+		let node = node.node
 		if len(lines) <= row
 			" Add 2 more lines. Note that this is junk code.
 			" TODO: Rewrite this function.
 			call extend(lines, ['', ''])
+		endif
+		" Horizontal header lines
+		let s = ''
+		let poff = parent_x - x
+		" TODO: Harmonize the case of node_prev and no node_prev.
+		" For one thing, have a test that causes the line to be padded up to the
+		" first child of a level.
+		if !empty(node_prev)
+			" Are we within 1 unit of the parent's x?
+			if poff == 1
+				let l1 = repeat("-", x - x_prev) . "v"
+				let l2 = '/'
+			elseif poff == 0
+				let l1 = repeat("-", poff - 1) . "v"
+				let l2 = '|'
+			elseif poff == -1
+				let l1 = repeat("-", x - x_prev - 2) . "v-"
+				let l2 = '\'
+			else
+				" Take into account whether we're crossing parent.
+				if x > parent_x && x_prev < parent_x
+					let l1 = repeat("-", parent_x - x_prev - 1) . "v"
+						\ . repeat("-", x - parent_x - 1) . "+"
+				else
+					let l1 = repeat("-", x - x_prev - 1) . "+"
+				endif
+			endif
+		else
+			let [pad1, pad2] = [x, x]
+			if poff == 1
+				let l1 = "v"
+				let l2 = '/'
+				let pad2 -= 1
+			elseif poff == 0
+				let l1 = "v"
+				let l2 = '|'
+			elseif poff == -1
+				let l1 = "v"
+				let l2 = '\'
+				let pad2 += 1
+			else
+				let l1 = "+"
+				let l2 = '|'
+			endif
 		endif
 		let len = len(lines[row])
 		let x1 = x - len(node.seq) / 2
 		let lines[row] .= repeat(' ', x1 - len)
 		let lines[row] .= node.seq
 
+		let [t_prev, x_prev, lvl_prev] = [node, x, lvl]
 	endwhile
 
 	return lines
