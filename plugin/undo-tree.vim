@@ -300,11 +300,17 @@ fu! S_Unzip(xs)
 	endwhile
 	return ret
 endfu
+" Note: Input is a zipped list of (trees, positions)
 fu! s:Move_tree_fn(tree_pos)
 	" Note: Copy the node but with changed x.
+	" Caveat: This function no longer purely functional: modifying the node
+	" itself.
+	let new_x = a:tree_pos[0].x + a:tree_pos[1]
+	" TODO: Should we use an accessor for this?
+	let a:tree_pos[0].node.x = new_x
 	return {
 		\ 'node': a:tree_pos[0].node,
-		\ 'x': a:tree_pos[0].x + a:tree_pos[1],
+		\ 'x': new_x,
 		\ 'ptrees': a:tree_pos[0].ptrees}
 endfu
 
@@ -344,7 +350,7 @@ fu! s:Fit_fn(max, e_pair)
 	return d > a:max ? d : a:max
 endfu
 fu! s:Fit(e1, e2)
-	return s:Foldl(function('s:Fit_fn'), 0, S_Zip(a:e1, a:e2, 1))
+	return S_Foldl(function('s:Fit_fn'), 0, S_Zip(a:e1, a:e2, 1))
 
 	"let ret = 0
 	"" Note: Use min() in lieu of max() since unmatched levels aren't constrained
@@ -373,7 +379,7 @@ fu! s:Fitlistl(es)
 	let ret = {}
 	let tail = ret
 	let es = type(a:es) == 3 ? S_To_list(a:es) : a:es
-	call s:Foldl(function('s:Fitlistl_fn'), [tail, {}], es)
+	call S_Foldl(function('s:Fitlistl_fn'), [tail, {}], es)
 	return ret
 endfu
 fu! s:Negate_fn(val)
@@ -428,6 +434,26 @@ fu! s:Design(t)
 	let resultextent = S_Cons(e, s:Merge_list(pextents))
 	let resulttree = {'node': a:t, 'x': 0, 'ptrees': ptrees}
 	return [resulttree, resultextent]
+endfu
+
+fu! s:Treegrid_add_node(lvl, x, text)
+	let rows_per_lvl = 3
+	let sr = lvl * rows_per_lvl
+	" Make sure we have sufficient rows.
+	if sr >= len(grid)
+		call extend(grid, repeat([[]], rows_per_lvl))
+	endif
+	" UNDER CONSTRUCTION - May abandon...
+	
+endfu
+
+fu! S_Make_tree_grid(tree)
+	let me = {
+		\ 'w': 0, 'h': 0
+		\ 'add': function('s:Treegrid_add'),
+		\ 'grid': []
+	\ }
+
 endfu
 
 let xs = S_Cons("baz", {})
@@ -547,8 +573,71 @@ endfu
 fu! s:Extent_min_fn(min, e_el)
 	return a:e_el[0] < a:min ? a:e_el[0] : a:min
 endfu
-" Convert tree/extent pair built by Design to a list of lines.
 fu! s:Build_tree_display(tree, extent)
+	let lines = []
+	" Tree is centered at 0, but we need its left edge at 0. Determine the bias.
+	let x = abs(S_Foldl(function('s:Extent_min_fn'), 0, a:extent))
+	" Breadth-first traversal
+	let fifo = [[a:tree, x, 0]]
+	let lvl_prev = -1
+	let rows_per_lvl = 3
+	while !empty(fifo)
+		let [t, parent_x, x, lvl] = remove(fifo, 0)
+		if lvl_prev != lvl
+			" Get index of row containing the label.
+			let lrow = lvl * rows_per_lvl + 2
+			" Add additional lines.
+			call extend(lines, repeat([''], rows_per_lvl))
+		endif
+		" Add this node's children
+		let tc = t.children.fst
+		while !empty(tc)
+			call add(fifo, [tc, x, x + tc.el.x, lvl + 1])
+			let tc = tc.next
+		endwhile
+		" Process current node.
+		" Horizontal header lines
+		let s = ''
+		" Note: Positive poff means child to left of parent.
+		let poff = parent_x - x
+		" Place the label, leaving space for a [...].
+		let text = ' ' . t.seq . ' '
+		" TODO: Think through rounding/truncating...
+		let text_x = len(text) - text / 2
+		call gridlines.add(lrow, text_x, text)
+		if poff == 1
+			" Special case.
+			let [off, text] = [0, '/']
+		elseif poff == -1
+			let [off, text] = [0, '\']
+		elseif poff > 0
+			let [off, text] = [1, '/']
+		elseif poff < 0
+			let [off, text] = [-1, '\']
+		endif
+		call gridlines.add(lrow - 1, x + off, text)
+		" Extend horizontal header line from previous node if applicable.
+
+		" TODO: Harmonize the case of node_prev and no node_prev.
+		" For one thing, have a test that causes the line to be padded up to the
+		" first child of a level.
+		if !empty(node_prev)
+			" Are we within 1 unit of the parent's x?
+		else
+			let [pad1, pad2] = [x, x]
+		endif
+		let len = len(lines[row])
+		let x1 = x - len(t.seq) / 2
+		let lines[row] .= repeat(' ', x1 - len)
+		let lines[row] .= t.seq
+
+		let [t_prev, x_prev, lvl_prev] = [t, x, lvl]
+	endwhile
+
+	return lines
+endfu
+" Convert tree/extent pair built by Design to a list of lines.
+fu! s:Build_tree_display_old(tree, extent)
 	let lines = []
 	" Tree is centered at 0, but we need its left edge at 0. Determine the bias.
 	let x = abs(S_Foldl(function('s:Extent_min_fn'), 0, a:extent))
@@ -633,8 +722,10 @@ endfu
 
 fu! s:Refresh_undo_tree()
 	let b:undo_tree = Make_undo_tree()
+	" TODO: Thinking I may no longer need tree returned, now that positions are
+	" stored on b:undo_tree.
 	let [tree, extent] = s:Design(b:undo_tree)
-	let tree_lines = s:Build_tree_display(tree, extent)
+	let tree_lines = s:Build_tree_display(b:undo_tree, extent)
 	let g:tree_lines = tree_lines
 	let g:tree = tree
 	let g:extent = extent
