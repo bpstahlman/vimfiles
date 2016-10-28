@@ -436,24 +436,32 @@ fu! s:Design(t)
 	return [resulttree, resultextent]
 endfu
 
-fu! s:Treegrid_add_node(lvl, x, text)
-	let rows_per_lvl = 3
-	let sr = lvl * rows_per_lvl
-	" Make sure we have sufficient rows.
-	if sr >= len(grid)
-		call extend(grid, repeat([[]], rows_per_lvl))
+fu! s:Gridlines_add(idx, x, text) dict
+	let num_lines = len(self.lines)
+	if a:idx >= num_lines
+		" Add lines as required.
+		" TODO: Consider adding a little extra and culling later.
+		call extend(self.lines, repeat([''], a:idx - num_lines + 1))
 	endif
-	" UNDER CONSTRUCTION - May abandon...
-	
+	let line_len = len(self.lines[a:idx])
+	if a:x > line_len
+		" Pre-pad with spaces as necessary.
+		let self.lines[a:idx] .= repeat(' ', a:x - line_len)
+	endif
+	" Append or overwrite at x.
+	" Note: 3rd component may always be empty. Depends on how I end up using.
+	" TODO: Consider making more efficient if overwrite capability is not
+	" needed.
+	let self.lines[a:idx] =
+		\ self.lines[: a:x] . a:text . self.lines[a:x + len(a:text) :]
 endfu
 
-fu! S_Make_tree_grid(tree)
+fu! s:Make_gridlines()
 	let me = {
-		\ 'w': 0, 'h': 0
-		\ 'add': function('s:Treegrid_add'),
-		\ 'grid': []
+		\ 'add': function('s:Gridlines_add'),
+		\ 'lines': []
 	\ }
-
+	return me
 endfu
 
 let xs = S_Cons("baz", {})
@@ -574,13 +582,13 @@ fu! s:Extent_min_fn(min, e_el)
 	return a:e_el[0] < a:min ? a:e_el[0] : a:min
 endfu
 fu! s:Build_tree_display(tree, extent)
-	let lines = []
 	" Tree is centered at 0, but we need its left edge at 0. Determine the bias.
 	let x = abs(S_Foldl(function('s:Extent_min_fn'), 0, a:extent))
 	" Breadth-first traversal
 	let fifo = [[a:tree, x, 0]]
 	let lvl_prev = -1
 	let rows_per_lvl = 3
+	let lines = s:Make_gridlines()
 	while !empty(fifo)
 		let [t, parent_x, x, lvl] = remove(fifo, 0)
 		if lvl_prev != lvl
@@ -604,7 +612,10 @@ fu! s:Build_tree_display(tree, extent)
 		let text = ' ' . t.seq . ' '
 		" TODO: Think through rounding/truncating...
 		let text_x = len(text) - text / 2
-		call gridlines.add(lrow, text_x, text)
+		call lines.add(lrow, text_x, text)
+		" TODO: Consider making adjustment in tree design phase to obviate need
+		" for the 2 special cases (child one position left/right of parent).
+		" Rationale: Would probably look a bit nicer.
 		if poff == 1
 			" Special case.
 			let [off, text] = [0, '/']
@@ -615,8 +626,13 @@ fu! s:Build_tree_display(tree, extent)
 		elseif poff < 0
 			let [off, text] = [-1, '\']
 		endif
-		call gridlines.add(lrow - 1, x + off, text)
-		" Extend horizontal header line from previous node if applicable.
+		call lines.add(lrow - 1, x + off, text)
+		if !empty(t.prev)
+			" Extend horiz header line from previous node.
+			let len = t.x - t.prev.x
+			let off = 
+			" TODO: Consider off-nominal cases.
+		endif
 
 		" TODO: Harmonize the case of node_prev and no node_prev.
 		" For one thing, have a test that causes the line to be padded up to the
