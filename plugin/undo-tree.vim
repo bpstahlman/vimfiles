@@ -74,7 +74,10 @@ fu! s:Insert_sorted(ls, o)
 			" Assumption: Can't get here if lst empty.
 			let a:o.next = x
 			let a:o.prev = x.prev
-			let x.prev.next = a:o
+			" Caveat: Don't add 'next' key to empty sentinel object.
+			if !empty(x.prev)
+				let x.prev.next = a:o
+			endif
 			let x.prev = a:o
 			if x is a:ls.fst
 				" List has new head.
@@ -104,8 +107,9 @@ fu! s:Build_undo_tree(...)
 		let tree = undotree()
 		let entries = tree.entries
 		" Create root, merging in undotree() properties.
-		let root = s:Make_root(tree,
-			\{'seq': 0, 'children': {'fst': {}, 'cur': {}, 'lst': {}}})
+		let root = s:Make_root(tree, {
+			\'seq': 0, 'prev': {}, 'next': {}, 'parent': {},
+			\'children': {'fst': {}, 'cur': {}, 'lst': {}}})
 		let parent = root
 	else
 		let [entries, parent, root] = a:000
@@ -432,6 +436,9 @@ fu! s:Design(t)
 	let w = len(a:t.seq)
 	let e = [-w/2, w/2 + w%2]
 	let resultextent = S_Cons(e, s:Merge_list(pextents))
+	" TODO: Consider a cleaner way to put x on the actual node. Perhaps in a
+	" later stage?
+	let a:t.x = 0
 	let resulttree = {'node': a:t, 'x': 0, 'ptrees': ptrees}
 	return [resulttree, resultextent]
 endfu
@@ -452,8 +459,9 @@ fu! s:Gridlines_add(idx, x, text) dict
 	" Note: 3rd component may always be empty. Depends on how I end up using.
 	" TODO: Consider making more efficient if overwrite capability is not
 	" needed.
+	echo "idx=" . a:idx . ", x=" . a:x . ", text=" . a:text
 	let self.lines[a:idx] =
-		\ self.lines[: a:x] . a:text . self.lines[a:x + len(a:text) :]
+		\ self.lines[a:idx][: a:x] . a:text . self.lines[a:idx][a:x + len(a:text) :]
 endfu
 
 fu! s:Make_gridlines()
@@ -583,74 +591,101 @@ fu! s:Extent_min_fn(min, e_el)
 endfu
 fu! s:Build_tree_display(tree, extent)
 	" Tree is centered at 0, but we need its left edge at 0. Determine the bias.
+	" Note: Can't really apply the bias in the tree itself since the x values in
+	" tree are relative to parent. We *could* store absolute positions in the
+	" tree, but I don't really like that.
 	let x = abs(S_Foldl(function('s:Extent_min_fn'), 0, a:extent))
 	" Breadth-first traversal
+	" Fifo elements: [<node>, <absolute-parent_x>, <lvl>]
 	let fifo = [[a:tree, x, 0]]
-	let lvl_prev = -1
+	" TODO: Make this part of some sort of global config.
 	let rows_per_lvl = 3
 	let lines = s:Make_gridlines()
 	while !empty(fifo)
-		let [t, parent_x, x, lvl] = remove(fifo, 0)
-		if lvl_prev != lvl
-			" Get index of row containing the label.
-			let lrow = lvl * rows_per_lvl + 2
-			" Add additional lines.
-			call extend(lines, repeat([''], rows_per_lvl))
-		endif
+		let [t, parent_x, lvl] = remove(fifo, 0)
+		" Calculate absolute x position in grid.
+		let x = parent_x + t.x
 		" Add this node's children
 		let tc = t.children.fst
 		while !empty(tc)
-			call add(fifo, [tc, x, x + tc.el.x, lvl + 1])
+			" Note: Add parent x only, as child x can be calculated therefrom.
+			call add(fifo, [tc, x, lvl + 1])
 			let tc = tc.next
 		endwhile
 		" Process current node.
-		" Horizontal header lines
-		let s = ''
-		" Note: Positive poff means child to left of parent.
-		let poff = parent_x - x
-		" Place the label, leaving space for a [...].
+		" Get index of row containing the label.
+		let lrow = lvl * rows_per_lvl
+		" Build the label, leaving space for surrounding [...].
 		let text = ' ' . t.seq . ' '
 		" TODO: Think through rounding/truncating...
-		let text_x = len(text) - text / 2
+		let text_x = x - len(text) / 2
 		call lines.add(lrow, text_x, text)
-		" TODO: Consider making adjustment in tree design phase to obviate need
-		" for the 2 special cases (child one position left/right of parent).
-		" Rationale: Would probably look a bit nicer.
-		if poff == 1
-			" Special case.
-			let [off, text] = [0, '/']
-		elseif poff == -1
-			let [off, text] = [0, '\']
-		elseif poff > 0
-			let [off, text] = [1, '/']
-		elseif poff < 0
-			let [off, text] = [-1, '\']
+		if t.seq == 4
+			echo printf("HEY! 4: t.x=%d t.prev.x=%d", t.x, !empty(t.prev) ? t.prev.x : 0)
 		endif
-		call lines.add(lrow - 1, x + off, text)
-		if !empty(t.prev)
-			" Extend horiz header line from previous node.
-			let len = t.x - t.prev.x
-			let off = 
-			" TODO: Consider off-nominal cases.
+		" Draw lower vertical for all but root.
+		if !empty(t.parent)
+			" TODO: Consider making adjustment in tree design phase to obviate need
+			" for the 2 special cases (child one position left/right of parent).
+			" Rationale: Would probably look a bit nicer.
+			if t.x == -1
+				" Special case.
+				" TODO: Consider doing away with the offset.
+				let [off, text] = [0, '/']
+			elseif t.x == 1
+				let [off, text] = [0, '\']
+			elseif t.x < 0
+				let [off, text] = [1, '/']
+			elseif t.x > 0
+				let [off, text] = [-1, '\']
+			else
+				let [off, text] = [0, '|']
+			endif
+			call lines.add(lrow - 1, x + off, text)
+			if !empty(t.prev)
+				" Extend horiz header line from previous node, and if appropriate,
+				" add upper vertical from parent (which is deferred to child row
+				" because it's in the same row as horiz line).
+				if t.prev.x < 0
+					" l->?
+					let text_x = parent_x + t.prev.x + 2
+					if t.x < 0
+						" l->l
+						let text = repeat('_', t.x - t.prev.x)
+					elseif t.x > 0
+						" l->r
+						let text = repeat('_', -t.prev.x - 2)
+							\ . '|' . repeat('_', t.x - 2)
+						echo "l->r case: " . t.seq . ": " . text
+					else
+						" l->c
+						let text = repeat('_', -t.prev.x - 2) . '|'
+					endif
+				elseif t.prev.x > 0
+					" r->r
+					let text_x = parent_x + t.prev.x
+					let text = repeat('_', t.x - t.prev.x)
+				else
+					" c->r
+					let text_x = parent_x + 1
+					let text = repeat('_', t.x - 2)
+				endif
+				echo printf("seq=%d lrow=%d: Adding `%s' at %d", t.seq, lrow-2, text, text_x)
+				call lines.add(lrow - 2, text_x, text)
+			elseif empty(t.next)
+				" Special case: sole child of parent
+				" Assumption: In all other cases, center vertical from parent will
+				" be part of horizontal line.
+				" Rationale: A balanced tree shouldn't permit everything to one
+				" side. (TODO: Work through any corner cases to verify.)
+				" Note: Could also handle it separately and take advantage of the
+				" fact that gridlines can handle overwrite.
+				call lines.add(lrow - 2, x, '|')
+			endif
 		endif
-
-		" TODO: Harmonize the case of node_prev and no node_prev.
-		" For one thing, have a test that causes the line to be padded up to the
-		" first child of a level.
-		if !empty(node_prev)
-			" Are we within 1 unit of the parent's x?
-		else
-			let [pad1, pad2] = [x, x]
-		endif
-		let len = len(lines[row])
-		let x1 = x - len(t.seq) / 2
-		let lines[row] .= repeat(' ', x1 - len)
-		let lines[row] .= t.seq
-
-		let [t_prev, x_prev, lvl_prev] = [t, x, lvl]
 	endwhile
 
-	return lines
+	return lines.lines
 endfu
 " Convert tree/extent pair built by Design to a list of lines.
 fu! s:Build_tree_display_old(tree, extent)
