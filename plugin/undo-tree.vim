@@ -460,7 +460,7 @@ fu! s:Gridlines_add(idx, x, text) dict
 	" Note: 3rd component may always be empty. Depends on how I end up using.
 	" TODO: Consider making more efficient if overwrite capability is not
 	" needed.
-	echo "idx=" . a:idx . ", x=" . a:x . ", text=" . a:text
+	"echo "idx=" . a:idx . ", x=" . a:x . ", text=" . a:text
 	let self.lines[a:idx] =
 		\ self.lines[a:idx][: a:x - 1] . a:text . self.lines[a:idx][a:x + len(a:text) :]
 endfu
@@ -473,58 +473,18 @@ fu! s:Make_gridlines()
 	return me
 endfu
 
-let xs = S_Cons("baz", {})
-let xs = S_Cons("bar", xs)
-let xs = S_Cons("foo", xs)
-let xs_upper = S_Map(function('toupper'), xs)
-let xs_rev = S_Reverse(xs)
-let xs_zipped = S_Zip(xs_upper, xs_rev)
-fu! Swap_tuple_fn(x)
+" TODO: This one probably isn't needed.
+fu! s:Swap_tuple_fn(x)
 	return [a:x[1], a:x[0]]
 endfu
-let xs_zswapped = S_Map(function('Swap_tuple_fn'), xs_zipped)
-let xs_unzipped = S_Unzip(xs_zswapped)
-let es = [[
-		\ [1, 3], [-1, 4], [8, 10]], [
-		\ [4, 5], [5, 8],  [10, 14], [9, 11]], [
-		\ [6, 9], [8, 9],  [15, 19], [11, 16]]]
-let es = map(es, 'S_To_list(v:val)')
-let em = S_Merge(es[0], es[1])
-let em = S_Merge(em, es[2])
-let em2 = s:Merge_list(es)
-let em_moved = s:Move_extent(em2, 100)
-let es2 = [[
-		\ [-3, 3], [-4, 5], [-7, 6]], [
-		\ [-2, 5], [-1, 6],  [-5, 14], [-3, 11]], [
-		\ [-5, 4], [-4, 5],  [-2, 15], [-1, 16]]]
-let es2 = map(es2, 'S_To_list(v:val)')
-let e_fit01 = s:Fit(es2[0], es2[1])
-let e_fit12 = s:Fit(es2[1], es2[2])
-let e_fitlistl = s:Fitlistl(es2)
-let e_fitlistr = s:Fitlistr(es2)
-let e_fitlist = s:Fitlist(es2)
-
-echo "xs: " . string(xs)
-echo "xs_upper: " . string(xs_upper)
-echo "xs_rev: " . string(xs_rev)
-echo "xs_zipped: " . string(xs_zipped)
-echo "xs_zswapped: " . string(xs_zswapped)
-echo "xs_unzipped: " . string(xs_unzipped)
-echo "em: " . string(em)
-echo "em2: " . string(em2)
-echo "em_moved: " . string(em_moved)
-echo "e_fit01: " . string(e_fit01)
-echo "e_fit12: " . string(e_fit12)
-echo "e_fitlistl: " . string(e_fitlistl)
-echo "e_fitlistr: " . string(e_fitlistr)
-echo "e_fitlist: " . string(e_fitlist)
-
 
 " Note: Input tree is the undo-tree object. From that, build one that looks like
 " this:
 " {'node': <ut-node>, 'x': <position relative to parent>, 'children': <array of these nodes>}
 " TODO: Convert arrays used in these methods from Vim lists to singly-linked
 " lists. (Perhaps wait till I've tested basic algorithm.)
+" Note: This function is work in progress. May be abandoned. If not abandoned,
+" may be converted to cleaner BFS implementation.
 fu! s:Design_nr(t)
 	let lvl = 0
 	let descend = 0
@@ -619,23 +579,13 @@ fu! s:Build_tree_display(tree, extent)
 		" Build the label, leaving space for surrounding [...].
 		let text = ' ' . t.seq . ' '
 		" TODO: Think through rounding/truncating...
-		let text_x = x - len(text) / 2
+		" Design Decision: The -1 ensures that when len is even, we center on
+		" the last char in the left half, not first in right.
+		let text_x = x - (len(text) - 1) / 2
 		call lines.add(lrow, text_x, text)
-		if t.seq == 3 || t.seq == 4
-			"echo printf("Foo %d : t.x=%d", t.seq, t.x)
-		endif
 		" Draw lower vertical for all but root.
 		if !empty(t.parent)
-			" TODO: Consider making adjustment in tree design phase to obviate need
-			" for the 2 special cases (child one position left/right of parent).
-			" Rationale: Would probably look a bit nicer.
-			if t.x == -1
-				" Special case.
-				" TODO: Consider doing away with the offset.
-				let [off, text] = [0, '/']
-			elseif t.x == 1
-				let [off, text] = [0, '\']
-			elseif t.x < 0
+			if t.x < 0
 				let [off, text] = [1, '/']
 			elseif t.x > 0
 				let [off, text] = [-1, '\']
@@ -643,35 +593,50 @@ fu! s:Build_tree_display(tree, extent)
 				let [off, text] = [0, '|']
 			endif
 			call lines.add(lrow - 1, x + off, text)
+			" Calculate effective x to be used in subsequent calculations.
+			" Note: "Effective" x positions can differ from t.x and t.prev.x
+			" when the node is within 1 unit of the parent. In such cases, the
+			" horizontal line's row is calculated as though the child were
+			" aligned with the parent.
+			" TODO: Consider making adjustment in tree design phase to obviate need
+			" for the 2 special cases (child one position left/right of parent).
+			" Rationale: Would probably look a bit nicer at the cost of making
+			" some graphs *slightly* wider.
+			let xe = abs(t.x) == 1 ? 0 : t.x
 			if !empty(t.prev)
+				let xe_prev = abs(t.prev.x) == 1 ? 0 : t.prev.x
 				" Extend horiz header line from previous node, and if appropriate,
 				" add upper vertical from parent (which is deferred to child row
 				" because it's in the same row as horiz line).
-				if t.prev.x < 0
+				if xe_prev < 0
 					" l->?
-					let text_x = parent_x + t.prev.x + 2
-					if t.x < 0
+					let text_x = parent_x + xe_prev + 2
+					if xe < 0
 						" l->l
-						let text = repeat('_', t.x - t.prev.x)
-					elseif t.x > 0
+						let text = repeat('_', xe - xe_prev)
+					elseif xe > 0
 						" l->r
-						let text = repeat('_', -t.prev.x - 2)
-							\ . '|' . repeat('_', t.x - 2)
-						echo "l->r case: " . t.seq . ": " . text
+						let text = repeat('_', -xe_prev - 2)
+							\ . '|' . repeat('_', xe - 2)
+						"echo "l->r case: " . t.seq . ": " . text
 					else
 						" l->c
-						let text = repeat('_', -t.prev.x - 2) . '|'
+						let text = repeat('_', -xe_prev - 2) . '|'
 					endif
-				elseif t.prev.x > 0
+				elseif xe_prev > 0
 					" r->r
-					let text_x = parent_x + t.prev.x - 1
-					let text = repeat('_', t.x - t.prev.x)
+					" Caveat: If prev is 1 past parent x, don't overwrite the
+					" vertical connector.
+					let text_x = parent_x + (xe_prev > 1 ? xe_prev - 1 : xe_prev)
+					let text = repeat('_', xe - xe_prev)
 				else
 					" c->r
+					" Note: We get here when 'effective' xprev is 0, even when
+					" node is a unit to the left or right of parent.
 					let text_x = parent_x + 1
-					let text = repeat('_', t.x - 2)
+					let text = repeat('_', xe - 2)
 				endif
-				echo printf("seq=%d lrow=%d: Adding `%s' at %d", t.seq, lrow-2, text, text_x)
+				"echo printf("seq=%d lrow=%d: Adding `%s' at %d", t.seq, lrow-2, text, text_x)
 				call lines.add(lrow - 2, text_x, text)
 			elseif empty(t.next)
 				" Special case: sole child of parent
@@ -688,89 +653,6 @@ fu! s:Build_tree_display(tree, extent)
 
 	return lines.lines
 endfu
-" Convert tree/extent pair built by Design to a list of lines.
-fu! s:Build_tree_display_old(tree, extent)
-	let lines = []
-	" Tree is centered at 0, but we need its left edge at 0. Determine the bias.
-	let x = abs(S_Foldl(function('s:Extent_min_fn'), 0, a:extent))
-	" Breadth-first traversal
-	let fifo = [[a:tree, x, 0]]
-	let [lvl_prev, node_prev] = [-1, {}]
-	let rows_per_lvl = 4
-	while !empty(fifo)
-		let [parent, node, parent_x, x, lvl] = remove(fifo, 0)
-		if lvl_prev != lvl
-			" Start of group of rows corresponding to this level.
-			let row = lvl * rows_per_lvl
-		endif
-		" Add this node's children
-		let tc = node.ptrees
-		while !empty(tc)
-			call add(fifo, [node, tc.el, x, x + tc.el.x, lvl + 1])
-			let tc = tc.next
-		endwhile
-		" Process current node.
-		" TODO: Testing shows I need more spacing.
-		let node = node.node
-		if len(lines) <= row
-			" Add 2 more lines. Note that this is junk code.
-			" TODO: Rewrite this function.
-			call extend(lines, ['', ''])
-		endif
-		" Horizontal header lines
-		let s = ''
-		let poff = parent_x - x
-		" TODO: Harmonize the case of node_prev and no node_prev.
-		" For one thing, have a test that causes the line to be padded up to the
-		" first child of a level.
-		if !empty(node_prev)
-			" Are we within 1 unit of the parent's x?
-			if poff == 1
-				let l1 = repeat("-", x - x_prev) . "v"
-				let l2 = '/'
-			elseif poff == 0
-				let l1 = repeat("-", poff - 1) . "v"
-				let l2 = '|'
-			elseif poff == -1
-				let l1 = repeat("-", x - x_prev - 2) . "v-"
-				let l2 = '\'
-			else
-				" Take into account whether we're crossing parent.
-				if x > parent_x && x_prev < parent_x
-					let l1 = repeat("-", parent_x - x_prev - 1) . "v"
-						\ . repeat("-", x - parent_x - 1) . "+"
-				else
-					let l1 = repeat("-", x - x_prev - 1) . "+"
-				endif
-			endif
-		else
-			let [pad1, pad2] = [x, x]
-			if poff == 1
-				let l1 = "v"
-				let l2 = '/'
-				let pad2 -= 1
-			elseif poff == 0
-				let l1 = "v"
-				let l2 = '|'
-			elseif poff == -1
-				let l1 = "v"
-				let l2 = '\'
-				let pad2 += 1
-			else
-				let l1 = "+"
-				let l2 = '|'
-			endif
-		endif
-		let len = len(lines[row])
-		let x1 = x - len(node.seq) / 2
-		let lines[row] .= repeat(' ', x1 - len)
-		let lines[row] .= node.seq
-
-		let [t_prev, x_prev, lvl_prev] = [node, x, lvl]
-	endwhile
-
-	return lines
-endfu
 
 fu! s:Refresh_undo_tree()
 	let b:undo_tree = Make_undo_tree()
@@ -781,10 +663,10 @@ fu! s:Refresh_undo_tree()
 	let g:tree_lines = tree_lines
 	let g:tree = tree
 	let g:extent = extent
-	echo "tree:"
-	echo tree
-	echo "extent:"
-	echo extent
+	"echo "tree:"
+	"echo tree
+	"echo "extent:"
+	"echo extent
 endfu
 
 nmap <F7> :call <SID>Refresh_undo_tree()<CR>
@@ -795,5 +677,51 @@ nmap <C-Left> :call b:undo_tree.left()<CR>
 nmap <C-Right> :call b:undo_tree.right()<CR>
 
 nmap <F9> :echo string(<SID>Show_undo_tree())<CR>
+
+fu! s:Test_only()
+	let xs = S_Cons("baz", {})
+	let xs = S_Cons("bar", xs)
+	let xs = S_Cons("foo", xs)
+	let xs_upper = S_Map(function('toupper'), xs)
+	let xs_rev = S_Reverse(xs)
+	let xs_zipped = S_Zip(xs_upper, xs_rev)
+	let xs_zswapped = S_Map(function('s:Swap_tuple_fn'), xs_zipped)
+	let xs_unzipped = S_Unzip(xs_zswapped)
+	let es = [[
+			\ [1, 3], [-1, 4], [8, 10]], [
+			\ [4, 5], [5, 8],  [10, 14], [9, 11]], [
+			\ [6, 9], [8, 9],  [15, 19], [11, 16]]]
+	let es = map(es, 'S_To_list(v:val)')
+	let em = S_Merge(es[0], es[1])
+	let em = S_Merge(em, es[2])
+	let em2 = s:Merge_list(es)
+	let em_moved = s:Move_extent(em2, 100)
+	let es2 = [[
+			\ [-3, 3], [-4, 5], [-7, 6]], [
+			\ [-2, 5], [-1, 6],  [-5, 14], [-3, 11]], [
+			\ [-5, 4], [-4, 5],  [-2, 15], [-1, 16]]]
+	let es2 = map(es2, 'S_To_list(v:val)')
+	let e_fit01 = s:Fit(es2[0], es2[1])
+	let e_fit12 = s:Fit(es2[1], es2[2])
+	let e_fitlistl = s:Fitlistl(es2)
+	let e_fitlistr = s:Fitlistr(es2)
+	let e_fitlist = s:Fitlist(es2)
+
+	echo "xs: " . string(xs)
+	echo "xs_upper: " . string(xs_upper)
+	echo "xs_rev: " . string(xs_rev)
+	echo "xs_zipped: " . string(xs_zipped)
+	echo "xs_zswapped: " . string(xs_zswapped)
+	echo "xs_unzipped: " . string(xs_unzipped)
+	echo "em: " . string(em)
+	echo "em2: " . string(em2)
+	echo "em_moved: " . string(em_moved)
+	echo "e_fit01: " . string(e_fit01)
+	echo "e_fit12: " . string(e_fit12)
+	echo "e_fitlistl: " . string(e_fitlistl)
+	echo "e_fitlistr: " . string(e_fitlistr)
+	echo "e_fitlist: " . string(e_fitlist)
+
+endfu
 " vim:ts=4:sw=4:tw=80
 
