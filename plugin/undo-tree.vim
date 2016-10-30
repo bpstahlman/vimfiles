@@ -347,10 +347,9 @@ endfu
 fu! s:Fit_fn(max, e_pair)
 	" Assumption: Caller ensures matched pairs (using discard_unmatched optional
 	" arg to Zip).
-	" TODO: Make min separation (4) configurable? At least, don't hard-code.
-	" Note: For now, you need screen positions (to get space separation) and 2
-	" parens.
-	let d = a:e_pair[0][1] - a:e_pair[1][0] + 4
+	" TODO: Make min separation configurable? At least, don't hard-code.
+	" Note: Space for any brackets is included in label width.
+	let d = a:e_pair[0][1] - a:e_pair[1][0] + 1
 	return d > a:max ? d : a:max
 endfu
 fu! s:Fit(e1, e2)
@@ -433,7 +432,9 @@ fu! s:Design(t)
 	let positions = s:Fitlist(extents)
 	let ptrees = S_Map(function('s:Move_tree_fn'), S_Zip(trees, positions))
 	let pextents = S_Map(function('s:Move_extent'), S_Zip(extents, positions))
-	let w = len(a:t.seq)
+	" Note: Leave space for surrounding [...]
+	" TODO: Perhaps methodize getting label text/size somehow.
+	let w = len(a:t.seq) + 2
 	let e = [-w/2, w/2 + w%2]
 	let resultextent = S_Cons(e, s:Merge_list(pextents))
 	" TODO: Consider a cleaner way to put x on the actual node. Perhaps in a
@@ -461,7 +462,7 @@ fu! s:Gridlines_add(idx, x, text) dict
 	" needed.
 	echo "idx=" . a:idx . ", x=" . a:x . ", text=" . a:text
 	let self.lines[a:idx] =
-		\ self.lines[a:idx][: a:x] . a:text . self.lines[a:idx][a:x + len(a:text) :]
+		\ self.lines[a:idx][: a:x - 1] . a:text . self.lines[a:idx][a:x + len(a:text) :]
 endfu
 
 fu! s:Make_gridlines()
@@ -620,8 +621,8 @@ fu! s:Build_tree_display(tree, extent)
 		" TODO: Think through rounding/truncating...
 		let text_x = x - len(text) / 2
 		call lines.add(lrow, text_x, text)
-		if t.seq == 4
-			echo printf("HEY! 4: t.x=%d t.prev.x=%d", t.x, !empty(t.prev) ? t.prev.x : 0)
+		if t.seq == 3 || t.seq == 4
+			"echo printf("Foo %d : t.x=%d", t.seq, t.x)
 		endif
 		" Draw lower vertical for all but root.
 		if !empty(t.parent)
@@ -663,7 +664,7 @@ fu! s:Build_tree_display(tree, extent)
 					endif
 				elseif t.prev.x > 0
 					" r->r
-					let text_x = parent_x + t.prev.x
+					let text_x = parent_x + t.prev.x - 1
 					let text = repeat('_', t.x - t.prev.x)
 				else
 					" c->r
