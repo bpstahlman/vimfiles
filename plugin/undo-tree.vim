@@ -668,8 +668,80 @@ fu! s:Refresh_undo_tree()
 	"echo "extent:"
 	"echo extent
 endfu
+fu! s:Need_refresh()
+	let undo_info = b:undo_information
+	let bufnr = bufnr("%")
+	" Move to the parent buffer.
+	exe . winnr(undo_info.parent_bufnr) . "wincmd \<C-W>"
+	let v_ut = undotree()
+	" Return to undo buffer
+	exe . winnr(bufnr) . "wincmd \<C-W>"
+	" TODO: Perhaps more validation on the type and keys.
+	if undo_info.tree.meta.seq_last != v_ut.seq_last
+		" Caller will need the undotree.
+		return v_ut
+	endif
+	
+	return {}
+endfu
+fu! s:Get_undo_buf_win()
+	let undo_bufnr = exists('b:undo_bufnr') ? b:undo_bufnr : -1
+	if !bufexists(undo_bufnr)
+		return [-1, -1]
+	endif
+	let undo_info = getbufvar(undo_bufnr, 'undo_information', {})
 
-nmap <F7> :call <SID>Refresh_undo_tree()<CR>
+endfu
+fu! s:Open_undo_window()
+	let bufnr = bufnr("%")
+	let undo_bufnr = exists('b:undo_bufnr') ? b:undo_bufnr : -1
+	if !bufexists(undo_bufnr)
+		let undo_bufnr = -1
+	endif
+	" Validate any existing undo info.
+	" TODO: Extra validation to ignore buffers that don't look quite right.
+	if undo_bufnr >= 0
+		" We have a buffer. Make sure it's visible.
+		" TODO: Make sure it really is ours.
+		" Assumption: bidirectional link already exists.
+		let winnr = bufwinnr(undo_bufnr)
+		if winnr < 0
+			new
+			exe 'buffer ' . bufnr
+		endif
+	else
+		" Create new window containing scratch buffer.
+		exe 'new [' . expand('%') . '.undo]'
+		setl buftype=nofile bufhidden=hide noswapfile
+		" Establish bi-directional link.
+		call setbufvar(bufnr, 'undo_bufnr', bufnr("%"))
+		let b:undo_information = {'parent_bufnr': bufnr}
+	endif
+	" We're in undo window now.
+	call s:Refresh_undo_window()
+
+endfu
+fu! s:Refresh_undo_window(...)
+	let undo_info = b:undo_information
+	" Make sure parent window is visible
+	if winnr(undo_info.parent_bufnr) < 0
+		new
+		exe 'buffer ' . undo_info.parent_bufnr
+	endif
+	let v_ut = s:Need_refresh()
+	if !empty(v_ut)
+		let undo_tree = Make_undo_tree()
+		" TODO: Thinking I may no longer need tree returned, now that positions are
+		" stored on b:undo_tree.
+		let [tree, extent] = s:Design(undo_tree)
+		let tree_lines = s:Build_tree_display(undo_tree, extent)
+	endif
+endfu
+fu! s:Undo_window_BufEnter()
+	" Assumption: Wouldn't get here if we didn't have undo information.
+endfu
+
+nmap <F7> :call <SID>Goto_undo_window()<CR>
 nmap <F8> :call <SID>Display_undo_tree(b:undo_tree)<CR>
 nmap <C-Up> :call b:undo_tree.up()<CR>
 nmap <C-Down> :call b:undo_tree.down()<CR>
