@@ -668,6 +668,260 @@ fu! s:Refresh_undo_tree()
 	"echo "extent:"
 	"echo extent
 endfu
+
+" TODO: Rework so that the parent hash holds an object with child's bnr and
+" whatever data object the plugin wants to store in it. Also, perhaps it could
+" hold a random magic number to give greater confidence on identity of child
+" buffer.
+let s:undo_infos = {}
+let s:parent_to_child = {}
+let s:child_to_parent = {}
+
+fu! s:Handle_from_buf()
+	if !&modifiable
+		return {}
+	endif
+	" Buffer looks like buffer that could have undo buffer.
+	" TODO: Perhaps some additional checks.
+	let bnr = bufnr("%")
+	let c_bnr = has_key(s:parent_to_child, bnr) ? s:parent_to_child[bnr] : -1
+	if c_bnr == -1
+		" Have never used plugin on this buffer.
+		return s:Create_undo_buf()
+	endif
+	" Already have entries for this one.
+	return {
+		\ 'p_bufnr': bnr,
+		\ 'c_bufnr': c_bnr,
+		\ 'undo_info': s:undo_infos[bnr]}
+endfu
+fu! s:Handle_from_undo_buf()
+	if &buftype != 'nowrite' || &bufhidden != 'delete' || &swapfile
+		" Doesn't look like an undo buffer.
+		return {}
+	endif
+	" Buffer looks like undo buffer.
+	let bnr = bufnr("%")
+	let p_bnr = has_key(s:child_to_parent, bnr) ? s:child_to_parent[bnr] : -1
+	if p_bnr == -1
+		" Must not really be undo buf.
+		return {}
+	endif
+	return {
+		\ 'p_bufnr': p_bnr,
+		\ 'c_bufnr': bnr,
+		\ 'undo_info': s:undo_infos[p_bnr]}
+endfu
+
+fu! s:Parent_BufDelete(bnr)
+	if has_key(s:parent_to_child, a:bnr)
+		let c_bnr = s:parent_to_child[a:bnr]
+		" Remove child buffer, which has meaning only for lifetime of parent.
+		" Double-check to be sure we don't delete something important!
+		" Caveat: BufDelete help forbids changing to another buffer.
+		let bt = getbufvar(c_bnr, '&buftype')
+		let bh = getbufvar(c_bnr, '&bufhidden')
+		let sf = getbufvar(c_bnr, '&swapfile')
+		if bt == 'nofile' && bh == 'hide' && !sf
+			" Yep. This is really our undo buffer.
+			" Note: Intentionally using bd without bang for extra safety.
+			" TODO: See whether bwipe would be more in order.
+			exe 'bd ' . c_bnr
+			call remove(s:parent_to_child, a:bnr)
+			call remove(s:undo_infos, a:bnr)
+			call remove(s:child_to_parent, c_bnr)
+		endif
+	endif
+endfu
+fu! s:Child_BufDelete(bnr)
+	if has_key(s:child_to_parent, a:bnr)
+		let p_bnr = s:child_to_parent[a:bnr]
+		call remove(s:parent_to_child, p_bnr)
+		call remove(s:undo_infos, p_bnr)
+		call remove(s:child_to_parent, a:bnr)
+	endif
+endfu
+fu! s:Child_BufEnter()
+	" Invoke non-forced refresh.
+endfu
+
+fu! s:Create_autocmds_in_child()
+	" Create autocmds that will permit us to clean up when child buf deleted
+	au undo_tree_child
+		au!
+		au BufDelete <buffer> call s:Child_BufDelete(expand("<abuf>"))
+		au BufEnter <buffer> call s:Child_BufEnter()
+	augroup END
+endfu
+fu! s:Create_autocmds_in_parent()
+	" Create autocmds that will permit us to clean up when parent buf deleted
+	au undo_tree_parent
+		au!
+		au BufDelete <buffer> call s:Parent_BufDelete(expand("<abuf>"))
+	augroup END
+endfu
+
+" Return: Same handle returned by Handle_from_<...> functions.
+" Pre Constraint: In buffer requiring the undo buf.
+fu! s:Create_undo_buf()
+	let bnr = bufnr("%")
+	call s:Create_autocmds_in_parent()
+	" Create new window containing scratch buffer.
+	exe 'new [' . expand('%') . '.undo]'
+	setl buftype=nofile bufhidden=hide noswapfile
+	call s:Create_autocmds_in_child()
+
+endfu
+
+fu! s:Need_refresh()
+	let undo_info = b:undo_information
+	let bufnr = bufnr("%")
+	" Move to the parent buffer.
+	exe . winnr(undo_info.parent_bufnr) . "wincmd \<C-W>"
+	let v_ut = undotree()
+	" Return to undo buffer
+	exe . winnr(bufnr) . "wincmd \<C-W>"
+	" TODO: Perhaps more validation on the type and keys.
+	if undo_info.tree.meta.seq_last != v_ut.seq_last
+		" Caller will need the undotree.
+		return v_ut
+	endif
+	
+	return {}
+endfu
+fu! s:Get_undo_buf_win()
+	let undo_bufnr = exists('b:undo_bufnr') ? b:undo_bufnr : -1
+	if !bufexists(undo_bufnr)
+		return [-1, -1]
+	endif
+	let undo_info = getbufvar(undo_bufnr, 'undo_information', {})
+
+endfu
+fu! s:Open_undo_window()
+	let bufnr = bufnr("%")
+	let undo_bufnr = exists('b:undo_bufnr') ? b:undo_bufnr : -1
+	if !bufexists(undo_bufnr)
+		let undo_bufnr = -1
+	endif
+	" Validate any existing undo info.
+	" TODO: Extra validation to ignore buffers that don't look quite right.
+	if undo_bufnr >= 0
+		" We have a buffer. Make sure it's visible.
+		" TODO: Make sure it really is ours.
+		" Assumption: bidirectional link already exists.
+		let winnr = bufwinnr(undo_bufnr)
+		if winnr < 0
+			new
+			exe 'buffer ' . bufnr
+		endif
+	else
+		" Create new window containing scratch buffer.
+		exe 'new [' . expand('%') . '.undo]'
+		setl buftype=nofile bufhidden=hide noswapfile
+		" Establish bi-directional link.
+		call setbufvar(bufnr, 'undo_bufnr', bufnr("%"))
+		let b:undo_information = {'parent_bufnr': bufnr}
+	endif
+	" We're in undo window now.
+	call s:Refresh_undo_window()
+
+endfu
+
+fu! s:Refresh_undo_window_old(...)
+	let undo_info = b:undo_information
+	" Make sure parent window is visible
+	if winnr(undo_info.parent_bufnr) < 0
+		new
+		exe 'buffer ' . undo_info.parent_bufnr
+	endif
+	let v_ut = s:Need_refresh()
+	if !empty(v_ut)
+		let undo_tree = Make_undo_tree()
+		" TODO: Thinking I may no longer need tree returned, now that positions are
+		" stored on b:undo_tree.
+		let [tree, extent] = s:Design(undo_tree)
+		let tree_lines = s:Build_tree_display(undo_tree, extent)
+	endif
+endfu
+fu! s:Undo_window_BufEnter()
+	" Assumption: Wouldn't get here if we didn't have undo information.
+endfu
+
+nmap <F7> :call <SID>Goto_undo_window()<CR>
+nmap <F8> :call <SID>Display_undo_tree(b:undo_tree)<CR>
+nmap <C-Up> :call b:undo_tree.up()<CR>
+nmap <C-Down> :call b:undo_tree.down()<CR>
+nmap <C-Left> :call b:undo_tree.left()<CR>
+nmap <C-Right> :call b:undo_tree.right()<CR>
+
+nmap <F9> :echo string(<SID>Show_undo_tree())<CR>
+
+fu! s:Test_only()
+	let xs = S_Cons("baz", {})
+	let xs = S_Cons("bar", xs)
+	let xs = S_Cons("foo", xs)
+	let xs_upper = S_Map(function('toupper'), xs)
+	let xs_rev = S_Reverse(xs)
+	let xs_zipped = S_Zip(xs_upper, xs_rev)
+	let xs_zswapped = S_Map(function('s:Swap_tuple_fn'), xs_zipped)
+	let xs_unzipped = S_Unzip(xs_zswapped)
+	let es = [[
+			\ [1, 3], [-1, 4], [8, 10]], [
+			\ [4, 5], [5, 8],  [10, 14], [9, 11]], [
+			\ [6, 9], [8, 9],  [15, 19], [11, 16]]]
+	let es = map(es, 'S_To_list(v:val)')
+	let em = S_Merge(es[0], es[1])
+	let em = S_Merge(em, es[2])
+	let em2 = s:Merge_list(es)
+	let em_moved = s:Move_extent(em2, 100)
+	let es2 = [[
+			\ [-3, 3], [-4, 5], [-7, 6]], [
+			\ [-2, 5], [-1, 6],  [-5, 14], [-3, 11]], [
+			\ [-5, 4], [-4, 5],  [-2, 15], [-1, 16]]]
+	let es2 = map(es2, 'S_To_list(v:val)')
+	let e_fit01 = s:Fit(es2[0], es2[1])
+	let e_fit12 = s:Fit(es2[1], es2[2])
+	let e_fitlistl = s:Fitlistl(es2)
+	let e_fitlistr = s:Fitlistr(es2)
+	let e_fitlist = s:Fitlist(es2)
+
+	echo "xs: " . string(xs)
+	echo "xs_upper: " . string(xs_upper)
+	echo "xs_rev: " . string(xs_rev)
+	echo "xs_zipped: " . string(xs_zipped)
+	echo "xs_zswapped: " . string(xs_zswapped)
+	echo "xs_unzipped: " . string(xs_unzipped)
+	echo "em: " . string(em)
+	echo "em2: " . string(em2)
+	echo "em_moved: " . string(em_moved)
+	echo "e_fit01: " . string(e_fit01)
+	echo "e_fit12: " . string(e_fit12)
+	echo "e_fitlistl: " . string(e_fitlistl)
+	echo "e_fitlistr: " . string(e_fitlistr)
+	echo "e_fitlist: " . string(e_fitlist)
+
+endfu
+" vim:ts=4:sw=4:tw=80
+
+fu! s:Create_autocmds_in_parent()
+	" Create autocmds that will permit us to clean up when parent buf deleted
+	au undo_tree
+		au!
+		au BufDelete <buffer> call s:Parent_BufDelete(expand("<abuf>"))
+	augroup END
+endfu
+
+" Return: Same handle returned by Handle_from_<...> functions.
+" Pre Constraint: In buffer requiring the undo buf.
+fu! s:Create_undo_buf()
+	let bnr = bufnr("%")
+	" Create new window containing scratch buffer.
+	call s:Create_autocmds_in_parent()
+	exe 'new [' . expand('%') . '.undo]'
+	setl buftype=nofile bufhidden=hide noswapfile
+
+endfu
+
 fu! s:Need_refresh()
 	let undo_info = b:undo_information
 	let bufnr = bufnr("%")
