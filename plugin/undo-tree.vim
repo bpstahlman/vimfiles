@@ -102,9 +102,9 @@ fu! s:Insert_sorted(ls, o)
 	return a:ls
 endfu
 fu! s:Build_undo_tree(...)
-	if !a:0
+	if a:0 == 1
 		" Top-level call
-		let tree = undotree()
+		let tree = a:1
 		let entries = tree.entries
 		" Create root, merging in undotree() properties.
 		let root = s:Make_root(tree, {
@@ -208,8 +208,8 @@ fu! s:Move_right() dict
 	endif
 endfu
 
-fu! Make_undo_tree()
-	let me = s:Build_undo_tree()
+fu! s:Make_undo_tree(undotree)
+	let me = s:Build_undo_tree(a:undotree)
 	let me.up = function('s:Move_up')
 	let me.down = function('s:Move_down')
 	let me.left = function('s:Move_left')
@@ -654,21 +654,6 @@ fu! s:Build_tree_display(tree, extent)
 	return lines.lines
 endfu
 
-fu! s:Refresh_undo_tree()
-	let b:undo_tree = Make_undo_tree()
-	" TODO: Thinking I may no longer need tree returned, now that positions are
-	" stored on b:undo_tree.
-	let [tree, extent] = s:Design(b:undo_tree)
-	let tree_lines = s:Build_tree_display(b:undo_tree, extent)
-	let g:tree_lines = tree_lines
-	let g:tree = tree
-	let g:extent = extent
-	"echo "tree:"
-	"echo tree
-	"echo "extent:"
-	"echo extent
-endfu
-
 " TODO: Rework so that the parent hash holds an object with child's bnr and
 " whatever data object the plugin wants to store in it. Also, perhaps it could
 " hold a random magic number to give greater confidence on identity of child
@@ -677,12 +662,12 @@ let s:undo_infos = {}
 let s:parent_to_child = {}
 let s:child_to_parent = {}
 
-fu! s:Handle_from_buf()
+fu! s:Handle_from_parent()
+	" TODO: Perhaps some additional checks.
 	if !&modifiable
 		return {}
 	endif
 	" Buffer looks like buffer that could have undo buffer.
-	" TODO: Perhaps some additional checks.
 	let bnr = bufnr("%")
 	let c_bnr = has_key(s:parent_to_child, bnr) ? s:parent_to_child[bnr] : -1
 	if c_bnr == -1
@@ -695,7 +680,7 @@ fu! s:Handle_from_buf()
 		\ 'c_bufnr': c_bnr,
 		\ 'undo_info': s:undo_infos[bnr]}
 endfu
-fu! s:Handle_from_undo_buf()
+fu! s:Handle_from_child()
 	if &buftype != 'nowrite' || &bufhidden != 'delete' || &swapfile
 		" Doesn't look like an undo buffer.
 		return {}
@@ -713,16 +698,23 @@ fu! s:Handle_from_undo_buf()
 		\ 'undo_info': s:undo_infos[p_bnr]}
 endfu
 
+fu! s:Is_undo_buf(bnr)
+	let [bt, bh, sf] = map(['&buftype', '&bufhidden', '&swapfile'], 'getbufvar(a:bnr, v:val)')
+	"let bt = getbufvar(c_bnr, '&buftype')
+	"let bh = getbufvar(c_bnr, '&bufhidden')
+	"let sf = getbufvar(c_bnr, '&swapfile')
+	return bt == 'nofile' && bh == 'hide' && !sf
+endfu
+fu! s:Goto_buf(bufnr)
+	exe . winnr(a:bufnr) . "wincmd \<C-W>"
+endfu
 fu! s:Parent_BufDelete(bnr)
 	if has_key(s:parent_to_child, a:bnr)
 		let c_bnr = s:parent_to_child[a:bnr]
 		" Remove child buffer, which has meaning only for lifetime of parent.
 		" Double-check to be sure we don't delete something important!
 		" Caveat: BufDelete help forbids changing to another buffer.
-		let bt = getbufvar(c_bnr, '&buftype')
-		let bh = getbufvar(c_bnr, '&bufhidden')
-		let sf = getbufvar(c_bnr, '&swapfile')
-		if bt == 'nofile' && bh == 'hide' && !sf
+		if s:Is_undo_buf(c_bnr)
 			" Yep. This is really our undo buffer.
 			" Note: Intentionally using bd without bang for extra safety.
 			" TODO: See whether bwipe would be more in order.
@@ -730,6 +722,10 @@ fu! s:Parent_BufDelete(bnr)
 			call remove(s:parent_to_child, a:bnr)
 			call remove(s:undo_infos, a:bnr)
 			call remove(s:child_to_parent, c_bnr)
+		else
+			" TODO: Consider warning user that we won't be deleting what we
+			" thought was undo buf.
+			echoerr "Internal error!"
 		endif
 	endif
 endfu
@@ -743,6 +739,7 @@ fu! s:Child_BufDelete(bnr)
 endfu
 fu! s:Child_BufEnter()
 	" Invoke non-forced refresh.
+	call s:Refresh_undo_window(0)
 endfu
 
 fu! s:Create_autocmds_in_child()
@@ -770,82 +767,77 @@ fu! s:Create_undo_buf()
 	exe 'new [' . expand('%') . '.undo]'
 	setl buftype=nofile bufhidden=hide noswapfile
 	call s:Create_autocmds_in_child()
+	" Create buffer-local mapping(s)
+	" To refresh the tree forcibly
+	nmap <buffer> <leader>r :call <SID>s:Refresh_undo_window(1)
 
 endfu
 
-fu! s:Need_refresh()
-	let undo_info = b:undo_information
-	let bufnr = bufnr("%")
-	" Move to the parent buffer.
-	exe . winnr(undo_info.parent_bufnr) . "wincmd \<C-W>"
-	let v_ut = undotree()
-	" Return to undo buffer
-	exe . winnr(bufnr) . "wincmd \<C-W>"
-	" TODO: Perhaps more validation on the type and keys.
-	if undo_info.tree.meta.seq_last != v_ut.seq_last
-		" Caller will need the undotree.
-		return v_ut
-	endif
-	
-	return {}
-endfu
-fu! s:Get_undo_buf_win()
-	let undo_bufnr = exists('b:undo_bufnr') ? b:undo_bufnr : -1
-	if !bufexists(undo_bufnr)
-		return [-1, -1]
-	endif
-	let undo_info = getbufvar(undo_bufnr, 'undo_information', {})
-
-endfu
+" This one's tied to mapping or command.
 fu! s:Open_undo_window()
-	let bufnr = bufnr("%")
-	let undo_bufnr = exists('b:undo_bufnr') ? b:undo_bufnr : -1
-	if !bufexists(undo_bufnr)
-		let undo_bufnr = -1
+	let hndl = s:Handle_from_parent()
+	if empty(hndl)
+		echoerr "Can't display undo tree for this buffer."
+		return
 	endif
-	" Validate any existing undo info.
-	" TODO: Extra validation to ignore buffers that don't look quite right.
-	if undo_bufnr >= 0
-		" We have a buffer. Make sure it's visible.
-		" TODO: Make sure it really is ours.
-		" Assumption: bidirectional link already exists.
-		let winnr = bufwinnr(undo_bufnr)
-		if winnr < 0
-			new
-			exe 'buffer ' . bufnr
-		endif
-	else
-		" Create new window containing scratch buffer.
-		exe 'new [' . expand('%') . '.undo]'
-		setl buftype=nofile bufhidden=hide noswapfile
-		" Establish bi-directional link.
-		call setbufvar(bufnr, 'undo_bufnr', bufnr("%"))
-		let b:undo_information = {'parent_bufnr': bufnr}
-	endif
-	" We're in undo window now.
-	call s:Refresh_undo_window()
-
+	" Make undo buffer current and ensure visible.
+	" TODO: Consider using temporary override of switchbuf=useopen and :sbuffer
+	" to do this more simply.
+	call s:Ensure_child_open()
+	
+	" Note: undo_info may or may not be empty.
+	call s:Refresh_undo_window(0)
 endfu
 
-fu! s:Refresh_undo_window_old(...)
-	let undo_info = b:undo_information
-	" Make sure parent window is visible
-	if winnr(undo_info.parent_bufnr) < 0
-		new
-		exe 'buffer ' . undo_info.parent_bufnr
+" Assumption: Called from child.
+fu! s:Ensure_parent_open()
+	let c_bnr = bufnr('%')
+	let p_bnr = s:child_to_parent[c_bnr]
+	if winbufnr(p_bnr) < 0
+		exe 'aboveleft sb ' . p_bnr
 	endif
-	let v_ut = s:Need_refresh()
-	if !empty(v_ut)
-		let undo_tree = Make_undo_tree()
+endfu
+" Assumption: Called from parent.
+fu! s:Ensure_child_open()
+	let p_bnr = bufnr('%')
+	let c_bnr = s:parent_to_child[p_bnr]
+	if winbufnr(c_bnr) < 0
+		exe 'belowright sb ' . c_bnr
+	endif
+endfu
+fu! s:Refresh_undo_window(force)
+	let c_bnr = bufnr('%')
+	let p_bnr = s:child_to_parent[c_bnr]
+	let cache = s:undo_infos[p_bnr]
+	call s:Goto_buf(p_bnr)
+	" Get Vim's undo tree to see whether we're up to date.
+	let v_ut = undotree()
+	call s:Goto_buf(c_bnr)
+
+	if a:force || empty(cache) || cache.tree.meta.seq_last != v_ut.seq_last
+		let tree = s:Make_undo_tree(v_ut)
 		" TODO: Thinking I may no longer need tree returned, now that positions are
 		" stored on b:undo_tree.
-		let [tree, extent] = s:Design(undo_tree)
-		let tree_lines = s:Build_tree_display(undo_tree, extent)
+		let [ptree, extent] = s:Design(tree)
+		let tree_lines = s:Build_tree_display(tree, extent)
+		" Build and store new cache.
+		let s:undo_infos[p_bnr] = {
+			\ 'tree': tree,
+			\ 'geom': {}
+		\ }
+
+		" Add the tree to the undo buffer.
+		%d
+		call append(0, tree_lines)
 	endif
+
 endfu
 fu! s:Undo_window_BufEnter()
 	" Assumption: Wouldn't get here if we didn't have undo information.
 endfu
+
+
+nmap <leader>u :call <SID>s:Open_undo_window(0)
 
 nmap <F7> :call <SID>Goto_undo_window()<CR>
 nmap <F8> :call <SID>Display_undo_tree(b:undo_tree)<CR>
