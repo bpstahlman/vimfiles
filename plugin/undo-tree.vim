@@ -35,19 +35,28 @@ fu! s:Show_undo_tree()
 
 	call s:Recurse_tree(t.entries, 0)
 endfu
+" TODO: Use this in tree display building.
+fu! s:Node_get_geom() dict
+	let w = len(self.seq) + 2
+	let xs = -(w - 1) / 2
+	let xe = xs + w - 1
+	return {'w': w, 'e': [xs, xe]}
+endfu
 " =============================================================
 " TODO: Consider pulling everything but 'next' under an 'el' property so that
 " these elements can be used with the list functions further down. Hmm... Not
 " yet clear whether structural members like children and parent would also need
 " to be in el.
-fu! s:Make_node(e, parent)
+fu! s:Make_node(e, parent, lvl)
 	return {
 		\ 'seq': a:e.seq
 		\,'time': a:e.time
+		\,'lvl': a:lvl
 		\,'children': {'fst': {}, 'cur': {}, 'lst': {}}
 		\,'prev': {}
 		\,'next': {}
 		\,'parent': a:parent
+		\,'Get_geom': function('s:Node_get_geom')
 		\}
 endfu
 fu! s:Make_root(tree, ...)
@@ -58,6 +67,7 @@ fu! s:Make_root(tree, ...)
 	for k in filter(keys(a:tree), 'v:val != "entries"')
 		let ret.meta[k] = a:tree[k]
 	endfor
+	let ret.lvl = 0
 	let ret.parent = {}
 	" This will be set later in build traversal unless cur is root, so go ahead
 	" and initialize to root.
@@ -111,13 +121,14 @@ fu! s:Build_undo_tree(...)
 			\'seq': 0, 'prev': {}, 'next': {}, 'parent': {},
 			\'children': {'fst': {}, 'cur': {}, 'lst': {}}})
 		let parent = root
+		let lvl = 0
 	else
-		let [entries, parent, root] = a:000
+		let [entries, parent, root, lvl] = a:000
 	endif
 
 	let ret = {}
 	for e in entries
-		let o = s:Make_node(e, parent)
+		let o = s:Make_node(e, parent, lvl)
 		if o.seq == root.meta.seq_cur
 			" Store a ptr to the current node on the root.
 			" Note: This is what will be manipulated henceforth.
@@ -126,7 +137,8 @@ fu! s:Build_undo_tree(...)
 		if has_key(e, 'alt')
 			" Build sibs recursively and add self, keeping list sorted.
 			" TODO: Consider whether to assign to parent.children instead
-			let sibs = s:Insert_sorted(s:Build_undo_tree(e.alt, parent, root), o)
+			let sibs = s:Insert_sorted(
+				\ s:Build_undo_tree(e.alt, parent, root, lvl), o)
 		else
 			" Any sibs are at higher level.
 			let sibs = {'fst': o, 'cur': o, 'lst': o}
@@ -139,6 +151,7 @@ fu! s:Build_undo_tree(...)
 		endif
 		" Note: parent can point anywhere within sibs list.
 		let parent = o
+		let lvl += 1
 	endfor
 	" Root (seq==0) is special case: no one to return siblings to. In that case,
 	" we make sibs child of root, and return root itself.
@@ -563,10 +576,18 @@ fu! s:Build_tree_display(tree, extent)
 	" TODO: Make this part of some sort of global config.
 	let rows_per_lvl = 3
 	let lines = s:Make_gridlines()
+	" Hash geom info by node id (seq number)
+	let nodes = {}
+	" Note: lines will be added later.
+	let geom = {'x_bias': x, 'lines': [], 'nodes': nodes}
 	while !empty(fifo)
 		let [t, parent_x, lvl] = remove(fifo, 0)
 		" Calculate absolute x position in grid.
 		let x = parent_x + t.x
+		" Hash node and its absolute x pos by seq number.
+		" Rationale: Associates nodes with actual canvas location.
+		" Note: +1 converts from string to column pos.
+		let nodes[t.seq] = {'node': t, 'x': x + 1}
 		" Add this node's children
 		let tc = t.children.fst
 		while !empty(tc)
@@ -651,8 +672,9 @@ fu! s:Build_tree_display(tree, extent)
 			endif
 		endif
 	endwhile
-
-	return lines.lines
+	" Add the lines array to return object.
+	let geom.lines = lines.lines
+	return geom
 endfu
 
 " TODO: Rework so that the parent hash holds an object with child's bnr and
@@ -669,6 +691,57 @@ fu! s:Dbg(lvl, fmt, ...)
 		return
 	endif
 	echo call('printf', extend([a:fmt], a:000))
+endfu
+" Inputs:
+" atom: the pattern to match
+" pos: constraint pos (1-based [row, col])
+" [len]: constraint length
+fu! s:Make_regex(atom, pos, ...)
+	if a:0
+		" range
+		" TODO: Make sure we don't need separate \%c for == case.
+		let re = '\%' . a:pos[0] . 'l\&\%>' . (a:pos[1] - 1)
+			\ . 'c\&\%<' . (a:pos[1] + a:1) . 'c'
+	else
+		" exact position
+		let re = '\%' . a:pos[0] . 'l\&\%' . a:pos[1] . 'c'
+	endif
+	" TODO: Consider optimal way to apply constraint: e.g., is it faster to
+	" check the atom or the constraint?
+	let re .= '\&' . a:atom
+	return re
+endfu
+" Assumption: Input node is valid. (Note that root node can never be
+" invalidated.)
+fu! s:Update_syn_tree(node) dict
+	let lvl = a:node.lvl
+	" Remove any invalidated items
+	for id in self.ids[lvl : ]
+		call matchdelete(id)
+	endfor
+	let [tp, t, xp] = [a:node.parent, a:node]
+	" Note: Positions in geom.nodes are 1-based (col nr)
+	let xp = self.geom.nodes[tp.seq]
+	while !empty(t)
+		" Design Decision: Could also lookup x in self.geom.nodes, but this
+		" avoids hash lookup.
+		let x = xp + t.x
+		let gi = t.Get_geom()
+		" TODO: UNDER CONSTRUCTION: Need to calculate y (unless we add to geom).
+		let re = s:Make_regex('[[(][0-9]\+[])]', [x + gi.e[0], y], gi.w)
+
+		let [t, xp] = [t.children.cur, x]
+		let lvl += 1
+	endwhile
+endfu
+fu! s:Make_syn_tree(geom)
+	let me = {
+		\ 'ids': [],
+		\ 'Update': function(s:Update_syn_tree),
+		\ 'geom': a:geom
+		\ }
+
+	return me
 endfu
 fu! s:Handles_from_parent()
 	" TODO: Perhaps some additional checks.
@@ -891,16 +964,16 @@ fu! s:Refresh_undo_window(force)
 		" TODO: Thinking I may no longer need tree returned, now that positions are
 		" stored on b:undo_tree.
 		let [ptree, extent] = s:Design(tree)
-		let lines = s:Build_tree_display(tree, extent)
+		let di = s:Build_tree_display(tree, extent)
 		" Build and store new cache.
 		let s:undo_infos[p_bnr] = {
 			\ 'tree': tree,
-			\ 'geom': {}
+			\ 'geom': di.geom
 		\ }
 
 		" Replace undo buffer's contents with new tree.
 		%d
-		call append(0, lines)
+		call append(0, di.lines)
 	endif
 endfu
 
