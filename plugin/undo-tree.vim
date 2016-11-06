@@ -794,6 +794,7 @@ fu! s:Handles_from_parent()
 	let c_bnr = has_key(s:parent_to_child, p_bnr) ? s:parent_to_child[p_bnr] : -1
 	return [p_bnr, c_bnr]
 endfu
+" TODO: Perhaps get rid of this if we don't use it.
 fu! s:Handles_from_child()
 	if !s:Is_undo_buf()
 		" Doesn't look like it could be an undo buffer.
@@ -807,6 +808,17 @@ fu! s:Handles_from_child()
 		return [-1, -1]
 	endif
 	return [p_bnr, c_bnr]
+endfu
+" Return [bufnr, winnr] for parent.
+" Note: winnr == -1 indicates parent not in window.
+fu! s:Get_parent_bufwin()
+	let c_bnr = bufnr('%')
+	let p_bnr = has_key(s:child_to_parent, c_bnr) ? s:child_to_parent[c_bnr] : -1
+	if p_bnr < 0
+		" Parent buffer must be in the process of deletion.
+		return [-1, -1]
+	endif
+	return [p_bnr, bufwinnr(p_bnr)]
 endfu
 
 fu! s:Is_undo_buf(bnr)
@@ -825,7 +837,50 @@ endfu
 " Caveat: bnr is input because bufnr('%') is not guaranteed to work at this
 " point.
 fu! s:Parent_BufDelete(bnr)
-	call s:Dbg(3, "Parent_BufDelete on buffer %d", a:bnr)
+	"if has_key(s:parent_to_child, a:bnr)
+	"	let c_bnr = s:parent_to_child[a:bnr]
+	"	" Remove child buffer, which has meaning only for lifetime of parent.
+	"	" Double-check to be sure we don't delete something important!
+	"	" Caveat: BufDelete help forbids changing to another buffer.
+	"	if s:Is_undo_buf(c_bnr)
+	"		" Yep. This is really our undo buffer.
+	"		" Note: Intentionally using bd without bang for extra safety.
+	"		" TODO: See whether bwipe would be more in order.
+	"		exe 'bd ' . c_bnr
+	"		call remove(s:parent_to_child, a:bnr)
+	"		call remove(s:undo_infos, a:bnr)
+	"		call remove(s:child_to_parent, c_bnr)
+	"	else
+	"		" TODO: Rework this.
+	"		echoerr "Internal error! Refusing to delete undo buffer " . c_bnr
+	"			\ . " (associated with parent buffer " . p_bnr
+	"			\ . ") because it doesn't look like an undo buffer."
+	"	endif
+	"endif
+endfu
+fu! s:Parent_BufUnload(bnr)
+	"if has_key(s:parent_to_child, a:bnr)
+	"	let c_bnr = s:parent_to_child[a:bnr]
+	"	" Remove child buffer, which has meaning only for lifetime of parent.
+	"	" Double-check to be sure we don't delete something important!
+	"	" Caveat: BufDelete help forbids changing to another buffer.
+	"	if s:Is_undo_buf(c_bnr)
+	"		" Yep. This is really our undo buffer.
+	"		" Note: Intentionally using bd without bang for extra safety.
+	"		" TODO: See whether bwipe would be more in order.
+	"		exe 'bd ' . c_bnr
+	"		call remove(s:parent_to_child, a:bnr)
+	"		call remove(s:undo_infos, a:bnr)
+	"		call remove(s:child_to_parent, c_bnr)
+	"	else
+	"		" TODO: Rework this.
+	"		echoerr "Internal error! Refusing to delete undo buffer " . c_bnr
+	"			\ . " (associated with parent buffer " . p_bnr
+	"			\ . ") because it doesn't look like an undo buffer."
+	"	endif
+	"endif
+endfu
+fu! s:Parent_BufWinLeave(bnr)
 	if has_key(s:parent_to_child, a:bnr)
 		let c_bnr = s:parent_to_child[a:bnr]
 		" Remove child buffer, which has meaning only for lifetime of parent.
@@ -858,6 +913,7 @@ fu! s:Child_BufDelete(bnr)
 	endif
 endfu
 " Note: This is the actual BufEnter handler.
+" TODO: Remove if I end up not using this kludge.
 fu! s:Child_CursorHold()
 	if exists('s:updatetime_save')
 		" Restore the original time.
@@ -869,6 +925,16 @@ fu! s:Child_CursorHold()
 endfu
 " Called From: child buffer BufEnter autocmd
 fu! s:Child_BufEnter()
+	let [p_bnr, p_wnr] = s:Get_parent_bufwin()
+	" Caveat: BufEnter will fire when parent is in process of deletion, but in
+	" this case, parent will not have a window.
+	if p_wnr > 0
+		" Invoke non-forced refresh.
+		call s:Refresh_undo_window(0)
+	endif
+endfu
+fu! s:Child_BufEnter_kludge()
+	"echoerr "parent bufwinnr: " . bufwinnr(s:child_to_parent[bufnr('%')])
 	call s:Dbg(3, "Child_BufEnter on buffer %d", bufnr('%'))
 	" Save updatetime so we can restore in CursorHold handler.
 	let s:updatetime_save = &updatetime
@@ -889,6 +955,8 @@ fu! s:Create_autocmds_in_parent()
 	aug undo_tree_parent
 		au!
 		au BufDelete <buffer> call s:Parent_BufDelete(expand("<abuf>"))
+		au BufUnload <buffer> call s:Parent_BufUnload(expand("<abuf>"))
+		au BufWinLeave <buffer> call s:Parent_BufWinLeave(expand("<abuf>"))
 	augroup END
 endfu
 fu! s:Create_mappings_in_child()
@@ -913,12 +981,15 @@ endfu
 " Rationale: Invoked from undo buffer mappings, and freshness is checked in
 " BufEnter.
 fu! s:Move_in_tree(dir)
-	let p_bnr = s:Ensure_parent_visible()
-	" Grab tree and invoke specified movement method.
-	call s:undo_infos[p_bnr].tree[a:dir]()
-	" Return to child.
-	wincmd p
-	" TODO: Update display.
+	let [p_bnr, p_wnr] = s:Get_parent_bufwin()
+	" Ignore mapping if parent not visible.
+	if p_wnr > 0
+		" Grab tree and invoke specified movement method.
+		call s:undo_infos[p_bnr].tree[a:dir]()
+		" Return to child.
+		wincmd p
+		" TODO: Update display.
+	endif
 endfu
 
 " Called From: parent buffer that does not yet have a child buffer.
@@ -972,6 +1043,8 @@ endfu
 " Assumption: Called from child after verifying existence.
 " Note: Always end up in parent window.
 " Return: parent bufnr (as convenience)
+" TODO: Probably get rid of this if I end up ignoring events when parent isn't
+" visible.
 fu! s:Ensure_parent_visible()
 	let c_bnr = bufnr('%')
 	let p_bnr = s:child_to_parent[c_bnr]
