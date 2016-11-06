@@ -72,6 +72,9 @@ fu! s:Make_root(tree, ...)
 	" This will be set later in build traversal unless cur is root, so go ahead
 	" and initialize to root.
 	let ret.cur = ret
+	" Note: No inheritance forces kludgy stuff like this.
+	" TODO: Consider better way.
+	let ret.Get_geom = function('s:Node_get_geom')
 	return ret
 endfu
 fu! s:Insert_sorted(ls, o)
@@ -579,15 +582,21 @@ fu! s:Build_tree_display(tree, extent)
 	" Hash geom info by node id (seq number)
 	let nodes = {}
 	" Note: lines will be added later.
-	let geom = {'x_bias': x, 'lines': [], 'nodes': nodes}
+	let ret = {'geom': {'x_bias': x, 'nodes': nodes}, 'lines': []}
 	while !empty(fifo)
 		let [t, parent_x, lvl] = remove(fifo, 0)
 		" Calculate absolute x position in grid.
 		let x = parent_x + t.x
+		" Get index of row containing the label.
+		let lrow = lvl * rows_per_lvl
 		" Hash node and its absolute x pos by seq number.
 		" Rationale: Associates nodes with actual canvas location.
-		" Note: +1 converts from string to column pos.
-		let nodes[t.seq] = {'node': t, 'x': x + 1}
+		" Note: +1 converts from 0-based string offsets to 1-based row/col.
+		" Design Decision: Adding 'row' key to nodes object as convenience,
+		" though it could be derived from lvl.
+		" TODO: Decide whether the convenience justifies the denormalization.
+		" Note: Currently, not even using 'row'.
+		let nodes[t.seq] = {'node': t, 'col': x + 1, 'row': lrow + 1 }
 		" Add this node's children
 		let tc = t.children.fst
 		while !empty(tc)
@@ -596,8 +605,6 @@ fu! s:Build_tree_display(tree, extent)
 			let tc = tc.next
 		endwhile
 		" Process current node.
-		" Get index of row containing the label.
-		let lrow = lvl * rows_per_lvl
 		" Build the label, leaving space for surrounding [...].
 		let text = ' ' . t.seq . ' '
 		" TODO: Think through rounding/truncating...
@@ -673,8 +680,8 @@ fu! s:Build_tree_display(tree, extent)
 		endif
 	endwhile
 	" Add the lines array to return object.
-	let geom.lines = lines.lines
-	return geom
+	let ret.lines = lines.lines
+	return ret
 endfu
 
 " TODO: Rework so that the parent hash holds an object with child's bnr and
@@ -711,33 +718,70 @@ fu! s:Make_regex(atom, pos, ...)
 	let re .= '\&' . a:atom
 	return re
 endfu
+" Inputs:
+" ids: list of matchadd ids for the level being built.
+" node: child node
+" lvl: 0-based level of child
+" col: child col
+fu! s:Update_syn_tree_node(ids, node, lvl, col)
+	let rows_per_lvl = 3
+	let row = a:lvl * rows_per_lvl + 1
+	let gi = a:node.Get_geom()
+	let re = s:Make_regex('[[(]\?[0-9]\+[])]\?', [row, a:col + gi.e[0]], gi.w)
+	" TODO: Don't hardcode the priorities like this.
+	" Note: Priority 10 is default. It will override hlsearch and such, but
+	" should be lowest of the undo-tree groups.
+	call add(a:ids, matchadd('undo_redo_path', re, 10))
+	if !a:lvl
+		" Nothing else to do for root.
+		return
+	endif
+	if a:node.x < 0
+		let [off, text] = [1, '/']
+	elseif a:node.x > 0
+		" Escape for regex
+		let [off, text] = [-1, '\\']
+	else
+		let [off, text] = [0, '|']
+	endif
+	let re = s:Make_regex(text, [row - 1, a:col + off])
+	call add(a:ids, matchadd('undo_redo_path', re, 10))
+
+endfu
 " Assumption: Input node is valid. (Note that root node can never be
 " invalidated.)
 fu! s:Update_syn_tree(node) dict
 	let lvl = a:node.lvl
 	" Remove any invalidated items
-	for id in self.ids[lvl : ]
-		call matchdelete(id)
-	endfor
-	let [tp, t, xp] = [a:node.parent, a:node]
+	" Assumption: Array of ids will either be empty, or have # of levels
+	" dictated by height of tree.
+	if len(self.ids)
+		for ids in self.ids[lvl : ]
+			for id in ids
+				call matchdelete(id)
+			endfor
+		endfor
+		" Now remove the actual list elements so we can blindly add below.
+		call remove(self.ids, lvl, -1)
+	endif
+	let [tp, t] = [a:node.parent, a:node]
 	" Note: Positions in geom.nodes are 1-based (col nr)
-	let xp = self.geom.nodes[tp.seq]
+	" Note: If child is root, initialize colp to root's col.
+	let colp = self.geom.nodes[(empty(tp) ? t : tp).seq].col
 	while !empty(t)
+		call add(self.ids, [])
 		" Design Decision: Could also lookup x in self.geom.nodes, but this
 		" avoids hash lookup.
-		let x = xp + t.x
-		let gi = t.Get_geom()
-		" TODO: UNDER CONSTRUCTION: Need to calculate y (unless we add to geom).
-		let re = s:Make_regex('[[(][0-9]\+[])]', [x + gi.e[0], y], gi.w)
-
-		let [t, xp] = [t.children.cur, x]
+		let col = colp + t.x
+		call s:Update_syn_tree_node(self.ids, t, lvl, col)
+		let [t, colp] = [t.children.cur, col]
 		let lvl += 1
 	endwhile
 endfu
 fu! s:Make_syn_tree(geom)
 	let me = {
 		\ 'ids': [],
-		\ 'Update': function(s:Update_syn_tree),
+		\ 'Update': function('s:Update_syn_tree'),
 		\ 'geom': a:geom
 		\ }
 
@@ -813,11 +857,22 @@ fu! s:Child_BufDelete(bnr)
 		call remove(s:child_to_parent, a:bnr)
 	endif
 endfu
+" Note: This is the actual BufEnter handler.
+fu! s:Child_CursorHold()
+	if exists('s:updatetime_save')
+		" Restore the original time.
+		let &updatetime = s:updatetime_save
+		unlet! s:updatetime_save
+		" Invoke non-forced refresh.
+		call s:Refresh_undo_window(0)
+	endif
+endfu
 " Called From: child buffer BufEnter autocmd
 fu! s:Child_BufEnter()
 	call s:Dbg(3, "Child_BufEnter on buffer %d", bufnr('%'))
-	" Invoke non-forced refresh.
-	call s:Refresh_undo_window(0)
+	" Save updatetime so we can restore in CursorHold handler.
+	let s:updatetime_save = &updatetime
+	set updatetime=1
 endfu
 
 fu! s:Create_autocmds_in_child()
@@ -826,6 +881,7 @@ fu! s:Create_autocmds_in_child()
 		au!
 		au BufDelete <buffer> call s:Child_BufDelete(expand("<abuf>"))
 		au BufEnter <buffer> call s:Child_BufEnter()
+		au CursorHold <buffer> call s:Child_CursorHold()
 	augroup END
 endfu
 fu! s:Create_autocmds_in_parent()
@@ -847,6 +903,9 @@ fu! s:Create_mappings_in_child()
 	nmap <buffer> j :call <SID>Move_in_tree('down')<CR>
 	nmap <buffer> h :call <SID>Move_in_tree('left')<CR>
 	nmap <buffer> l :call <SID>Move_in_tree('right')<CR>
+endfu
+fu! s:Create_syntax_in_child()
+	hi undo_redo_path gui=bold cterm=bold term=bold
 endfu
 
 " Called From: child buffer maps for moving in tree.
@@ -877,6 +936,7 @@ fu! s:Create_undo_buf()
 	let c_bnr = bufnr('%')
 	call s:Create_autocmds_in_child()
 	call s:Create_mappings_in_child()
+	call s:Create_syntax_in_child()
 	" Add data for this undo buffer to script-local vars, keyed by parent
 	let s:parent_to_child[p_bnr] = c_bnr
 	let s:undo_infos[p_bnr] = {}
@@ -952,6 +1012,9 @@ fu! s:Refresh_undo_window(force)
 	let c_bnr = bufnr('%')
 	let p_bnr = s:child_to_parent[c_bnr]
 	let cache = s:undo_infos[p_bnr]
+	" TODO: Currently, it's not always the case that parent buffer is visible,
+	" or even exists. (Can get here on BufEnter when we're entering only because
+	" parent is going away.)
 	call s:Goto_visible_buf(p_bnr)
 	" Get Vim's undo tree to support freshness check, and if necessary, to serve
 	" as basis of new tree.
@@ -960,20 +1023,22 @@ fu! s:Refresh_undo_window(force)
 
 	if a:force || empty(cache) || cache.tree.meta.seq_last != v_ut.seq_last
 		let tree = s:Make_undo_tree(v_ut)
-		echo keys(tree)
 		" TODO: Thinking I may no longer need tree returned, now that positions are
 		" stored on b:undo_tree.
 		let [ptree, extent] = s:Design(tree)
 		let di = s:Build_tree_display(tree, extent)
 		" Build and store new cache.
-		let s:undo_infos[p_bnr] = {
-			\ 'tree': tree,
-			\ 'geom': di.geom
-		\ }
-
 		" Replace undo buffer's contents with new tree.
 		%d
 		call append(0, di.lines)
+		" Now do highlighting
+		let syn = s:Make_syn_tree(di.geom)
+		call syn.Update(tree)
+		let s:undo_infos[p_bnr] = {
+			\ 'tree': tree,
+			\ 'geom': di.geom,
+			\ 'syn': syn
+		\ }
 	endif
 endfu
 
