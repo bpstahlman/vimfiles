@@ -700,28 +700,6 @@ fu! s:Dbg(lvl, fmt, ...)
 	echo call('printf', extend([a:fmt], a:000))
 endfu
 
-" Queueing engine
-let s:action_q = []
-fu! s:Queue_action(fn, ...)
-	call add(s:action_q, {'fn': a:fn, 'args': a:000})
-
-	let s:updatetime_save = &updatetime
-	set updatetime=1
-endfu
-fu! s:Process_action_queue()
-	if !exists('s:updatetime_save')
-		return
-	endif
-	let &updatetime = s:updatetime_save
-	for action in s:action_q
-		call call(action.fn, action.args)
-	endfor
-	let s:action_q = []
-endfu
-" TODO: Put these in a group.
-au CursorHold * call s:Process_action_queue()
-au CursorHoldI * call s:Process_action_queue()
-
 " Inputs:
 " atom: the pattern to match
 " pos: constraint pos (1-based [row, col])
@@ -810,64 +788,65 @@ fu! s:Make_syn_tree(geom)
 
 	return me
 endfu
+
+" Queueing engine
+let s:action_q = []
+fu! s:Queue_action(fn, ...)
+	call add(s:action_q, {'fn': a:fn, 'args': a:000})
+
+	if !exists('#undo_tree_queue#CursorHold') || !exists('#undo_tree_queue#CursorHoldI')
+		" Create global CursorHold autocmds for both normal and insert modes.
+		" Rationale: Gives us best chance of processing queue right away.
+		aug undo_tree_queue
+			au!
+			au CursorHold * call s:Process_action_queue()
+			au CursorHoldI * call s:Process_action_queue()
+		augroup END
+	endif
+
+	" Make sure we can restore old 'updatetime' once we're finished using it.
+	let s:updatetime_save = &updatetime
+	" Schedule queue processing as soon as possible.
+	set updatetime=1
+endfu
+fu! s:Process_action_queue()
+	" Shouldn't get here with s:updatetime_save unset, but just in case...
+	if exists('s:updatetime_save')
+		let &updatetime = s:updatetime_save
+		unlet! s:updatetime_save
+	endif
+	for action in s:action_q
+		call call(action.fn, action.args)
+	endfor
+	let s:action_q = []
+	" Make sure we're not invoked again until something else is queued.
+	au! undo_tree_queue CursorHold
+	au! undo_tree_queue CursorHoldI
+endfu
+
 " For convenience, ensure these script-locals always exist.
 let s:bufnr = -1
 let s:undo_bufnr = -1
 let s:undo_cache = {}
 
-"fu! s:Handles_from_parent()
-"	" TODO: Perhaps some additional checks.
-"	" Buffer looks like buffer that could have undo buffer.
-"	let p_bnr = bufnr("%")
-"	let c_bnr = has_key(s:parent_to_child, p_bnr) ? s:parent_to_child[p_bnr] : -1
-"	return [p_bnr, c_bnr]
-"endfu
-"" TODO: Perhaps get rid of this if we don't use it.
-"fu! s:Handles_from_child()
-"	if !s:Is_undo_buf()
-"		" Doesn't look like it could be an undo buffer.
-"		return [-1, -1]
-"	endif
-"	" Buffer looks like undo buffer.
-"	let c_bnr = bufnr("%")
-"	let p_bnr = has_key(s:child_to_parent, c_bnr) ? s:child_to_parent[c_bnr] : -1
-"	if p_bnr == -1
-"		" Must not really be undo buf.
-"		return [-1, -1]
-"	endif
-"	return [p_bnr, c_bnr]
-"endfu
-" Return [bufnr, winnr] for parent.
-" Note: winnr == -1 indicates parent not in window.
-"" TODO: Decide whether existence of autocmds is sufficient validation.
-"fu! s:Is_undo_buf(bnr)
-"	let [bt, bh, sf] = map(['&buftype', '&bufhidden', '&swapfile'],
-"		\ 'getbufvar(a:bnr, v:val)')
-"	return bt == 'nofile' && bh == 'hide' && !sf
-"endfu
-"fu! s:Get_parent_bufwin()
-"	let c_bnr = bufnr('%')
-"	let p_bnr = exists('s:bufnr') ? s:bufnr : -1
-"	if p_bnr < 0
-"		" Parent buffer must be in the process of deletion.
-"		return [-1, -1]
-"	endif
-"	return [p_bnr, bufwinnr(p_bnr)]
-"endfu
-
-" TODO: This function should break association between parent and child,
-" cleaning up data structures, removing parent's autocmds, etc...
-fu! s:Break_assoc()
+" Make the current buffer no longer the current parent.
+fu! s:Orphan_child()
+	" Remove the parent autocommands.
+	au! undo_tree_parent
+	let s:bufnr = -1
+	let s:undo_cache = {}
 endfu
-
+" Goto specified window.
 fu! s:Goto_win(winnr)
 	exe a:winnr . "wincmd \<C-W>"
 endfu
-" Assumption: Window containing the buffer is visible.
+" Goto window containing specified buffer, which is assumed to be in a window.
 fu! s:Goto_visible_buf(bufnr)
 	call s:Goto_win(winbufnr(a:bufnr))
 endfu
-" Typically queued
+" Close the window containing the specified buffer (failing silently if the
+" specified buffer is in the only window).
+" Called From: A queued action.
 fu! s:Hide_buf(bufnr)
 	let wnr = bufwinnr(a:bufnr)
 	if wnr > 0
@@ -880,47 +859,34 @@ endfu
 " Caveat: bnr is input because bufnr('%') is not guaranteed to work at this
 " point.
 fu! s:Parent_BufWinLeave(bnr)
-	let c_bnr = s:bufnr
-	" Clear data structures.
-	let s:bufnr = -1
-	let s:undo_bufnr = -1
-	let s:undo_cache = {}
-	" Queue hiding of child buffer.
-	" TODO: If we leave the parent and run :UndoOpen on another buffer? At that
-	" point, need to clean up the autocmds in this parent.
-	call s:Queue_action(function('s:Hide_buf'), [c_bnr])
+	call s:Orphan_child()
+	if s:undo_bufnr > 0 && bufwinnr(s:undo_bufnr) > 0
+		" Since we know we want to close child buffer, go ahead and empty it.
+		" Rationale: In case our queued hide of child fails, at least the window
+		" will be empty.
+		%d
+		" Queue hiding of child buffer.
+		call s:Queue_action(function('s:Hide_buf'), [s:undo_bufnr])
+	endif
 endfu
 " Called From: child buffer BufDelete autocmd
 " Note: User shouldn't typically do this, but if he does, we will lose the
-" autocmds in the child buffer, so we need to go ahead and clean up.
+" autocmds in the child buffer, so we need to ensure that a new one is created
+" next time one is needed.
 fu! s:Child_BufDelete(bnr)
-	" TODO: Is it necessary to discard cache?
-	let s:bufnr = -1
-	let s:undo_cache = {}
+	" Design Decision: No need to unparent.
+	" Rationale: If user opens undo window on same parent again, we'll create a
+	" new undo buf automatically, but the cache may still be valid.
 	let s:undo_bufnr = -1
 endfu
-" Called From: child buffer BufEnter autocmd
-" Note: Defer till things stabilize (in case parent is being deleted).
-fu! s:Child_BufEnter_ch()
-	"echoerr "parent bufwinnr: " . bufwinnr(s:child_to_parent[bufnr('%')])
-	call s:Dbg(3, "Child_BufEnter on buffer %d", bufnr('%'))
-	" Save updatetime so we can restore in CursorHold handler.
-	let s:updatetime_save = &updatetime
-	set updatetime=1
-endfu
 fu! s:Child_BufEnter()
-	let p_wnr = exists('s:bufnr') ? s:bufnr > 0 ? bufwinnr(s:bufnr) : -1 : -1
+	let p_wnr = s:bufnr > 0 ? bufwinnr(s:bufnr) : -1
 	" Caveat: BufEnter will fire when parent is in process of deletion, but in
-	" this case, parent will not have a window.
+	" this case, parent will not have a window, and the child buffer will be
+	" queued for hiding.
 	if p_wnr > 0
 		" Invoke non-forced refresh.
 		call s:Refresh_undo_window(0)
-	else
-		" Parent not visible.
-		" Most likely, parent is being closed/hidden, in which case a queued
-		" action will hide child, but in meantime (and in case child can't be
-		" hidden because it's last buffer), clean it out.
-		%d
 	endif
 endfu
 
@@ -930,14 +896,13 @@ fu! s:Create_autocmds_in_child()
 		au!
 		au BufDelete <buffer> call s:Child_BufDelete(expand("<abuf>"))
 		au BufEnter <buffer> call s:Child_BufEnter()
-		"au CursorHold <buffer> call s:Child_CursorHold()
 	augroup END
 endfu
 fu! s:Create_autocmds_in_parent()
 	" Create autocmds that will permit us to clean up when parent buf deleted
 	aug undo_tree_parent
 		au!
-		au BufDelete <buffer> call s:Parent_BufWinLeave(expand("<abuf>"))
+		au BufWinLeave <buffer> call s:Parent_BufWinLeave(expand("<abuf>"))
 	augroup END
 endfu
 fu! s:Create_mappings_in_child()
@@ -961,9 +926,6 @@ endfu
 " Called From: parent buffer that does not yet have a child buffer.
 " Pre Constraint: In buffer requiring the undo buf.
 fu! s:Create_undo_buf()
-	" TODO: Needs to be safe to call this on same parent multiple times. How to
-	" clean up the autocmds?
-	call s:Create_autocmds_in_parent()
 	" Create new window containing scratch buffer.
 	" TODO: Any advantage to using +cmd arg like this?
 	" Caveat: Wanted to wrap name in [...], but that makes Vim think it's
@@ -974,7 +936,6 @@ fu! s:Create_undo_buf()
 	call s:Create_autocmds_in_child()
 	call s:Create_mappings_in_child()
 	call s:Create_syntax_in_child()
-	" Add data for this undo buffer to script-local vars, keyed by parent
 	let s:undo_bufnr = bufnr('%')
 endfu
 
@@ -1000,59 +961,6 @@ fu! s:Is_valid_parent()
 	" have undo trees?
 	return &modifiable
 endfu
-
-" Called From: child buffer maps for moving in tree.
-" Assumption: Can be invoked only when fresh undo data structures exist.
-" Rationale: Invoked from undo buffer mappings, and freshness is checked in
-" BufEnter. Hmm... What if user executes a :bd or something. Well, in that case,
-" parent's BufDelete would fire, clearing data structures.
-fu! s:Move_in_tree(dir) " entry
-	"let [p_bnr, p_wnr] = s:Get_parent_bufwin()
-	if !exists('s:bufnr') || s:bufnr < 0 || bufwinnr(s:bufnr) < 0
-		echomsg "Warning: Cannot traverse undo tree for inactive parent buffer"
-	endif
-	" Grab tree and invoke specified movement method.
-	call s:undo_cache.tree[a:dir]()
-	call s:Goto_win(bufwinnr(s:bufnr))
-	exe 'undo ' . s:undo_cache.tree.cur.seq
-	" Return to child to update display.
-	wincmd p
-	" TODO: Update display.
-endfu
-" Invoked from child's <buffer> map.
-fu! s:Refresh_child() " entry
-	" Make sure parent is still loaded and visible.
-	if !exists('s:bufnr') || s:bufnr < 0 || bufwinnr(s:bufnr) < 0
-		echomsg "Warning: Cannot refresh undo buffer with no associated parent."
-		return
-	endif
-	" There's a visible and active parent.
-	call s:Goto_win(bufwinnr(s:bufnr))
-	" Forcibly refresh
-	call s:Refresh_undo_window(1)
-endfu
-" This one's tied to mapping or command for opening undo on current buffer.
-fu! s:Open_undo_window() " entry
-	if !s:Is_valid_parent()
-		echoerr "Can't display undo tree for this buffer."
-		return
-	endif
-	let p_bnr = bufnr('%')
-	let clear = 0
-	if s:bufnr != p_bnr
-		" Any existing cache is invalid.
-		" TODO: Probably want to clean up parent's autocommands here, and pull
-		" parent autocommand stuff out of Ensure_undo_buf.
-		let s:bufnr = p_bnr
-		let s:undo_cache = {}
-		" Request clearance (or creation) of undo buffer.
-		let clear = 1
-	endif
-	call s:Ensure_undo_buf(clear)
-	call s:Goto_visible_buf(p_bnr)
-	call s:Refresh_undo_window(0)
-endfu
-
 " Assumption: Called from parent after verifying existence.
 " Note: Always end up in child window.
 fu! s:Ensure_child_visible(bufnr)
@@ -1067,24 +975,79 @@ fu! s:Ensure_child_visible(bufnr)
 		call s:Goto_win(winnr)
 	endif
 endfu
+
+" Called From: child buffer maps for moving in tree.
+" Assumption: Can be invoked only when fresh undo data structures exist.
+" Rationale: Invoked from undo buffer mappings, and freshness is checked in
+" BufEnter. Hmm... What if user executes a :bd or something. Well, in that case,
+" parent's BufDelete would fire, clearing data structures.
+fu! s:Move_in_tree(dir) " entry
+	"let [p_bnr, p_wnr] = s:Get_parent_bufwin()
+	if s:bufnr < 0 || bufwinnr(s:bufnr) < 0
+		echomsg "Warning: Cannot traverse undo tree for inactive parent buffer"
+	endif
+	" Grab tree and invoke specified movement method.
+	call s:undo_cache.tree[a:dir]()
+	call s:Goto_visible_buf(s:bufnr)
+	exe 'undo ' . s:undo_cache.tree.cur.seq
+	" Return to child to update display.
+	wincmd p
+	" TODO: Update display.
+endfu
+" Invoked from child's <buffer> map.
+fu! s:Refresh_child() " entry
+	" Make sure parent is still loaded and visible.
+	" Note: Shouldn't get here if not, but it's possible (e.g., if user
+	" intentionally opens unlisted undo buffer).
+	" TODO: Consider removing the child autocmds and mappings when the child is
+	" hidden. Could populate them only when Undo buffer is opened.
+	if s:bufnr < 0 || bufwinnr(s:bufnr) < 0
+		echomsg "Warning: Cannot refresh undo buffer with no associated parent."
+		return
+	endif
+	" There's a visible and active parent. Forcibly refresh
+	call s:Refresh_undo_window(1)
+endfu
+" This one's tied to mapping or command for opening undo on current buffer.
+fu! s:Open_undo_window() " entry
+	if !s:Is_valid_parent()
+		echoerr "Can't display undo tree for this buffer."
+		return
+	endif
+	let p_bnr = bufnr('%')
+	let clear = 0
+	if s:bufnr != p_bnr
+		if s:bufnr > 0
+			" We have existing parent.
+			call s:Orphan_child()
+		endif
+		let s:bufnr = p_bnr
+		let s:undo_cache = {}
+		call s:Create_autocmds_in_parent()
+		" Request clearance (or creation) of undo buffer.
+		let clear = 1
+	endif
+	call s:Ensure_undo_buf(clear)
+	call s:Refresh_undo_window(0)
+endfu
+
 " Called From: One of the following
 " 1) undo buffer mapping (force=1)
 " 2) global mapping/command requesting undo window for parent (force=0)
 " 3) child BufEnter autocmd (force=0)
-" Assumption: We're in parent buffer.
+" Assumption: Parent buffer is visible.
 fu! s:Refresh_undo_window(force)
-	" UNDER CONSTRUCTION!!!!!
 	call s:Goto_visible_buf(s:bufnr)
 	" Get Vim's undo tree to support freshness check, and if necessary, to serve
 	" as basis of new tree.
 	" TODO: Could avoid checking undotree() in some cases if we monitored
 	" BufEnter on the parent.
-	" Rationale: Buf can be changed only when user visits it.
+	" Rationale: Buffer can be changed only when user visits it.
 	let v_ut = undotree()
 	" We want to move to the window even if it's up to date.
 	call s:Goto_visible_buf(s:undo_bufnr)
 
-	if a:force || empty(cache) || cache.tree.meta.seq_last != v_ut.seq_last
+	if a:force || empty(s:undo_cache) || s:undo_cache.tree.meta.seq_last != v_ut.seq_last
 		let tree = s:Make_undo_tree(v_ut)
 		" TODO: Thinking I may no longer need tree returned, now that positions are
 		" stored on b:undo_tree.
