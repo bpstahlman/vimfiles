@@ -826,11 +826,13 @@ endfu
 
 " For convenience, ensure these script-locals always exist.
 let s:bufnr = -1
+" TODO: Consider making this specific to BufEnter.
+let s:ignore_events = 0
 let s:undo_bufnr = -1
 let s:undo_cache = {}
 
 " Make the current buffer no longer the current parent.
-fu! s:Orphan_child()
+fu! s:Unconfigure_parent()
 	" Remove the parent autocommands.
 	au! undo_tree_parent
 	let s:bufnr = -1
@@ -841,32 +843,22 @@ fu! s:Goto_win(winnr)
 	exe a:winnr . "wincmd \<C-W>"
 endfu
 " Goto window containing specified buffer, which is assumed to be in a window.
+" TODO: Perhaps get rid of this if no longer needed.
 fu! s:Goto_visible_buf(bufnr)
-	call s:Goto_win(winbufnr(a:bufnr))
-endfu
-" Close the window containing the specified buffer (failing silently if the
-" specified buffer is in the only window).
-" Called From: A queued action.
-fu! s:Hide_buf(bufnr)
-	let wnr = bufwinnr(a:bufnr)
-	if wnr > 0
-		" Child is in a window. Attempt to hide it, noting that command will
-		" fail (harmlessly) if it's the last window.
-		exe 'silent! ' . wnr . 'close'
-	endif
+	call s:Goto_win(bufwinnr(a:bufnr))
 endfu
 " Called From: parent buffer BufWinLeave autocmd
 " Caveat: bnr is input because bufnr('%') is not guaranteed to work at this
 " point.
 fu! s:Parent_BufWinLeave(bnr)
-	call s:Orphan_child()
+	call s:Unconfigure_parent()
 	if s:undo_bufnr > 0 && bufwinnr(s:undo_bufnr) > 0
 		" Since we know we want to close child buffer, go ahead and empty it.
 		" Rationale: In case our queued hide of child fails, at least the window
 		" will be empty.
 		%d
-		" Queue hiding of child buffer.
-		call s:Queue_action(function('s:Hide_buf'), [s:undo_bufnr])
+		" Queue hiding of child buffer(s).
+		call s:Queue_action(function('s:Hide_all_children'))
 	endif
 endfu
 " Called From: child buffer BufDelete autocmd
@@ -880,6 +872,9 @@ fu! s:Child_BufDelete(bnr)
 	let s:undo_bufnr = -1
 endfu
 fu! s:Child_BufEnter()
+	if s:ignore_events
+		return
+	endif
 	let p_wnr = s:bufnr > 0 ? bufwinnr(s:bufnr) : -1
 	" Caveat: BufEnter will fire when parent is in process of deletion, but in
 	" this case, parent will not have a window, and the child buffer will be
@@ -905,6 +900,9 @@ fu! s:Create_autocmds_in_parent()
 		au BufWinLeave <buffer> call s:Parent_BufWinLeave(expand("<abuf>"))
 	augroup END
 endfu
+fu! s:Configure_parent()
+	call s:Create_autocmds_in_parent()
+endfu
 fu! s:Create_mappings_in_child()
 	" Create buffer-local mapping(s)
 	" To refresh the tree forcibly
@@ -919,13 +917,22 @@ fu! s:Create_mappings_in_child()
 	nmap <buffer> l :call <SID>Move_in_tree('right')<CR>
 endfu
 fu! s:Create_syntax_in_child()
+	" TODO: Could do this once up front.
 	hi undo_redo_path gui=bold cterm=bold term=bold
 endfu
 
+" TODO: Perhaps make it so stuff isn't redone unnecessarily (though all of this
+" should be safe to redo).
+" TODO: Make sure child has all requisite autocmds and such.
+fu! s:Configure_child()
+	call s:Create_autocmds_in_child()
+	call s:Create_mappings_in_child()
+	call s:Create_syntax_in_child()
+endfu
 
 " Called From: parent buffer that does not yet have a child buffer.
 " Pre Constraint: In buffer requiring the undo buf.
-fu! s:Create_undo_buf()
+fu! s:Create_child()
 	" Create new window containing scratch buffer.
 	" TODO: Any advantage to using +cmd arg like this?
 	" Caveat: Wanted to wrap name in [...], but that makes Vim think it's
@@ -933,25 +940,67 @@ fu! s:Create_undo_buf()
 	exe 'belowright new'
 		\ . ' +setl\ buftype=nofile\ bufhidden=hide\ noswapfile'
 		\ . ' ' . expand('%') . '.undo'
-	call s:Create_autocmds_in_child()
-	call s:Create_mappings_in_child()
-	call s:Create_syntax_in_child()
 	let s:undo_bufnr = bufnr('%')
 endfu
 
-" Make sure an undo_buf exists and is visible; create if necessary.
-fu! s:Ensure_undo_buf(clear)
+" Hide any open child buffers.
+" TODO: Get rid of the <...>_orig version if it's not needed.
+" TODO: Consider having separate hide/unload all children: one that leaves
+" autocmds/maps (which would be used by Position_child), and the other that
+" deletes them (queued in parent's BufWinLeave event).
+fu! s:Hide_all_children()
+	" Note: Intentionally deleting autocmds/maps.
+	exe 'bd ' . s:undo_bufnr
+endfu
+fu! s:Hide_all_children_orig()
+	let winnr = bufwinnr(s:undo_bufnr)
+	while winnr > 0
+		" Child is in a window. Attempt to hide it, noting that command will
+		" fail (harmlessly) if it's the last window.
+		exe 'silent! ' . wnr . 'close'
+		let winnr = bufwinnr(s:undo_bufnr)
+	endwhile
+endfu
+
+" Assumption: Called from parent after verifying existence.
+" Note: Always end up in child window.
+fu! s:Position_child()
+	" TODO: Consider using hide that doesn't delete.
+	call s:Hide_all_children()
+	" Expand the parent in proper direction
+	" TODO: Introduce option to allow either horiz or vert split.
+	wincmd _
+	let wh = winheight(0)
+	exe 'belowright sb ' . s:bufnr
+	" TODO: More sophisticated and configurable algorithm for calculating child
+	" window height. For now, no smaller than a configurable min, but no bigger
+	" than parent.
+	let min_child_height = 10
+	exe 'wincmd ' . min([max([(wh / 2), min_child_height]), wh]) . '_'
+
+endfu
+
+" Make sure an undo_buf exists, is visible, and is properly configured, creating
+" if necessary.
+fu! s:Prepare_child(clear)
 	if s:undo_bufnr < 0
-		let s:undo_bufnr = s:Create_undo_buf()
+		let s:undo_bufnr = s:Create_child()
 	else
-		" Already have entries for this one.
-		" Ensure undo buffer is current and visible.
-		call s:Ensure_child_visible(s:undo_bufnr)
+		" Child already exists; ensure current and visible.
+		" Note: Setting ignore_events prevents premature attempt to refresh on
+		" BufEnter.
+		let s:ignore_events = 1
+		call s:Position_child()
+		let s:ignore_events = 0
 		if a:clear
 			" Clear any old undo tree from the undo buf.
 			%d
 		endif
 	endif
+	" Note: We call this even when buf already existed, to ensure it's got all
+	" the mappings and autocmds we'll need. (It's unlikely, but possible, that
+	" someone deleted maps/autocmds, for instance.)
+	call s:Configure_child()
 endfu
 
 " Called From: buffer being considered as candidate parent
@@ -960,20 +1009,6 @@ fu! s:Is_valid_parent()
 	" Question: Any way to use undotree() for this test? E.g., do nofile buffers
 	" have undo trees?
 	return &modifiable
-endfu
-" Assumption: Called from parent after verifying existence.
-" Note: Always end up in child window.
-fu! s:Ensure_child_visible(bufnr)
-	" TODO: Consider using temporary override of switchbuf=useopen and :sbuffer
-	" to do this more simply.
-	let winnr = winbufnr(a:bufnr)
-	if winnr < 0
-		" TODO: Perhaps combine this somehow with creation to ensure similar
-		" sizing/positioning.
-		exe 'belowright sb ' . c_bnr
-	else
-		call s:Goto_win(winnr)
-	endif
 endfu
 
 " Called From: child buffer maps for moving in tree.
@@ -988,19 +1023,20 @@ fu! s:Move_in_tree(dir) " entry
 	endif
 	" Grab tree and invoke specified movement method.
 	call s:undo_cache.tree[a:dir]()
-	call s:Goto_visible_buf(s:bufnr)
+	call s:Goto_win(bufwinnr(s:bufnr))
 	exe 'undo ' . s:undo_cache.tree.cur.seq
 	" Return to child to update display.
 	wincmd p
 	" TODO: Update display.
 endfu
 " Invoked from child's <buffer> map.
+" Assumption: Can't get here unless we're in true child buffer.
 fu! s:Refresh_child() " entry
 	" Make sure parent is still loaded and visible.
 	" Note: Shouldn't get here if not, but it's possible (e.g., if user
 	" intentionally opens unlisted undo buffer).
 	" TODO: Consider removing the child autocmds and mappings when the child is
-	" hidden. Could populate them only when Undo buffer is opened.
+	" hidden. Could populate them only when undo buffer is opened.
 	if s:bufnr < 0 || bufwinnr(s:bufnr) < 0
 		echomsg "Warning: Cannot refresh undo buffer with no associated parent."
 		return
@@ -1017,27 +1053,34 @@ fu! s:Open_undo_window() " entry
 	let p_bnr = bufnr('%')
 	let clear = 0
 	if s:bufnr != p_bnr
+		" New parent (either no current parent or parent changing)
 		if s:bufnr > 0
 			" We have existing parent.
-			call s:Orphan_child()
+			" TODO: Consider having this also de-configure the child. As it is,
+			" we leave child autocmds/maps and such, but the fact that it's
+			" possible for user to delete them means we must at least check for
+			" their existence each time we open undo window. Hmm...
+			call s:Unconfigure_parent()
 		endif
 		let s:bufnr = p_bnr
-		let s:undo_cache = {}
-		call s:Create_autocmds_in_parent()
+		call s:Configure_parent()
 		" Request clearance (or creation) of undo buffer.
 		let clear = 1
 	endif
-	call s:Ensure_undo_buf(clear)
+	call s:Prepare_child(clear)
+	" Everything should be in order now with the 2 windows.
 	call s:Refresh_undo_window(0)
 endfu
 
 " Called From: One of the following
-" 1) undo buffer mapping (force=1)
+" 1) undo buffer 'refresh' mapping (force=1)
 " 2) global mapping/command requesting undo window for parent (force=0)
 " 3) child BufEnter autocmd (force=0)
-" Assumption: Parent buffer is visible.
+" Assumption: Both parent and child windows are visible and data structures are
+" consistent.
 fu! s:Refresh_undo_window(force)
-	call s:Goto_visible_buf(s:bufnr)
+	" Make sure we're in parent buffer.
+	call s:Goto_win(bufwinnr(a:bufnr))
 	" Get Vim's undo tree to support freshness check, and if necessary, to serve
 	" as basis of new tree.
 	" TODO: Could avoid checking undotree() in some cases if we monitored
@@ -1045,8 +1088,9 @@ fu! s:Refresh_undo_window(force)
 	" Rationale: Buffer can be changed only when user visits it.
 	let v_ut = undotree()
 	" We want to move to the window even if it's up to date.
-	call s:Goto_visible_buf(s:undo_bufnr)
+	call s:Goto_win(bufwinnr(s:undo_bufnr))
 
+	" Do we need to update the tree or is cache still valid?
 	if a:force || empty(s:undo_cache) || s:undo_cache.tree.meta.seq_last != v_ut.seq_last
 		let tree = s:Make_undo_tree(v_ut)
 		" TODO: Thinking I may no longer need tree returned, now that positions are
@@ -1060,6 +1104,7 @@ fu! s:Refresh_undo_window(force)
 		" Now do highlighting
 		let syn = s:Make_syn_tree(di.geom)
 		call syn.Update(tree)
+		" Cache what we've built.
 		let s:undo_infos[p_bnr] = {
 			\ 'tree': tree,
 			\ 'geom': di.geom,
