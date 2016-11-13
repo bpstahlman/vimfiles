@@ -861,8 +861,10 @@ fu! s:Unconfigure_child()
 endfu
 
 " Goto specified window.
+" Assumption: Called under internal control: hence, we need to suppress
+" autocmds (especially BufEnter).
 fu! s:Goto_win(winnr)
-	exe a:winnr . "wincmd \<C-W>"
+	exe 'noauto ' . a:winnr . "wincmd \<C-W>"
 endfu
 
 fu! s:Create_autocmds_in_child()
@@ -1032,6 +1034,10 @@ fu! s:Position_child(clear)
 	let wh = winheight(0)
 	" Note: 'silent' prevents annoying and misleading [new file] msg.
 	let cmd = ' +setl\ buftype=nofile\ bufhidden=hide\ noswapfile '
+	let p_wnr = winnr()
+	" Save viewport so we can restore after opening (or re-opening) child.
+	" Rationale: Opening child window can effectively scroll the parent.
+	let wsv = winsaveview()
 	if s:undo_bufnr < 0
 		" Create new window containing scratch buffer.
 		" TODO: Any advantage to using +cmd arg like this?
@@ -1054,6 +1060,11 @@ fu! s:Position_child(clear)
 			%d
 		endif
 	endif
+	" Make sur the parent's viewport hasn't changed.
+	let c_wnr = winnr()
+	call s:Goto_win(p_wnr)
+	call winrestview(wsv)
+	call s:Goto_win(c_wnr)
 	" We're in child buffer. Give it proper size.
 	exe min([max([(wh / 2), min_child_height]), wh]) . 'wincmd _'
 
