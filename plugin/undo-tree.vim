@@ -791,6 +791,7 @@ endfu
 
 " For convenience, ensure these script-locals always exist.
 let s:bufnr = -1
+" TODO: Consider using :noautocmd instead of this.
 let s:ignore_bufenter = 0
 let s:undo_bufnr = -1
 let s:undo_cache = {}
@@ -844,6 +845,11 @@ fu! s:Unconfigure_parent()
 	let s:undo_cache = {}
 endfu
 
+fu! s:Unconfigure_child()
+	" Remove the child autocommands.
+	au! undo_tree_child
+endfu
+
 " Goto specified window.
 fu! s:Goto_win(winnr)
 	exe a:winnr . "wincmd \<C-W>"
@@ -864,6 +870,14 @@ fu! s:Create_autocmds_in_parent()
 		au!
 		au BufWinLeave <buffer> call s:Parent_BufWinLeave(expand("<abuf>"))
 	augroup END
+endfu
+
+" Called From: buffer being considered as candidate parent
+fu! s:Is_valid_parent()
+	" TODO More checks? E.g., 'buftype', etc...?
+	" Question: Any way to use undotree() for this test? E.g., do nofile buffers
+	" have undo trees?
+	return &modifiable
 endfu
 
 fu! s:Configure_parent()
@@ -898,6 +912,17 @@ fu! s:Configure_child()
 	call s:Create_syntax_in_child()
 endfu
 
+fu! s:Is_child_configured()
+	if s:undo_bufnr > 0
+		if exists('#undo_tree_child#BufEnter#<buffer=' . s:undo_bufnr .'>')
+			" Child hasn't been unconfigured.
+			return 1
+		endif
+	endif
+	return 0
+endfu
+
+
 " Hide any open child buffers.
 fu! s:Delete_children()
 	" Note: Intentionally deleting autocmds/maps.
@@ -931,7 +956,13 @@ fu! s:Parent_BufWinLeave(bnr)
 		" Since we know we want to close child buffer, go ahead and empty it.
 		" Rationale: In case our deferred delete of child fails, at least the
 		" window will be empty.
+		" TODO: Consider putting this in Unconfigure_child.
 		%d
+		" Also unconfigure child so we don't need to worry about it's autocmds
+		" triggering again.
+		" Rationale: Autocmds will be removed in deferred Delete_children, but
+		" this eliminates race-condition.
+		call s:Unconfigure_child()
 		" Queue deletion of child buffer(s).
 		call s:Defer_action('Delete_children')
 	endif
@@ -960,7 +991,7 @@ fu! s:Child_BufEnter()
 	" queued for hiding.
 	if p_wnr > 0
 		" Invoke non-forced refresh.
-		call s:Refresh_undo_window(0)
+		call s:Refresh_undo_window(0, 0)
 	endif
 endfu
 
@@ -987,6 +1018,7 @@ fu! s:Position_child(clear)
 		let s:undo_bufnr = bufnr('%')
 	else
 		" Note: Setting ignore_bufenter prevents premature attempt to refresh.
+		" TODO: Use noautocmd modifier instead.
 		let s:ignore_bufenter = 1
 		" TODO: Take split direction into account.
 		exe 'belowright sb ' . s:undo_bufnr
@@ -1014,14 +1046,6 @@ fu! s:Prepare_child(clear)
 	call s:Configure_child()
 endfu
 
-" Called From: buffer being considered as candidate parent
-fu! s:Is_valid_parent()
-	" TODO More checks? E.g., 'buftype', etc...?
-	" Question: Any way to use undotree() for this test? E.g., do nofile buffers
-	" have undo trees?
-	return &modifiable
-endfu
-
 " Called From: child buffer maps for moving in tree.
 " Assumption: Can be invoked only when fresh undo data structures exist.
 " Rationale: Invoked from undo buffer mappings, and freshness is checked in
@@ -1040,6 +1064,7 @@ fu! s:Move_in_tree(dir) " entry
 	wincmd p
 	" TODO: Update display.
 endfu
+
 " Invoked from child's <buffer> map.
 " Assumption: Can't get here unless we're in true child buffer.
 fu! s:Refresh_child() " entry
@@ -1053,8 +1078,9 @@ fu! s:Refresh_child() " entry
 		return
 	endif
 	" There's a visible and active parent. Forcibly refresh
-	call s:Refresh_undo_window(1)
+	call s:Refresh_undo_window(1, 1)
 endfu
+
 " This one's tied to mapping or command for opening undo on current buffer.
 fu! s:Open_undo_window() " entry
 	if !s:Is_valid_parent()
@@ -1064,7 +1090,7 @@ fu! s:Open_undo_window() " entry
 	" Cancel any pending delete of child buffer we're about to re-use.
 	call s:Cancel_action('Delete_children')
 	let p_bnr = bufnr('%')
-	let clear = 0
+	let [cache_invalid, contents_invalid] = [0, 0]
 	if s:bufnr != p_bnr
 		" New parent (either no current parent or parent changing)
 		if s:bufnr > 0
@@ -1074,22 +1100,24 @@ fu! s:Open_undo_window() " entry
 		let s:bufnr = p_bnr
 		call s:Configure_parent()
 		" Request clearance (or creation) of undo buffer.
-		let clear = 1
+		let cache_invalid = 1
+		let contents_invalid = 1
+	else
+		" Find out whether it's even possible that child's contents are valid.
+		let contents_invalid = !s:Is_child_configured()
 	endif
-	call s:Prepare_child(clear)
+	call s:Prepare_child(contents_invalid)
 	" Everything should be in order now with the 2 windows.
-	" Note: Could pass clear flag rather than 0, but it's a difference without a
-	" distinction, since cache will be empty whenever clear is set.
-	call s:Refresh_undo_window(0)
+	call s:Refresh_undo_window(cache_invalid, contents_invalid)
 endfu
 
-" Called From: One of the following
-" 1) undo buffer 'refresh' mapping (force=1)
-" 2) global mapping/command requesting undo window for parent (force=0)
-" 3) child BufEnter autocmd (force=0)
+" Called From: One of the following...
+" 1) undo buffer 'refresh' mapping
+" 2) global mapping/command requesting undo window for parent
+" 3) child BufEnter autocmd
 " Assumption: Both parent and child windows are visible and data structures are
 " consistent.
-fu! s:Refresh_undo_window(force)
+fu! s:Refresh_undo_window(cache_invalid, contents_invalid)
 	if s:bufnr < 0 || bufwinnr(s:bufnr) < 0
 		" Note: This generally wouldn't happen because we delete the child (and
 		" therefore its autocmds) when parent is removed from last window;
@@ -1112,26 +1140,30 @@ fu! s:Refresh_undo_window(force)
 	call s:Goto_win(bufwinnr(s:undo_bufnr))
 
 	" Do we need to update the tree or is cache still valid?
-	if a:force || empty(s:undo_cache) || s:undo_cache.tree.meta.seq_last != v_ut.seq_last
+	if a:cache_invalid || empty(s:undo_cache) ||
+		\ s:undo_cache.tree.meta.seq_last != v_ut.seq_last
 		let tree = s:Make_undo_tree(v_ut)
 		" TODO: Thinking I may no longer need tree returned, now that positions are
 		" stored on b:undo_tree.
 		let [ptree, extent] = s:Design(tree)
-		let di = s:Build_tree_display(tree, extent)
-		" Build and store new cache.
-		" Replace undo buffer's contents with new tree.
-		%d
-		call append(0, di.lines)
-		" Now do highlighting
-		let syn = s:Make_syn_tree(di.geom)
-		call syn.Update(tree)
+		let geom = s:Build_tree_display(tree, extent)
+		" Now build highlighting object.
+		let syn = s:Make_syn_tree(geom.geom)
 		" Cache what we've built.
 		let s:undo_cache = {
 			\ 'tree': tree,
-			\ 'geom': di.geom,
+			\ 'geom': geom,
 			\ 'syn': syn
 		\ }
 	endif
+	if a:contents_invalid
+		" Replace undo buffer's contents with new tree.
+		%d
+		call append(0, s:undo_cache.geom.lines)
+		" Now do highlighting
+		call s:undo_cache.syn.Update(tree)
+	endif
+
 endfu
 
 " Global mappings
