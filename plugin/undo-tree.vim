@@ -749,8 +749,16 @@ fu! s:Update_syn_tree_node(ids, node, lvl, col)
 	call add(a:ids, matchadd('undo_redo_path', re, 10))
 
 endfu
+
+" Assumption: Called from child buffer
+fu! s:Clear_syn_tree() dict
+	let self.ids = []
+	call clearmatches()
+endfu
+
 " Assumption: Input node is valid. (Note that root node can never be
 " invalidated.)
+" Assumption: Called from child buffer
 fu! s:Update_syn_tree(node) dict
 	let lvl = a:node.lvl
 	" Remove any invalidated items
@@ -774,7 +782,7 @@ fu! s:Update_syn_tree(node) dict
 		" Design Decision: Could also lookup x in self.geom.nodes, but this
 		" avoids hash lookup.
 		let col = colp + t.x
-		call s:Update_syn_tree_node(self.ids, t, lvl, col)
+		call s:Update_syn_tree_node(self.ids[-1], t, lvl, col)
 		let [t, colp] = [t.children.cur, col]
 		let lvl += 1
 	endwhile
@@ -782,6 +790,7 @@ endfu
 fu! s:Make_syn_tree(geom)
 	let me = {
 		\ 'ids': [],
+		\ 'Clear': function('s:Clear_syn_tree'),
 		\ 'Update': function('s:Update_syn_tree'),
 		\ 'geom': a:geom
 		\ }
@@ -848,6 +857,7 @@ endfu
 fu! s:Unconfigure_child()
 	" Remove the child autocommands.
 	au! undo_tree_child
+	" TODO: Perhaps also remove mappings.
 endfu
 
 " Goto specified window.
@@ -861,6 +871,7 @@ fu! s:Create_autocmds_in_child()
 		au!
 		au BufDelete <buffer> call s:Child_BufDelete(expand("<abuf>"))
 		au BufEnter <buffer> call s:Child_BufEnter()
+		au BufWinLeave <buffer> call s:Child_BufWinLeave(expand("<abuf>"))
 	augroup END
 endfu
 
@@ -930,12 +941,20 @@ fu! s:Delete_children()
 endfu
 
 " Hide all occurrences of child buffer in current tab.
+" Assumption: Caller is about to show child in deterministic location, so this
+" function must take care not to trigger BufWinLeave.
+" TODO: Consider making this a 'hide all child bufs but one in specific window'
+" so we could run it *after* positioning the child window, and could drop this
+" assumption.
 fu! s:Hide_children()
 	let winnr = bufwinnr(s:undo_bufnr)
 	while winnr > 0
 		" Child is in a window. Attempt to hide it, noting that command will
 		" fail (harmlessly) if it's the last window.
-		exe 'silent! ' . wnr . 'close'
+		" Caveat: 'noauto' modifier needed to prevent BufWinLeave firing for the
+		" child.
+		" Assumption: The hide is temporary. Caller will bring it back.
+		exe 'silent! noauto ' . winnr . 'close'
 		let winnr = bufwinnr(s:undo_bufnr)
 	endwhile
 endfu
@@ -967,6 +986,10 @@ fu! s:Parent_BufWinLeave(bnr)
 		call s:Defer_action('Delete_children')
 	endif
 endfu
+fu! s:Child_BufWinLeave(bnr)
+	%d
+	call s:Unconfigure_child()
+endfu
 
 " Called From: child buffer BufDelete autocmd
 " Note: User shouldn't typically delete the child manually, but if he does, we
@@ -991,7 +1014,7 @@ fu! s:Child_BufEnter()
 	" queued for hiding.
 	if p_wnr > 0
 		" Invoke non-forced refresh.
-		call s:Refresh_undo_window(0, 0)
+		call s:Refresh_undo_window(0)
 	endif
 endfu
 
@@ -1007,22 +1030,26 @@ fu! s:Position_child(clear)
 	" do horiz...
 	wincmd _
 	let wh = winheight(0)
+	" Note: 'silent' prevents annoying and misleading [new file] msg.
+	let cmd = ' +setl\ buftype=nofile\ bufhidden=hide\ noswapfile '
 	if s:undo_bufnr < 0
 		" Create new window containing scratch buffer.
 		" TODO: Any advantage to using +cmd arg like this?
 		" Caveat: Wanted to wrap name in [...], but that makes Vim think it's
 		" directory.
-		exe 'belowright new'
-			\ . ' +setl\ buftype=nofile\ bufhidden=hide\ noswapfile'
-			\ . ' ' . expand('%') . '.undo'
+		exe 'silent belowright new '
+			\ . cmd
+			\ . expand('%') . '.undo'
 		let s:undo_bufnr = bufnr('%')
 	else
 		" Note: Setting ignore_bufenter prevents premature attempt to refresh.
-		" TODO: Use noautocmd modifier instead.
-		let s:ignore_bufenter = 1
+		" Note: 'noauto' modifier should obviate need for ignore_bufenter.
+		"let s:ignore_bufenter = 1
 		" TODO: Take split direction into account.
-		exe 'belowright sb ' . s:undo_bufnr
-		let s:ignore_bufenter = 0
+		exe 'silent noauto belowright sb'
+			\ . cmd
+			\ . s:undo_bufnr
+		"let s:ignore_bufenter = 0
 		if a:clear
 			%d
 		endif
@@ -1078,7 +1105,8 @@ fu! s:Refresh_child() " entry
 		return
 	endif
 	" There's a visible and active parent. Forcibly refresh
-	call s:Refresh_undo_window(1, 1)
+	let s:undo_cache = {}
+	call s:Refresh_undo_window(1)
 endfu
 
 " This one's tied to mapping or command for opening undo on current buffer.
@@ -1090,7 +1118,7 @@ fu! s:Open_undo_window() " entry
 	" Cancel any pending delete of child buffer we're about to re-use.
 	call s:Cancel_action('Delete_children')
 	let p_bnr = bufnr('%')
-	let [cache_invalid, contents_invalid] = [0, 0]
+	let contents_invalid = 0
 	if s:bufnr != p_bnr
 		" New parent (either no current parent or parent changing)
 		if s:bufnr > 0
@@ -1100,7 +1128,6 @@ fu! s:Open_undo_window() " entry
 		let s:bufnr = p_bnr
 		call s:Configure_parent()
 		" Request clearance (or creation) of undo buffer.
-		let cache_invalid = 1
 		let contents_invalid = 1
 	else
 		" Find out whether it's even possible that child's contents are valid.
@@ -1108,7 +1135,7 @@ fu! s:Open_undo_window() " entry
 	endif
 	call s:Prepare_child(contents_invalid)
 	" Everything should be in order now with the 2 windows.
-	call s:Refresh_undo_window(cache_invalid, contents_invalid)
+	call s:Refresh_undo_window(contents_invalid)
 endfu
 
 " Called From: One of the following...
@@ -1117,7 +1144,7 @@ endfu
 " 3) child BufEnter autocmd
 " Assumption: Both parent and child windows are visible and data structures are
 " consistent.
-fu! s:Refresh_undo_window(cache_invalid, contents_invalid)
+fu! s:Refresh_undo_window(contents_invalid)
 	if s:bufnr < 0 || bufwinnr(s:bufnr) < 0
 		" Note: This generally wouldn't happen because we delete the child (and
 		" therefore its autocmds) when parent is removed from last window;
@@ -1139,9 +1166,10 @@ fu! s:Refresh_undo_window(cache_invalid, contents_invalid)
 	" We want to move to the window even if it's up to date.
 	call s:Goto_win(bufwinnr(s:undo_bufnr))
 
+	let contents_invalid = a:contents_invalid
 	" Do we need to update the tree or is cache still valid?
-	if a:cache_invalid || empty(s:undo_cache) ||
-		\ s:undo_cache.tree.meta.seq_last != v_ut.seq_last
+	if empty(s:undo_cache) || s:undo_cache.tree.meta.seq_last != v_ut.seq_last
+		let contents_invalid = 1
 		let tree = s:Make_undo_tree(v_ut)
 		" TODO: Thinking I may no longer need tree returned, now that positions are
 		" stored on b:undo_tree.
@@ -1156,12 +1184,15 @@ fu! s:Refresh_undo_window(cache_invalid, contents_invalid)
 			\ 'syn': syn
 		\ }
 	endif
-	if a:contents_invalid
+	" Regardless of whether undo cache was valid, buffer contents may have been
+	" clobbered (e.g., by user deletion).
+	if contents_invalid
 		" Replace undo buffer's contents with new tree.
 		%d
 		call append(0, s:undo_cache.geom.lines)
 		" Now do highlighting
-		call s:undo_cache.syn.Update(tree)
+		call s:undo_cache.syn.Clear()
+		call s:undo_cache.syn.Update(s:undo_cache.tree)
 	endif
 
 endfu
