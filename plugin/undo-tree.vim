@@ -124,7 +124,8 @@ fu! s:Build_undo_tree(...)
 			\'seq': 0, 'prev': {}, 'next': {}, 'parent': {},
 			\'children': {'fst': {}, 'cur': {}, 'lst': {}}})
 		let parent = root
-		let lvl = 0
+		" First entry will be at level 1.
+		let lvl = 1
 	else
 		let [entries, parent, root, lvl] = a:000
 	endif
@@ -197,14 +198,16 @@ fu! s:Move_up() dict
 	if !empty(self.cur.parent)
 		let self.cur = self.cur.parent
 		" Undo
-		normal! u
+		" TODO: Consider whether any advantage to using u and <C-R> rather than
+		" :undo <seq>
+		"normal! u
 	endif
 endfu
 fu! s:Move_down() dict
 	if !empty(self.cur.children.cur)
 		let self.cur = self.cur.children.cur
 		" Redo
-		exe "normal! \<C-R>"
+		"exe "normal! \<C-R>"
 	endif
 endfu
 fu! s:Move_left() dict
@@ -800,8 +803,6 @@ endfu
 
 " For convenience, ensure these script-locals always exist.
 let s:bufnr = -1
-" TODO: Consider using :noautocmd instead of this.
-let s:ignore_bufenter = 0
 let s:undo_bufnr = -1
 let s:undo_cache = {}
 let s:actions = {}
@@ -905,10 +906,10 @@ fu! s:Create_mappings_in_child()
 	" Moving up/down and changing undo/redo path through tree.
 	" Design Decision: No reason to avoid using regular Vim motion commands.
 	" Rationale: Cursor movement is highly constrained.
-	nmap <buffer> k :call <SID>Move_in_tree('up')<CR>
-	nmap <buffer> j :call <SID>Move_in_tree('down')<CR>
-	nmap <buffer> h :call <SID>Move_in_tree('left')<CR>
-	nmap <buffer> l :call <SID>Move_in_tree('right')<CR>
+	nmap <buffer> <LocalLeader>k :call <SID>Move_in_tree('up')<CR>
+	nmap <buffer> <LocalLeader>j :call <SID>Move_in_tree('down')<CR>
+	nmap <buffer> <LocalLeader>h :call <SID>Move_in_tree('left')<CR>
+	nmap <buffer> <LocalLeader>l :call <SID>Move_in_tree('right')<CR>
 endfu
 
 fu! s:Create_syntax_in_child()
@@ -1006,10 +1007,6 @@ endfu
 
 " Each time child buf is entered, we need to ensure it's still valid.
 fu! s:Child_BufEnter()
-	if s:ignore_bufenter
-		" Entry is under internal conrol; defer to internal logic.
-		return
-	endif
 	let p_wnr = s:bufnr > 0 ? bufwinnr(s:bufnr) : -1
 	" Caveat: BufEnter will fire when parent is in process of deletion, but in
 	" this case, parent will not have a window, and the child buffer will be
@@ -1048,14 +1045,11 @@ fu! s:Position_child(clear)
 			\ . expand('%') . '.undo'
 		let s:undo_bufnr = bufnr('%')
 	else
-		" Note: Setting ignore_bufenter prevents premature attempt to refresh.
-		" Note: 'noauto' modifier should obviate need for ignore_bufenter.
-		"let s:ignore_bufenter = 1
+		" Note: 'noauto' modifier prevents premature attempt to refresh.
 		" TODO: Take split direction into account.
 		exe 'silent noauto belowright sb'
 			\ . cmd
 			\ . s:undo_bufnr
-		"let s:ignore_bufenter = 0
 		if a:clear
 			%d
 		endif
@@ -1100,7 +1094,10 @@ fu! s:Move_in_tree(dir) " entry
 	exe 'undo ' . s:undo_cache.tree.cur.seq
 	" Return to child to update display.
 	wincmd p
-	" TODO: Update display.
+	" Update display.
+	if a:dir == 'left' || a:dir == 'right'
+		call s:undo_cache.syn.Update(s:undo_cache.tree.cur.children.cur)
+	endif
 endfu
 
 " Invoked from child's <buffer> map.
@@ -1194,6 +1191,7 @@ fu! s:Refresh_undo_window(contents_invalid)
 			\ 'geom': geom,
 			\ 'syn': syn
 		\ }
+		let g:uc = s:undo_cache
 	endif
 	" Regardless of whether undo cache was valid, buffer contents may have been
 	" clobbered (e.g., by user deletion).
