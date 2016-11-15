@@ -134,6 +134,8 @@ fu! s:Build_undo_tree(...)
 	for e in entries
 		let o = s:Make_node(e, parent, lvl)
 		if o.seq == root.meta.seq_cur
+			" TODO: NO!!!!! seq_cur isn't always in sync. Just after loading a
+			" file, for instance, curhead is correct, but seq_cur isn't. Rework this.
 			" Store a ptr to the current node on the root.
 			" Note: This is what will be manipulated henceforth.
 			let root.cur = o
@@ -790,11 +792,47 @@ fu! s:Update_syn_tree(node) dict
 		let lvl += 1
 	endwhile
 endfu
+" Add or erase brackets around input node from geom.nodes dictionary.
+" gnode: {'node': {}, 'col': <colnr>, 'row': <rownr>}
+fu! s:Bracket_node(gnode, erase)
+	let [tnode, row, col] = [a:gnode.node, a:gnode.row, a:gnode.col]
+	let gi = tnode.Get_geom()
+	let [scol, ecol] = [col + gi.e[0], col + gi.e[1]]
+	"echomsg "gi: " . string(gi) . ", scol=" . scol . ", ecol=" . ecol
+	" TODO: Make change manually? Or with setline()?
+	let s = getline(row)
+	call setline(row,
+		\ strpart(s, 0, scol - 1) .
+		\ (a:erase ? ' ' : '[') .
+		\ strpart(s, scol, gi.w - 2) .
+		\ (a:erase ? ' ' : ']') .
+		\ strpart(s, ecol + 1))
+endfu
+fu! s:Update_syn(node, ...) dict
+	let seq = a:0 ? a:1 : a:node.seq
+	" TODO: Using call() so that I can keep s:Update_syn_tree as method without
+	" adding it to public interface. Look for better way...
+	call call('s:Update_syn_tree', [a:node], self)
+	if self.seq >= 0
+		" De-select old
+		let old = self.geom.nodes[self.seq]
+		" Get bounds of old
+		"echomsg "s:Bracket_node  " . self.seq
+		call s:Bracket_node(old, 1)
+	endif
+	" Select new
+	let new = self.geom.nodes[seq]
+	"echomsg "s:Bracket_node [" . seq
+	call s:Bracket_node(new, 0)
+	" Cache new
+	let self.seq = seq
+endfu
 fu! s:Make_syn_tree(geom)
 	let me = {
 		\ 'ids': [],
+		\ 'seq': -1,
 		\ 'Clear': function('s:Clear_syn_tree'),
-		\ 'Update': function('s:Update_syn_tree'),
+		\ 'Update': function('s:Update_syn'),
 		\ 'geom': a:geom
 		\ }
 
@@ -1089,15 +1127,22 @@ fu! s:Move_in_tree(dir) " entry
 		echomsg "Warning: Cannot traverse undo tree for inactive parent buffer"
 	endif
 	" Grab tree and invoke specified movement method.
+	" TODO: For aesthetics, make the method names capitalized.
 	call s:undo_cache.tree[a:dir]()
 	call s:Goto_win(bufwinnr(s:bufnr))
 	exe 'undo ' . s:undo_cache.tree.cur.seq
 	" Return to child to update display.
 	wincmd p
 	" Update display.
-	if a:dir == 'left' || a:dir == 'right'
-		call s:undo_cache.syn.Update(s:undo_cache.tree.cur.children.cur)
-	endif
+	call s:undo_cache.syn.Update(s:undo_cache.tree.cur.children.cur)
+	"if a:dir == 'left' || a:dir == 'right'
+	"else
+	"	" Need to bracket/unbracket new/old nodes.
+	"	let t = s:undo_cache.tree.cur
+	"	let tp = a:dir == 'down' ? t.parent : t.children.cur
+	"	" Bracket/unbracket
+	"	call s:undo_cache.syn.Update(s:undo_cache.tree.cur.children.cur)
+	"endif
 endfu
 
 " Invoked from child's <buffer> map.
@@ -1201,7 +1246,9 @@ fu! s:Refresh_undo_window(contents_invalid)
 		call append(0, s:undo_cache.geom.lines)
 		" Now do highlighting
 		call s:undo_cache.syn.Clear()
-		call s:undo_cache.syn.Update(s:undo_cache.tree)
+		let uc = s:undo_cache
+		let cur = uc.tree.cur
+		call s:undo_cache.syn.Update(s:undo_cache.tree, s:undo_cache.tree.cur.seq)
 	endif
 
 endfu
