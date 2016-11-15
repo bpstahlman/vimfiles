@@ -69,9 +69,8 @@ fu! s:Make_root(tree, ...)
 	endfor
 	let ret.lvl = 0
 	let ret.parent = {}
-	" This will be set later in build traversal unless cur is root, so go ahead
-	" and initialize to root.
-	let ret.cur = ret
+	" This will be set later in build traversal.
+	let ret.cur = {}
 	" Note: No inheritance forces kludgy stuff like this.
 	" TODO: Consider better way.
 	let ret.Get_geom = function('s:Node_get_geom')
@@ -133,12 +132,12 @@ fu! s:Build_undo_tree(...)
 	let ret = {}
 	for e in entries
 		let o = s:Make_node(e, parent, lvl)
-		if o.seq == root.meta.seq_cur
-			" TODO: NO!!!!! seq_cur isn't always in sync. Just after loading a
-			" file, for instance, curhead is correct, but seq_cur isn't. Rework this.
+		" Caveat: seq_cur isn't always in sync. Just after loading a file, for
+		" instance, curhead is correct, but seq_cur isn't. Rework this.
+		if has_key(e, 'curhead')
 			" Store a ptr to the current node on the root.
 			" Note: This is what will be manipulated henceforth.
-			let root.cur = o
+			let root.cur = parent
 		endif
 		if has_key(e, 'alt')
 			" Build sibs recursively and add self, keeping list sorted.
@@ -159,6 +158,11 @@ fu! s:Build_undo_tree(...)
 		let parent = o
 		let lvl += 1
 	endfor
+	if a:0 == 1 && empty(root.cur)
+		" We fell off the end without finding 'curhead'; parent is the last
+		" object encountered (root if top level had no entries[]).
+		let root.cur = parent
+	endif
 	" Root (seq==0) is special case: no one to return siblings to. In that case,
 	" we make sibs child of root, and return root itself.
 	return a:0 == 1 ? root : ret
