@@ -798,6 +798,8 @@ fu! s:Update_syn_tree(node) dict
 endfu
 " Add or erase brackets around input node from geom.nodes dictionary.
 " gnode: {'node': {}, 'col': <colnr>, 'row': <rownr>}
+" TODO: Make more generic by changing 'erase' flag to an arg that indicates the
+" wrap char desired.
 fu! s:Bracket_node(gnode, erase)
 	let [tnode, row, col] = [a:gnode.node, a:gnode.row, a:gnode.col]
 	let gi = tnode.Get_geom()
@@ -810,7 +812,7 @@ fu! s:Bracket_node(gnode, erase)
 		\ (a:erase ? ' ' : '[') .
 		\ strpart(s, scol, gi.w - 2) .
 		\ (a:erase ? ' ' : ']') .
-		\ strpart(s, ecol + 1))
+		\ strpart(s, ecol))
 endfu
 fu! s:Update_syn(node, ...) dict
 	let seq = a:0 ? a:1 : a:node.seq
@@ -1138,7 +1140,7 @@ fu! s:Move_in_tree(dir) " entry
 	" Return to child to update display.
 	wincmd p
 	" Update display.
-	call s:undo_cache.syn.Update(s:undo_cache.tree.cur.children.cur)
+	call s:undo_cache.syn.Update(s:undo_cache.tree.cur)
 	"if a:dir == 'left' || a:dir == 'right'
 	"else
 	"	" Need to bracket/unbracket new/old nodes.
