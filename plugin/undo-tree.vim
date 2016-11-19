@@ -947,15 +947,16 @@ endfu
 fu! s:Create_mappings_in_child()
 	" Create buffer-local mapping(s)
 	" To refresh the tree forcibly
-	nmap <buffer> <leader>r :call <SID>Refresh_child()
+	nnoremap <silent> <buffer> <leader>r :call <SID>Refresh_child()
 
 	" Moving up/down and changing undo/redo path through tree.
 	" Design Decision: No reason to avoid using regular Vim motion commands.
 	" Rationale: Cursor movement is highly constrained.
-	nmap <buffer> k :call <SID>Move_in_tree('up')<CR>
-	nmap <buffer> j :call <SID>Move_in_tree('down')<CR>
-	nmap <buffer> h :call <SID>Move_in_tree('left')<CR>
-	nmap <buffer> l :call <SID>Move_in_tree('right')<CR>
+	nnoremap <silent> <buffer> k :call <SID>Move_in_tree('up')<CR>
+	nnoremap <silent> <buffer> j :call <SID>Move_in_tree('down')<CR>
+	nnoremap <silent> <buffer> h :call <SID>Move_in_tree('left')<CR>
+	nnoremap <silent> <buffer> l :call <SID>Move_in_tree('right')<CR>
+	nnoremap <silent> <buffer> c :call <SID>Center_tree(1)<CR>
 endfu
 
 fu! s:Create_syntax_in_child()
@@ -963,8 +964,9 @@ fu! s:Create_syntax_in_child()
 	hi undo_redo_path gui=bold cterm=bold term=bold
 endfu
 
+" Object to hold saved option settings for save/restore mechanism.
 let s:opts = {}
-" Caveat: No good way to get script name from inside function.
+" Note: No good way to get script name from inside function.
 let s:script_path = expand('<sfile>:p')
 " Return full path of script that last set option whose *full* name is input.
 " Returns empty string if still at default.
@@ -980,7 +982,7 @@ endfu
 fu! s:Restore_opt(name)
 	if has_key(s:opts, a:name)
 		exe 'let &' . a:name ' = s:opts[a:name]'
-		call remove(s:opts, 'a:name')
+		call remove(s:opts, a:name)
 	else
 		" Getting here implies internal error or race-condition: to be safe,
 		" just set back to default.
@@ -988,8 +990,17 @@ fu! s:Restore_opt(name)
 	endif
 endfu
 
-" TODO: Consider adding a 'local' flag parameter
-" TODO: Also, consider whether this override mechanism is overkill.
+" Rationale: The reason for checking setter is that if we somehow managed to do
+" 2 consecutive overrides from this script, we might inadvertently save our own
+" setting for subsequent restoration. This would be particularly bad if the
+" option were 'guicursor'. Refusing to save a value we set ensures this can't
+" happen (at the cost of a bit of complexity).
+" TODO: Doing the save only in BufEnter (and in Configure_child when we're sure
+" the BufEnter has been skipped) could also prevent the problem scenario, and
+" would obviate the need for the more complex override mechanism. Consider
+" whether this mechanism is justified.
+" TODO: Consider adding a 'local' flag parameter. (May not be necessary, given
+" that we typically wouldn't need to 'override' local params.)
 fu! s:Override_opt(name, value)
 	let setter = s:Get_opt_setter(a:name)
 	if setter != s:script_path
@@ -1002,7 +1013,7 @@ endfu
 
 fu! s:Configure_cursor_in_child()
 	if has('gui')
-		call s:Override_opt('guicursor', 'n-v-c:block-NONE')
+		call s:Override_opt('guicursor', 'n-v:block-NONE')
 	else
 		call s:Override_opt('t_ve', '')
 	endif
@@ -1012,11 +1023,13 @@ fu! s:Unconfigure_cursor_in_child()
 	call s:Restore_opt(has('gui') ? 'guicursor' : 't_ve')
 endfu
 
+" TODO: Decide between this simple approach and the more complex approach in the
+" non-<...>_child versions.
 fu! s:Configure_cursor_in_child_simple()
 	if has('gui')
 		let s:cursor_save = &guicursor
 		" TODO: Any advantage to creating special Cursor group?
-		set guicursor=n-v-c:block-NONE
+		set guicursor=n-v:block-NONE
 	else
 		let s:cursor_save = &t_ve
 		set t_ve=
@@ -1043,6 +1056,9 @@ fu! s:Configure_child()
 	" Note: This will also be called in child BufEnter, but that call may have
 	" been skipped due to :noauto.
 	call s:Configure_cursor_in_child()
+	" TODO: Decide whether separate function should be used for options.
+	" Rationale: Tree display falls apart if 'wrap' on
+	setl nowrap
 endfu
 
 fu! s:Is_child_configured()
@@ -1054,7 +1070,6 @@ fu! s:Is_child_configured()
 	endif
 	return 0
 endfu
-
 
 " Hide any open child buffers.
 fu! s:Delete_children()
@@ -1098,7 +1113,7 @@ fu! s:Parent_BufWinLeave(bnr)
 		" Rationale: In case our deferred delete of child fails, at least the
 		" window will be empty.
 		" TODO: Consider putting this in Unconfigure_child.
-		%d
+		silent %d
 		" Also unconfigure child so we don't need to worry about it's autocmds
 		" triggering again.
 		" Rationale: Autocmds will be removed in deferred Delete_children, but
@@ -1109,7 +1124,7 @@ fu! s:Parent_BufWinLeave(bnr)
 	endif
 endfu
 fu! s:Child_BufWinLeave(bnr)
-	%d
+	silent %d
 	call s:Unconfigure_child()
 endfu
 
@@ -1175,7 +1190,7 @@ fu! s:Position_child(clear)
 			\ . cmd
 			\ . s:undo_bufnr
 		if a:clear
-			%d
+			silent %d
 		endif
 	endif
 	" Make sur the parent's viewport hasn't changed.
@@ -1202,6 +1217,66 @@ fu! s:Prepare_child(clear)
 	call s:Configure_child()
 endfu
 
+fu! s:Describe_node(...)
+	" If user didn't pass a seq number, describe current node.
+	let seq = a:0 ? a:1 : s:undo_cache.tree.cur.seq 
+	let t = s:undo_cache.geom.geom.nodes[seq].node
+	if t.seq == 0
+		echo "At root of undo tree"
+	else
+		echo printf("State #%d: %s", t.seq, strftime("%c", t.time))
+	endif
+endfu
+
+" Return object with following format:
+"   visible: 1 if entire node is visible
+"   dy: # of rows by which to shift view down to center
+"   dx: # of cols by which to shift view right to center
+fu! s:Calculate_tree_node_offset(...)
+	let ret = {'visible': 1}
+	" If user didn't pass a seq number, center on current.
+	let seq = a:0 ? a:1 : s:undo_cache.tree.cur.seq 
+	" Determine current horiz/vert view scroll amounts.
+	let [vscroll, hscroll] = [line('.') - winline(), col('.') - wincol()]
+	let [wh, ww] = [winheight(0), winwidth(0)]
+	" Get the geom node corresponding to desired center.
+	let gnode = s:undo_cache.geom.geom.nodes[seq]
+	let [t, row, col] = [gnode.node, gnode.row, gnode.col]
+	" Calculate 1-based offset from edge of window.
+	let [row_rel, col_rel] = [row - vscroll, col - hscroll]
+	" Check edges of node to see whether any part is not visible.
+	let gi = t.Get_geom()
+	" Note: +1 needed to ensure we center on middle of odd number of rows.
+	if row_rel < 1 || row_rel > wh ||
+		\ col_rel + gi.e[0] < 1 || col_rel + gi.e[1] > ww
+		let ret.visible = 0
+	endif
+	" Calculate delta: pos delta => scroll view right/down to center.
+	let ret.dy = row_rel - (wh + 1) / 2
+	let ret.dx = col_rel - (ww + 1) / 2
+	return ret
+endfu
+
+" If 'force' flag is true or requested node is even partially outside view,
+" center tree on current node (default) or node whose seq is input.
+" Assumption: In child buffer with consistent cache
+fu! s:Center_tree(force, ...)
+	" If user didn't pass a seq number, center on current.
+	let seq = a:0 ? a:1 : s:undo_cache.tree.cur.seq 
+	let oi = s:Calculate_tree_node_offset(seq)
+	if !a:force && oi.visible
+		" Not forcing and node is already fully visible.
+		return
+	endif
+	" Perform required horiz/vert shifts (delta == 0 => no shift).
+	if oi.dx
+		exe 'normal! ' . abs(oi.dx) . (oi.dx > 0 ? 'zl' : 'zh')
+	endif
+	if oi.dy
+		exe 'normal! ' . abs(oi.dy) . (oi.dy > 0 ? "\<C-E>" : "\<C-Y>")
+	endif
+endfu
+
 " Called From: child buffer maps for moving in tree.
 " Assumption: Can be invoked only when fresh undo data structures exist.
 " Rationale: Invoked from undo buffer mappings, and freshness is checked in
@@ -1216,20 +1291,17 @@ fu! s:Move_in_tree(dir) " entry
 	" TODO: For aesthetics, make the method names capitalized.
 	call s:undo_cache.tree[a:dir]()
 	call s:Goto_win(bufwinnr(s:bufnr))
-	exe 'undo ' . s:undo_cache.tree.cur.seq
+	" Note: Execute undo silently to avoid a hit-enter prompt.
+	silent exe 'undo ' . s:undo_cache.tree.cur.seq
 	" Return to child to update display.
 	" Caveat: Don't trigger BufEnter
 	noauto wincmd p
 	" Update display.
 	call s:undo_cache.syn.Update(s:undo_cache.tree.cur)
-	"if a:dir == 'left' || a:dir == 'right'
-	"else
-	"	" Need to bracket/unbracket new/old nodes.
-	"	let t = s:undo_cache.tree.cur
-	"	let tp = a:dir == 'down' ? t.parent : t.children.cur
-	"	" Bracket/unbracket
-	"	call s:undo_cache.syn.Update(s:undo_cache.tree.cur.children.cur)
-	"endif
+	" Center iff current node is not fully visible.
+	call s:Center_tree(0)
+	" Output summary of current change.
+	call s:Describe_node()
 endfu
 
 " Invoked from child's <buffer> map.
@@ -1341,7 +1413,7 @@ fu! s:Refresh_undo_window(contents_invalid)
 endfu
 
 " Global mappings
-nnoremap <leader>u :call <SID>Open_undo_window()<CR>
+nnoremap <silent> <leader>u :call <SID>Open_undo_window()<CR>
 
 fu! s:Test_only()
 	let xs = S_Cons("baz", {})
