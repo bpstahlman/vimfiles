@@ -765,6 +765,25 @@ fu! s:Clear_syn_tree() dict
 	call clearmatches()
 endfu
 
+" Add or erase brackets around input node from geom.nodes dictionary.
+" gnode: {'node': {}, 'col': <colnr>, 'row': <rownr>}
+" TODO: Make more generic by changing 'erase' flag to an arg that indicates the
+" wrap char desired.
+fu! s:Bracket_node(gnode, erase)
+	let [tnode, row, col] = [a:gnode.node, a:gnode.row, a:gnode.col]
+	let gi = tnode.Get_geom()
+	let [scol, ecol] = [col + gi.e[0], col + gi.e[1]]
+	"echomsg "gi: " . string(gi) . ", scol=" . scol . ", ecol=" . ecol
+	" TODO: Make change manually? Or with setline()?
+	let s = getline(row)
+	call setline(row,
+		\ strpart(s, 0, scol - 1) .
+		\ (a:erase ? ' ' : '[') .
+		\ strpart(s, scol, gi.w - 2) .
+		\ (a:erase ? ' ' : ']') .
+		\ strpart(s, ecol))
+endfu
+
 " Assumption: Input node is valid. (Note that root node can never be
 " invalidated.)
 " Assumption: Called from child buffer
@@ -795,24 +814,6 @@ fu! s:Update_syn_tree(node) dict
 		let [t, colp] = [t.children.cur, col]
 		let lvl += 1
 	endwhile
-endfu
-" Add or erase brackets around input node from geom.nodes dictionary.
-" gnode: {'node': {}, 'col': <colnr>, 'row': <rownr>}
-" TODO: Make more generic by changing 'erase' flag to an arg that indicates the
-" wrap char desired.
-fu! s:Bracket_node(gnode, erase)
-	let [tnode, row, col] = [a:gnode.node, a:gnode.row, a:gnode.col]
-	let gi = tnode.Get_geom()
-	let [scol, ecol] = [col + gi.e[0], col + gi.e[1]]
-	"echomsg "gi: " . string(gi) . ", scol=" . scol . ", ecol=" . ecol
-	" TODO: Make change manually? Or with setline()?
-	let s = getline(row)
-	call setline(row,
-		\ strpart(s, 0, scol - 1) .
-		\ (a:erase ? ' ' : '[') .
-		\ strpart(s, scol, gi.w - 2) .
-		\ (a:erase ? ' ' : ']') .
-		\ strpart(s, ecol))
 endfu
 fu! s:Update_syn(node, ...) dict
 	let seq = a:0 ? a:1 : a:node.seq
@@ -918,6 +919,7 @@ fu! s:Create_autocmds_in_child()
 		au!
 		au BufDelete <buffer> call s:Child_BufDelete(expand("<abuf>"))
 		au BufEnter <buffer> call s:Child_BufEnter()
+		au BufLeave <buffer> call s:Child_BufLeave()
 		au BufWinLeave <buffer> call s:Child_BufWinLeave(expand("<abuf>"))
 	augroup END
 endfu
@@ -950,15 +952,85 @@ fu! s:Create_mappings_in_child()
 	" Moving up/down and changing undo/redo path through tree.
 	" Design Decision: No reason to avoid using regular Vim motion commands.
 	" Rationale: Cursor movement is highly constrained.
-	nmap <buffer> <LocalLeader>k :call <SID>Move_in_tree('up')<CR>
-	nmap <buffer> <LocalLeader>j :call <SID>Move_in_tree('down')<CR>
-	nmap <buffer> <LocalLeader>h :call <SID>Move_in_tree('left')<CR>
-	nmap <buffer> <LocalLeader>l :call <SID>Move_in_tree('right')<CR>
+	nmap <buffer> k :call <SID>Move_in_tree('up')<CR>
+	nmap <buffer> j :call <SID>Move_in_tree('down')<CR>
+	nmap <buffer> h :call <SID>Move_in_tree('left')<CR>
+	nmap <buffer> l :call <SID>Move_in_tree('right')<CR>
 endfu
 
 fu! s:Create_syntax_in_child()
 	" TODO: Could do this once up front.
 	hi undo_redo_path gui=bold cterm=bold term=bold
+endfu
+
+let s:opts = {}
+" Caveat: No good way to get script name from inside function.
+let s:script_path = expand('<sfile>:p')
+" Return full path of script that last set option whose *full* name is input.
+" Returns empty string if still at default.
+fu! s:Get_opt_setter(name)
+	" Caveat: verbose set seems to return a leading newline: allow for it, but
+	" don't require it.
+	exe 'silent! redir =>l:opt | silent! verbose set ' . a:name . '? | redir END'
+	let fname = matchstr(opt, '^\(\s*\_s\)\?\s*' . a:name
+		\ . '=.*\_s\s\+Last set from\s\+\zs.\{-}\ze\s*$')
+	return empty(fname) ? '' : fnamemodify(fname, ':p')
+endfu
+
+fu! s:Restore_opt(name)
+	if has_key(s:opts, a:name)
+		exe 'let &' . a:name ' = s:opts[a:name]'
+		call remove(s:opts, 'a:name')
+	else
+		" Getting here implies internal error or race-condition: to be safe,
+		" just set back to default.
+		exe 'set ' . a:name . '&'
+	endif
+endfu
+
+" TODO: Consider adding a 'local' flag parameter
+" TODO: Also, consider whether this override mechanism is overkill.
+fu! s:Override_opt(name, value)
+	let setter = s:Get_opt_setter(a:name)
+	if setter != s:script_path
+		" Save old value.
+		exe 'let s:opts[a:name] = &' . a:name
+	endif
+	" Override.
+	exe 'let &' . a:name . ' = a:value'
+endfu
+
+fu! s:Configure_cursor_in_child()
+	if has('gui')
+		call s:Override_opt('guicursor', 'n-v-c:block-NONE')
+	else
+		call s:Override_opt('t_ve', '')
+	endif
+endfu
+
+fu! s:Unconfigure_cursor_in_child()
+	call s:Restore_opt(has('gui') ? 'guicursor' : 't_ve')
+endfu
+
+fu! s:Configure_cursor_in_child_simple()
+	if has('gui')
+		let s:cursor_save = &guicursor
+		" TODO: Any advantage to creating special Cursor group?
+		set guicursor=n-v-c:block-NONE
+	else
+		let s:cursor_save = &t_ve
+		set t_ve=
+	endif
+endfu
+
+fu! s:Unconfigure_cursor_in_child_simple()
+	if exists('s:cursor_save')
+		if has('gui')
+			let &guicursor = s:cursor_save
+		else
+			let &t_ve = s:cursor_save
+		endif
+	endif
 endfu
 
 " TODO: Perhaps make it so stuff isn't redone unnecessarily (though all of this
@@ -968,6 +1040,9 @@ fu! s:Configure_child()
 	call s:Create_autocmds_in_child()
 	call s:Create_mappings_in_child()
 	call s:Create_syntax_in_child()
+	" Note: This will also be called in child BufEnter, but that call may have
+	" been skipped due to :noauto.
+	call s:Configure_cursor_in_child()
 endfu
 
 fu! s:Is_child_configured()
@@ -1058,7 +1133,12 @@ fu! s:Child_BufEnter()
 	if p_wnr > 0
 		" Invoke non-forced refresh.
 		call s:Refresh_undo_window(0)
+		call s:Configure_cursor_in_child()
 	endif
+endfu
+
+fu! s:Child_BufLeave()
+	call s:Unconfigure_cursor_in_child()
 endfu
 
 " Assumption: Called from parent.
@@ -1138,7 +1218,8 @@ fu! s:Move_in_tree(dir) " entry
 	call s:Goto_win(bufwinnr(s:bufnr))
 	exe 'undo ' . s:undo_cache.tree.cur.seq
 	" Return to child to update display.
-	wincmd p
+	" Caveat: Don't trigger BufEnter
+	noauto wincmd p
 	" Update display.
 	call s:undo_cache.syn.Update(s:undo_cache.tree.cur)
 	"if a:dir == 'left' || a:dir == 'right'
