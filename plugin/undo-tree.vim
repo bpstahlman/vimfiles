@@ -42,6 +42,23 @@ fu! s:Node_get_geom() dict
 	let xe = xs + w - 1
 	return {'w': w, 'e': [xs, xe]}
 endfu
+
+" Make this node the current one in the tree.
+" Logic: Traverse upwards to root, adjusting each parent's children.cur pointer
+" to point to the child in the traversal, and ultimately, adjusting root's
+" special cur pointer to point to self.
+" Implementation Note: Implementing non-recursively, which means self will
+" always point to the original invocant node.
+fu! s:Node_make_current() dict
+	let [t, tp] = [self.parent, self]
+	while !empty(t)
+		let t.children.cur = tp
+		let [t, tp] = [t.parent, t]
+	endwhile
+	" Hit root (tp == root).
+	let tp.cur = self
+endfu
+
 " =============================================================
 " TODO: Consider pulling everything but 'next' under an 'el' property so that
 " these elements can be used with the list functions further down. Hmm... Not
@@ -57,6 +74,7 @@ fu! s:Make_node(e, parent, lvl)
 		\,'next': {}
 		\,'parent': a:parent
 		\,'Get_geom': function('s:Node_get_geom')
+		\,'Make_current': function('s:Node_make_current')
 		\}
 endfu
 fu! s:Make_root(tree, ...)
@@ -815,7 +833,59 @@ fu! s:Update_syn_tree(node) dict
 		let lvl += 1
 	endwhile
 endfu
-fu! s:Update_syn(node, ...) dict
+
+fu! s:Get_common_ancestor(t1, t2)
+	if empty(a:t1.parent) || empty(a:t2.parent)
+		" One of the inputs was root.
+		return empty(a:t1.parent) ? a:t1 : a:t2
+	endif
+	" Logic: Maintain 2 tree pointers, walking them up the tree in leapfrog
+	" fashion (always moving the deeper of the two) until the 2 meet at the
+	" desired ancestor (which will be root if nothing else).
+	let ts = [a:t1, a:t2]
+	while 1
+		if ts[0] == ts[1]
+			" Found common ancestor
+			return ts[0]
+		endif
+		" Determine the deeper pointer and move it up one.
+		let i = ts[0].lvl > ts[1].lvl ? 0 : 1
+		let ts[i] = ts[i].parent
+		" Have we hit root?
+		if empty(ts[i].parent)
+			" Pointers can no longer converge before root; ignore possibility of
+			" internal error, and assume they'll converge at root.
+			return ts[i]
+		endif
+	endwhile
+endfu
+
+" Update tree display. The input 'node' is current. Tree will be updated from
+" common ancestor of current and old current (if it can be determined), else
+" from root.
+fu! s:Update_syn(cur) dict
+	if self.seq >= 0
+		" De-select old
+		let old = self.geom.nodes[self.seq]
+		call s:Bracket_node(old, 1)
+		" Find common ancestor of old and new
+		let anc = s:Get_common_ancestor(old.node, a:cur)
+	else
+		" Update from root.
+		let anc = self.geom.nodes[0].node
+	endif
+	" TODO: Using call() so that I can keep s:Update_syn_tree as method without
+	" adding it to public interface. Look for better way...
+	call call('s:Update_syn_tree', [anc], self)
+	" Select new
+	call s:Bracket_node(self.geom.nodes[a:cur.seq], 0)
+	" Cache new
+	let self.seq = a:cur.seq
+endfu
+" Update tree syntax from input 'node' down. If optional second arg is supplied,
+" it is the seq number of the node that should be selected; otherwise, select
+" 'node'.
+fu! s:Update_syn_old(node, ...) dict
 	let seq = a:0 ? a:1 : a:node.seq
 	" TODO: Using call() so that I can keep s:Update_syn_tree as method without
 	" adding it to public interface. Look for better way...
@@ -823,7 +893,6 @@ fu! s:Update_syn(node, ...) dict
 	if self.seq >= 0
 		" De-select old
 		let old = self.geom.nodes[self.seq]
-		" Get bounds of old
 		"echomsg "s:Bracket_node  " . self.seq
 		call s:Bracket_node(old, 1)
 	endif
@@ -834,6 +903,7 @@ fu! s:Update_syn(node, ...) dict
 	" Cache new
 	let self.seq = seq
 endfu
+
 fu! s:Make_syn_tree(geom)
 	let me = {
 		\ 'ids': [],
@@ -957,11 +1027,12 @@ fu! s:Create_mappings_in_child()
 	nnoremap <silent> <buffer> h :call <SID>Move_in_tree('left')<CR>
 	nnoremap <silent> <buffer> l :call <SID>Move_in_tree('right')<CR>
 	nnoremap <silent> <buffer> c :call <SID>Center_tree(1)<CR>
+	nnoremap <silent> <buffer> g :<C-U>call <SID>Goto_node_in_tree()<CR>
 endfu
 
 fu! s:Create_syntax_in_child()
 	" TODO: Could do this once up front.
-	hi undo_redo_path gui=bold cterm=bold term=bold
+	hi undo_redo_path gui=bold cterm=bold term=bold guifg=blue
 endfu
 
 " Object to hold saved option settings for save/restore mechanism.
@@ -1277,6 +1348,32 @@ fu! s:Center_tree(force, ...)
 	endif
 endfu
 
+" Goto (and center on) the node whose seq number user supplied as count to a
+" mapping.
+fu! s:Goto_node_in_tree()
+	" Note: You can't supply 0 as a count, but a user may want to go to the root
+	" node. This is ok: if he omits the count, v:count will be 0.
+	let seq = v:count
+	" Get the node, bearing in mind that there's not guarantee it exists.
+	let gnode = has_key(s:undo_cache.geom.geom.nodes, seq)
+		\ ? s:undo_cache.geom.geom.nodes[seq] : {}
+	if empty(gnode)
+		echomsg "Warning: Node " . seq . " does not exist."
+		return
+	endif
+	" Node exists: make it current
+	let s:undo_cache.tree.cur = gnode.node
+	" Alter the undo-redo path to include it.
+	call gnode.node.Make_current()
+	" Center on the new current node.
+	call s:Center_tree(1, gnode.node.seq)
+	" Update display.
+	call s:undo_cache.syn.Update(gnode.node)
+	" Output summary of current change.
+	call s:Describe_node()
+
+endfu
+
 " Called From: child buffer maps for moving in tree.
 " Assumption: Can be invoked only when fresh undo data structures exist.
 " Rationale: Invoked from undo buffer mappings, and freshness is checked in
@@ -1401,13 +1498,13 @@ fu! s:Refresh_undo_window(contents_invalid)
 	" clobbered (e.g., by user deletion).
 	if contents_invalid
 		" Replace undo buffer's contents with new tree.
-		%d
+		silent %d
 		call append(0, s:undo_cache.geom.lines)
 		" Now do highlighting
 		call s:undo_cache.syn.Clear()
 		let uc = s:undo_cache
 		let cur = uc.tree.cur
-		call s:undo_cache.syn.Update(s:undo_cache.tree, s:undo_cache.tree.cur.seq)
+		call s:undo_cache.syn.Update(s:undo_cache.tree.cur)
 	endif
 
 endfu
