@@ -746,6 +746,7 @@ fu! s:Make_regex(atom, pos, ...)
 	let re .= '\&' . a:atom
 	return re
 endfu
+
 " Inputs:
 " ids: list of matchadd ids for the level being built.
 " node: child node
@@ -764,6 +765,8 @@ fu! s:Update_syn_tree_node(ids, node, lvl, col)
 		" Nothing else to do for root.
 		return
 	endif
+
+	" Vertical or diagonal up to horizontal header bar
 	if a:node.x < 0
 		let [off, text] = [1, '/']
 	elseif a:node.x > 0
@@ -773,6 +776,27 @@ fu! s:Update_syn_tree_node(ids, node, lvl, col)
 		let [off, text] = [0, '|']
 	endif
 	let re = s:Make_regex(text, [row - 1, a:col + off])
+	call add(a:ids, matchadd('undo_redo_path', re, 10))
+
+	" Horizontal header bar
+	" Note: repeat() will produce empty string for negative count, and this
+	" will happen, for instance, when child is unit distance from parent.
+	if a:node.x < 0
+		let [off, text] = [2, repeat('_', -a:node.x - 2)]
+	elseif a:node.x > 0
+		let [off, text] = [-a:node.x + 1, repeat('_', a:node.x - 2)]
+	else
+		" Child directly under parent => no horizontal
+		let [off, text] = [0, '']
+	endif
+	if !empty(text)
+		" We have a piece of horizontal to display.
+		let re = s:Make_regex(text, [row - 2, a:col + off])
+		call add(a:ids, matchadd('undo_redo_path', re, 10))
+	endif
+
+	" Vertical to parent
+	let re = s:Make_regex('|', [row - 2, a:col - a:node.x])
 	call add(a:ids, matchadd('undo_redo_path', re, 10))
 
 endfu
@@ -1299,6 +1323,21 @@ fu! s:Describe_node(...)
 	endif
 endfu
 
+" Undo parent buf to the undo state whose seq number is input.
+" Post Condition: Doesn't change active window.
+fu! s:Undo_to(seq)
+	let [wnr, p_wnr] = [winnr(), bufwinnr(s:bufnr)]
+	if wnr != p_wnr
+		call s:Goto_win(p_wnr)
+	endif
+	" Note: Execute undo silently to avoid a hit-enter prompt.
+	silent exe 'undo ' . a:seq
+	if wnr != p_wnr
+		" Return to starting window without triggering BufEnter.
+		noauto wincmd p
+	endif
+endfu
+
 " Return object with following format:
 "   visible: 1 if entire node is visible
 "   dy: # of rows by which to shift view down to center
@@ -1365,6 +1404,8 @@ fu! s:Goto_node_in_tree()
 	let s:undo_cache.tree.cur = gnode.node
 	" Alter the undo-redo path to include it.
 	call gnode.node.Make_current()
+	" Accomplish the change in the actual buffer.
+	call s:Undo_to(gnode.node.seq)
 	" Center on the new current node.
 	call s:Center_tree(1, gnode.node.seq)
 	" Update display.
@@ -1387,12 +1428,8 @@ fu! s:Move_in_tree(dir) " entry
 	" Grab tree and invoke specified movement method.
 	" TODO: For aesthetics, make the method names capitalized.
 	call s:undo_cache.tree[a:dir]()
-	call s:Goto_win(bufwinnr(s:bufnr))
-	" Note: Execute undo silently to avoid a hit-enter prompt.
-	silent exe 'undo ' . s:undo_cache.tree.cur.seq
-	" Return to child to update display.
-	" Caveat: Don't trigger BufEnter
-	noauto wincmd p
+	" Execute the actual undo in the parent buffer.
+	call s:Undo_to(s:undo_cache.tree.cur.seq)
 	" Update display.
 	call s:undo_cache.syn.Update(s:undo_cache.tree.cur)
 	" Center iff current node is not fully visible.
