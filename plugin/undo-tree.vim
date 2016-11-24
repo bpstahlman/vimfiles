@@ -1056,7 +1056,7 @@ endfu
 
 fu! s:Create_syntax_in_child()
 	" TODO: Could do this once up front.
-	hi undo_redo_path gui=bold cterm=bold term=bold guifg=blue
+	hi undo_redo_path gui=bold cterm=bold term=bold guifg=blue ctermfg=Blue
 endfu
 
 " Object to hold saved option settings for save/restore mechanism.
@@ -1512,6 +1512,10 @@ fu! s:Refresh_undo_window(contents_invalid)
 	" We want to move to the window even if it's up to date.
 	call s:Goto_win(bufwinnr(s:undo_bufnr))
 
+	" TODO: Consider factoring the following if block out so that it can be
+	" called prior to window creation. In that case, we'd simply use the updated
+	" cache below... Note the contents_invalid would probably reflect whether
+	" cache had to be updated.
 	let contents_invalid = a:contents_invalid
 	" Do we need to update the tree or is cache still valid?
 	if empty(s:undo_cache) || s:undo_cache.tree.meta.seq_last != v_ut.seq_last
@@ -1544,6 +1548,56 @@ fu! s:Refresh_undo_window(contents_invalid)
 		call s:undo_cache.syn.Update(s:undo_cache.tree.cur)
 	endif
 
+endfu
+
+" Parse 'splitwin' opt.
+" Format: comma-separated list of h, v, t components: e.g.,
+" h10-20j,v20%-40%L,t10-10h
+" h20l,v20%-40%L,t10-10h
+fu! s:Parse_split_opt(opt)
+    let ret = {
+	\ 'h': {'size': [10, 50], 'pct': [1, 1], 'side': 'b', 'full': 0},
+	\ 'v': {'size': [10, 50], 'pct': [1, 1], 'side': 'l', 'full': 0},
+	\ 't': {'size': [10, 60], 'pct': [1, 1], 'side': 'b', 'tabpos': '+'}}
+    " 1=split-type, 2=min-or-only, 3=[%], [4=max, 5=[%]], 6=side, 7=tabpos
+    let re = '\([hvt]\)'
+	    \ . '\(0\|[1-9][0-9]*\)\(%\)\?'
+	    \ . '\%(-\%(\(0\|[1-9][0-9]*\)\(%\)\?\)\)\?'
+	    \ . '\([albrALBR]\)'
+	    \ . '\([-+^$]\)\?'
+    " Design Decision: Whitespace has no meaning in opt string, so just strip.
+    for spec in split(substitute(a:opt, '\s\+', '', 'g'), ',')
+	let ml = matchlist(spec, re)
+	if empty(ml)
+	    echomsg "Warning: Ignoring invalid option 'splitwin' option: `"
+		\ . spec . "'"
+	    continue
+	endif
+	let [_, hvt, min, minpct, max, maxpct, side, tabpos; rest] = ml
+	let el = {}
+	if empty(max)
+	    let el.size = str2nr(min)
+	    let el.pct = !empty(minpct)
+	else
+	    let el.size = [str2nr(min), str2nr(max)]
+	    let el.pct = [!empty(minpct), !empty(maxpct)]
+	endif
+	let el.side = tolower(side)
+	if hvt == 't'
+	    let el.tabpos = tabpos
+	else
+	    let el.full = side =~ '\u'
+	    if !empty(tabpos)
+		" Reject the invalid entry.
+		echomsg "Warning: Ignoring invalid 'splitwin' component: tab pos modifier"
+		    \ . " in non-tab component: `"
+		    \ . spec . "'"
+		continue
+	    endif
+	endif
+	let ret[hvt] = el
+    endfor
+    return ret
 endfu
 
 " Global mappings
