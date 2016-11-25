@@ -815,6 +815,7 @@ endfu
 " Assumption: Called from child buffer
 fu! s:Clear_syn_tree() dict
 	let self.ids = []
+	let self.seq = -1
 	call clearmatches()
 endfu
 
@@ -916,27 +917,6 @@ fu! s:Update_syn(cur) dict
 	call s:Bracket_node(self.geom.nodes[a:cur.seq], 0)
 	" Cache new
 	let self.seq = a:cur.seq
-endfu
-" Update tree syntax from input 'node' down. If optional second arg is supplied,
-" it is the seq number of the node that should be selected; otherwise, select
-" 'node'.
-fu! s:Update_syn_old(node, ...) dict
-	let seq = a:0 ? a:1 : a:node.seq
-	" TODO: Using call() so that I can keep s:Update_syn_tree as method without
-	" adding it to public interface. Look for better way...
-	call call('s:Update_syn_tree', [a:node], self)
-	if self.seq >= 0
-		" De-select old
-		let old = self.geom.nodes[self.seq]
-		"echomsg "s:Bracket_node  " . self.seq
-		call s:Bracket_node(old, 1)
-	endif
-	" Select new
-	let new = self.geom.nodes[seq]
-	"echomsg "s:Bracket_node [" . seq
-	call s:Bracket_node(new, 0)
-	" Cache new
-	let self.seq = seq
 endfu
 
 fu! s:Make_syn_tree(geom)
@@ -1588,6 +1568,7 @@ fu! s:Refresh_cache(force)
 			\ 'geom': geom,
 			\ 'syn': syn
 		\ }
+		" TODO: Remove this...
 		let g:uc = s:undo_cache
 	endif
 endfu
@@ -1658,8 +1639,8 @@ fu! s:Refresh_undo_window(contents_invalid)
 		call append(0, s:undo_cache.geom.lines)
 		" Now do highlighting
 		call s:undo_cache.syn.Clear()
-		let uc = s:undo_cache
-		let cur = uc.tree.cur
+		" TODO: Remove this...
+		let g:uc = s:undo_cache
 		call s:undo_cache.syn.Update(s:undo_cache.tree.cur)
 	endif
 
