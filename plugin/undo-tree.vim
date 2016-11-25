@@ -597,13 +597,16 @@ endfu
 "   largest negative offset (used to calculate bias)
 "   width of tree
 fu! s:Extent_bias_width_fn(acc, e_el)
-	let [bias, w] = [abs(e_el[0]), a:e_el[1] - a:e_el[0] + 1]
+	let [bias, w] = [abs(a:e_el[0]), a:e_el[1] - a:e_el[0] + 1]
 	return [
 		\ bias > a:acc[0] ? bias : a:acc[0],
-		\ w > a:e_el[1] ? w : a:e_el[1]]
+		\ w > a:acc[1] ? w : a:acc[1]]
 endfu
+
 fu! s:Build_tree_display(tree, extent)
-	" Tree is centered at 0, but we need its left edge at 0. Determine the bias.
+	" Tree is centered at 0, but we need its left edge at 0. Determine the bias,
+	" and while we're at it, the width, both of which will be stored on the geom
+	" object we create).
 	" Note: Can't really apply the bias in the tree itself since the x values in
 	" tree are relative to parent. We *could* store absolute positions in the
 	" tree, but I don't really like that.
@@ -617,7 +620,7 @@ fu! s:Build_tree_display(tree, extent)
 	" Hash geom info by node id (seq number)
 	let nodes = {}
 	" Note: lines will be added later.
-	let ret = {'geom': {'x_bias': x, 'nodes': nodes}, 'lines': []}
+	let ret = {'geom': {'x_bias': x, 'width': w, 'nodes': nodes}, 'lines': []}
 	while !empty(fifo)
 		let [t, parent_x, lvl] = remove(fifo, 0)
 		" Calculate absolute x position in grid.
@@ -1263,41 +1266,48 @@ endfu
 
 " Calculate child size in the variable direction, taking into account the input
 " splitinfo (applicable component only) and available space (in free direction).
+" Assumption: undo cache is valid
 fu! s:Calc_child_size(splitinfo, avail_sz)
 	let si = a:splitinfo
 	if type(si.size) == 3
 		" Size is range
 		" Determine undo tree size
-		" TODO: Add width member alongside x_bias
 		" TODO: Geom is candidate for objectification...
 		let tree_sz = si.side =~? '[ba]'
-			\ ? len(s:undo_tree.geom.lines)
-			\ : s:undo_tree.geom.width
+			\ ? len(s:undo_cache.geom.lines)
+			\ : s:undo_cache.geom.geom.width
+		" Note: At this point, size of 0 means 'unconstrained'
 		if si.size[1] > 0
+			" Note: Can produce max of 0, but min of 1 will be imposed later.
 			let max_sz = si.pct[1] ? a:avail_sz * si.size[1] / 100 : si.size[1]
 		else
 			let max_sz = a:avail_sz
 		endif
+		" Note: Either the if or else block can produce min of 0: in either
+		" case, we must eventually impose hard min of 1.
 		if si.size[0] > 0
 			let min_sz = si.pct[0] ? a:avail_sz * si.size[0] / 100 : si.size[0]
 		else
-			let min_sz = 1
+			let min_sz = si.size[0]
 		endif
+		" Note: At this point, size of 0 really means 0
 		" Grab sufficient space to accomodate tree if possible...
-		let sz = min(max_sz, tree_sz)
-		" ...but don't shrink below min.
-		let sz = max(sz, min_sz)
+		let sz = min([max_sz, tree_sz])
+		" ...but don't shrink below min
+		let sz = max([sz, min_sz])
 	else
 		" Size is exact
 		let sz = si.pct ? a:avail_sz * si.size / 100 : si.size
 	endif
-	return sz
+	" Impose hard min of 1
+	return max([sz, 1])
 endfu
 
-" Assumption: Called from parent.
+" Assumption: Called from parent with undo cache valid
 " Note: Always end up in child window.
 fu! s:Position_child(clear, splithow)
 	let geom = s:undo_cache.geom
+	" Use splithow hint to extract and parse applicable 'splitinfo' component.
 	let si = s:Get_splitinfo(a:splithow)
 	" Save viewport so we can restore after opening (or re-opening) child.
 	" Rationale: Opening child window (e.g.) can effectively scroll the parent.
@@ -1312,8 +1322,9 @@ fu! s:Position_child(clear, splithow)
 		if tabnr > 0
 			call s:Hide_children()
 			" Go to the parent window in the reusable tab.
-			exe tabnr . 'gt'
-			" Note: From this point on, looks like non-tab invocation.
+			exe 'normal! ' . tabnr . 'gt'
+			" Note: From this point on, looks like non-tab invocation (e.g.,
+			" will call Hide_children for this tab).
 			call s:Goto_win(bufwinnr(s:bufnr))
 		endif
 	endif
@@ -1325,28 +1336,31 @@ fu! s:Position_child(clear, splithow)
 			\ si.tabpos == '-' ? tabnr - 1 :
 			\ si.tabpos == '^' ? 0 : tabpagenr('$') + 1
 		exe tabpos . 'tab sb' . s:bufnr
+	else
+		" We didn't create a new tab, though we could be reusing existing. In
+		" either case, hide (don't delete) any existing children in this tab.
+		" Rationale: Facilitates deterministic window positioning.
+		" TODO: Decide about children displayed in other tabs. (Keep in mind that
+		" they're deleted automatically in most cases.)
+		call s:Hide_children()
 	endif
-	" Hide (don't delete) any existing children in this tab.
-	" Rationale: Facilitates deterministic window positioning.
-	" TODO: Decide about children displayed in other tabs. (Keep in mind that
-	" they're deleted automatically in most cases.)
-	call s:Hide_children()
+	" Now for the split within the tab...
 	let split_mod = si.side =~ '[al]' ? 'aboveleft' : si.side =~ '[AL]'
 		\ ? 'topleft' : si.side =~ '[br]' ? 'belowright' : 'botright'
-
+	if si.side =~ '[lr]'
+		let split_mod .= ' vert'
+	endif
 	" Note: 'silent' prevents annoying and misleading [new file] msg.
 	let cmd = ' +setl\ buftype=nofile\ bufhidden=hide\ noswapfile '
 	let p_wnr = winnr()
 	if s:undo_bufnr < 0
 		" Create new window containing scratch buffer.
-		" TODO: Any advantage to using +cmd arg like this?
 		" Caveat: Wanted to wrap name in [...], but that makes Vim think it's
 		" directory.
 		exe 'silent ' . split_mod . ' new ' . cmd . expand('%') . '.undo'
 		let s:undo_bufnr = bufnr('%')
 	else
 		" Note: 'noauto' modifier prevents premature attempt to refresh.
-		" TODO: Take split direction into account.
 		exe 'silent noauto ' . split_mod . ' sb' . cmd . s:undo_bufnr
 		if a:clear
 			silent %d
@@ -1377,7 +1391,9 @@ endfu
 " If there's an active tab (i.e., one containing only the current parent and the
 " child), return its tabnr, else -1.
 fu! s:Get_reusable_tab()
-	if s:bufnr < 0 || s:undo_bufnr < 0 | return -1 | endif
+	if s:bufnr < 0 || s:undo_bufnr < 0
+		return -1
+	endif
 	for c_tabnr in map(win_findbuf(s:undo_bufnr), 'win_id2tabwin(v:val)[0]')
 		" Get list of buffers in this tab (which we know contains child).
 		let bufnrs = tabpagebuflist(c_tabnr)
@@ -1605,7 +1621,8 @@ fu! s:Open_undo_window(...) " entry
 	call s:Refresh_cache(0)
 	" TODO: Consider whether Prepare_child's tab reusal logic should consider
 	" old parent or only new. For now, just consider new: wouldn't want to close
-	" last window on old parent.
+	" last window on old parent. To consider old, we'd need to pass it to
+	" Prepare_child.
 	call s:Prepare_child(contents_invalid, splithow)
 	" Everything should be in order now with the 2 windows.
 	call s:Refresh_undo_window(contents_invalid)
