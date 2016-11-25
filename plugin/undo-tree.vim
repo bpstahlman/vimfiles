@@ -591,15 +591,23 @@ fu! s:Design_nr(t)
 	endwhile
 endfu
 
-fu! s:Extent_min_fn(min, e_el)
-	return a:e_el[0] < a:min ? a:e_el[0] : a:min
+" Special function used to generate accumulator in a fold over a list of
+" extents.
+" Accumulator is a list of 2 elements:
+"   largest negative offset (used to calculate bias)
+"   width of tree
+fu! s:Extent_bias_width_fn(acc, e_el)
+	let [bias, w] = [abs(e_el[0]), a:e_el[1] - a:e_el[0] + 1]
+	return [
+		\ bias > a:acc[0] ? bias : a:acc[0],
+		\ w > a:e_el[1] ? w : a:e_el[1]]
 endfu
 fu! s:Build_tree_display(tree, extent)
 	" Tree is centered at 0, but we need its left edge at 0. Determine the bias.
 	" Note: Can't really apply the bias in the tree itself since the x values in
 	" tree are relative to parent. We *could* store absolute positions in the
 	" tree, but I don't really like that.
-	let x = abs(S_Foldl(function('s:Extent_min_fn'), 0, a:extent))
+	let [x, w] = S_Foldl(function('s:Extent_bias_width_fn'), [0, 0], a:extent)
 	" Breadth-first traversal
 	" Fifo elements: [<node>, <absolute-parent_x>, <lvl>]
 	let fifo = [[a:tree, x, 0]]
@@ -1179,6 +1187,7 @@ endfu
 " so we could run it *after* positioning the child window, and could drop this
 " assumption.
 fu! s:Hide_children()
+	" TODO: Make this work across multiple tabs, or at least provide option.
 	let winnr = bufwinnr(s:undo_bufnr)
 	while winnr > 0
 		" Child is in a window. Attempt to hide it, noting that command will
@@ -1242,6 +1251,7 @@ fu! s:Child_BufEnter()
 	" queued for hiding.
 	if p_wnr > 0
 		" Invoke non-forced refresh.
+		call s:Refresh_cache(0)
 		call s:Refresh_undo_window(0)
 		call s:Configure_cursor_in_child()
 	endif
@@ -1251,61 +1261,145 @@ fu! s:Child_BufLeave()
 	call s:Unconfigure_cursor_in_child()
 endfu
 
+" Calculate child size in the variable direction, taking into account the input
+" splitinfo (applicable component only) and available space (in free direction).
+fu! s:Calc_child_size(splitinfo, avail_sz)
+	let si = a:splitinfo
+	if type(si.size) == 3
+		" Size is range
+		" Determine undo tree size
+		" TODO: Add width member alongside x_bias
+		" TODO: Geom is candidate for objectification...
+		let tree_sz = si.side =~? '[ba]'
+			\ ? len(s:undo_tree.geom.lines)
+			\ : s:undo_tree.geom.width
+		if si.size[1] > 0
+			let max_sz = si.pct[1] ? a:avail_sz * si.size[1] / 100 : si.size[1]
+		else
+			let max_sz = a:avail_sz
+		endif
+		if si.size[0] > 0
+			let min_sz = si.pct[0] ? a:avail_sz * si.size[0] / 100 : si.size[0]
+		else
+			let min_sz = 1
+		endif
+		" Grab sufficient space to accomodate tree if possible...
+		let sz = min(max_sz, tree_sz)
+		" ...but don't shrink below min.
+		let sz = max(sz, min_sz)
+	else
+		" Size is exact
+		let sz = si.pct ? a:avail_sz * si.size / 100 : si.size
+	endif
+	return sz
+endfu
+
 " Assumption: Called from parent.
 " Note: Always end up in child window.
-fu! s:Position_child(clear)
-	" TODO: More sophisticated and configurable algorithm for calculating child
-	" window height. For now, no smaller than a configurable min, but no bigger
-	" than parent.
-	let min_child_height = 10
-	" Expand the parent in proper direction
-	" TODO: Introduce option to allow either horiz or vert split. For now, just
-	" do horiz...
-	wincmd _
-	let wh = winheight(0)
+fu! s:Position_child(clear, splithow)
+	let geom = s:undo_cache.geom
+	let si = s:Get_splitinfo(a:splithow)
+	" Save viewport so we can restore after opening (or re-opening) child.
+	" Rationale: Opening child window (e.g.) can effectively scroll the parent.
+	let wsv = winsaveview()
+	" Handle scenarios in which we're going to switch to a different tab
+	" (possibly but not necessarily after creating).
+	" Design Decision: If we goto/create tab, first hide children in start tab.
+	let tabnr = -1
+	if si.type == 't' || empty(a:splithow)
+		" See whether there's a tab we can re-use.
+		let tabnr = s:Get_reusable_tab()
+		if tabnr > 0
+			call s:Hide_children()
+			" Go to the parent window in the reusable tab.
+			exe tabnr . 'gt'
+			" Note: From this point on, looks like non-tab invocation.
+			call s:Goto_win(bufwinnr(s:bufnr))
+		endif
+	endif
+	if si.type == 't' && tabnr < 0
+		" Create a tab at configured location and open parent in it.
+		call s:Hide_children()
+		let tabnr = tabpagenr()
+		let tabpos = si.tabpos == '+' ? tabnr + 1 :
+			\ si.tabpos == '-' ? tabnr - 1 :
+			\ si.tabpos == '^' ? 0 : tabpagenr('$') + 1
+		exe tabpos . 'tab sb' . s:bufnr
+	endif
+	" Hide (don't delete) any existing children in this tab.
+	" Rationale: Facilitates deterministic window positioning.
+	" TODO: Decide about children displayed in other tabs. (Keep in mind that
+	" they're deleted automatically in most cases.)
+	call s:Hide_children()
+	let split_mod = si.side =~ '[al]' ? 'aboveleft' : si.side =~ '[AL]'
+		\ ? 'topleft' : si.side =~ '[br]' ? 'belowright' : 'botright'
+
 	" Note: 'silent' prevents annoying and misleading [new file] msg.
 	let cmd = ' +setl\ buftype=nofile\ bufhidden=hide\ noswapfile '
 	let p_wnr = winnr()
-	" Save viewport so we can restore after opening (or re-opening) child.
-	" Rationale: Opening child window can effectively scroll the parent.
-	let wsv = winsaveview()
 	if s:undo_bufnr < 0
 		" Create new window containing scratch buffer.
 		" TODO: Any advantage to using +cmd arg like this?
 		" Caveat: Wanted to wrap name in [...], but that makes Vim think it's
 		" directory.
-		exe 'silent belowright new '
-			\ . cmd
-			\ . expand('%') . '.undo'
+		exe 'silent ' . split_mod . ' new ' . cmd . expand('%') . '.undo'
 		let s:undo_bufnr = bufnr('%')
 	else
 		" Note: 'noauto' modifier prevents premature attempt to refresh.
 		" TODO: Take split direction into account.
-		exe 'silent noauto belowright sb'
-			\ . cmd
-			\ . s:undo_bufnr
+		exe 'silent noauto ' . split_mod . ' sb' . cmd . s:undo_bufnr
 		if a:clear
 			silent %d
 		endif
 	endif
-	" Make sur the parent's viewport hasn't changed.
+	" We're in child now.
 	let c_wnr = winnr()
+	" Expand the parent to occupy all available space.
+	call s:Goto_win(p_wnr)
+	let size_cmd = si.side =~? '[ab]' ? '_' : '|'
+	exe 'wincmd ' . size_cmd
+	" Calculate desired size of child, taking options and available space into
+	" account.
+	" Note: The -2 accounts for unusable space: divider and 1 line/col min
+	let avail_sz = (si.side =~? '[ab]' ? winheight(0) : winwidth(0)) - 2
+	let sz = s:Calc_child_size(si, avail_sz)
+	" Make the child the calculated size.
+	call s:Goto_win(c_wnr)
+	exe sz . 'wincmd ' . size_cmd
+	" Make sur the parent's viewport hasn't changed.
 	call s:Goto_win(p_wnr)
 	call winrestview(wsv)
+	" TODO: Consider child's viewport: will we always center later?
 	call s:Goto_win(c_wnr)
-	" We're in child buffer. Give it proper size.
-	exe min([max([(wh / 2), min_child_height]), wh]) . 'wincmd _'
 
+endfu
+
+" If there's an active tab (i.e., one containing only the current parent and the
+" child), return its tabnr, else -1.
+fu! s:Get_reusable_tab()
+	if s:bufnr < 0 || s:undo_bufnr < 0 | return -1 | endif
+	for c_tabnr in map(win_findbuf(s:undo_bufnr), 'win_id2tabwin(v:val)[0]')
+		" Get list of buffers in this tab (which we know contains child).
+		let bufnrs = tabpagebuflist(c_tabnr)
+		if len(bufnrs) != 2
+			" Consider only tabs containing single parent and single child.
+			continue
+		endif
+		" Note: We already know the tab contains child and one other buffer; if
+		" the other buffer is parent, this tab's the one we're looking for.
+		if index(bufnrs, s:bufnr) >= 0
+			" Found a tab containing only a single parent and child
+			return c_tabnr
+		endif
+	endfor
+	return -1
 endfu
 
 " Make sure an undo_buf exists, is visible, and is properly configured, creating
 " if necessary.
 " Assumption: In parent buffer
-fu! s:Prepare_child(clear)
-	" Hide (don't delete) any existing children.
-	" Rationale: Facilitates deterministic window positioning.
-	call s:Hide_children()
-	call s:Position_child(a:clear)
+fu! s:Prepare_child(clear, splithow)
+	call s:Position_child(a:clear, a:splithow)
 	" Note: We call this even when buf already existed, to ensure it's got all
 	" the mappings and autocmds we'll need. (It's unlikely, but possible, that
 	" someone deleted maps/autocmds, for instance.)
@@ -1451,16 +1545,44 @@ fu! s:Refresh_child() " entry
 		return
 	endif
 	" There's a visible and active parent. Forcibly refresh
-	let s:undo_cache = {}
+	call s:Refresh_cache(1)
 	call s:Refresh_undo_window(1)
 endfu
 
+fu! s:Refresh_cache(force)
+	" Do we need to update the tree or is cache still valid?
+	" Get Vim's undo tree to support freshness check, and if necessary, to serve
+	" as basis of new tree.
+	" TODO: Could avoid checking undotree() in some cases if we monitored
+	" BufEnter on the parent.
+	" Rationale: Buffer can be changed only when user visits it.
+	let v_ut = undotree()
+	if empty(s:undo_cache) || a:force || s:undo_cache.tree.meta.seq_last != v_ut.seq_last
+		let tree = s:Make_undo_tree(v_ut)
+		" TODO: Thinking I may no longer need tree returned, now that positions are
+		" stored on b:undo_tree.
+		let [ptree, extent] = s:Design(tree)
+		let geom = s:Build_tree_display(tree, extent)
+		" Now build highlighting object.
+		let syn = s:Make_syn_tree(geom.geom)
+		" Cache what we've built.
+		let s:undo_cache = {
+			\ 'dirty': 1,
+			\ 'tree': tree,
+			\ 'geom': geom,
+			\ 'syn': syn
+		\ }
+		let g:uc = s:undo_cache
+	endif
+endfu
+
 " This one's tied to mapping or command for opening undo on current buffer.
-fu! s:Open_undo_window() " entry
+fu! s:Open_undo_window(...) " entry
 	if !s:Is_valid_parent()
 		echoerr "Can't display undo tree for this buffer."
 		return
 	endif
+	let splithow = a:0 ? a:1 : ''
 	" Cancel any pending delete of child buffer we're about to re-use.
 	call s:Cancel_action('Delete_children')
 	let p_bnr = bufnr('%')
@@ -1479,7 +1601,12 @@ fu! s:Open_undo_window() " entry
 		" Find out whether it's even possible that child's contents are valid.
 		let contents_invalid = !s:Is_child_configured()
 	endif
-	call s:Prepare_child(contents_invalid)
+	" Make sure cache is up-to-date.
+	call s:Refresh_cache(0)
+	" TODO: Consider whether Prepare_child's tab reusal logic should consider
+	" old parent or only new. For now, just consider new: wouldn't want to close
+	" last window on old parent.
+	call s:Prepare_child(contents_invalid, splithow)
 	" Everything should be in order now with the 2 windows.
 	call s:Refresh_undo_window(contents_invalid)
 endfu
@@ -1501,43 +1628,14 @@ fu! s:Refresh_undo_window(contents_invalid)
 		echomsg "Warning: Cannot refresh undo buffer with no associated parent."
 		return
 	endif
-	" Make sure we're in parent buffer.
-	call s:Goto_win(bufwinnr(s:bufnr))
-	" Get Vim's undo tree to support freshness check, and if necessary, to serve
-	" as basis of new tree.
-	" TODO: Could avoid checking undotree() in some cases if we monitored
-	" BufEnter on the parent.
-	" Rationale: Buffer can be changed only when user visits it.
-	let v_ut = undotree()
 	" We want to move to the window even if it's up to date.
 	call s:Goto_win(bufwinnr(s:undo_bufnr))
 
-	" TODO: Consider factoring the following if block out so that it can be
-	" called prior to window creation. In that case, we'd simply use the updated
-	" cache below... Note the contents_invalid would probably reflect whether
-	" cache had to be updated.
-	let contents_invalid = a:contents_invalid
-	" Do we need to update the tree or is cache still valid?
-	if empty(s:undo_cache) || s:undo_cache.tree.meta.seq_last != v_ut.seq_last
-		let contents_invalid = 1
-		let tree = s:Make_undo_tree(v_ut)
-		" TODO: Thinking I may no longer need tree returned, now that positions are
-		" stored on b:undo_tree.
-		let [ptree, extent] = s:Design(tree)
-		let geom = s:Build_tree_display(tree, extent)
-		" Now build highlighting object.
-		let syn = s:Make_syn_tree(geom.geom)
-		" Cache what we've built.
-		let s:undo_cache = {
-			\ 'tree': tree,
-			\ 'geom': geom,
-			\ 'syn': syn
-		\ }
-		let g:uc = s:undo_cache
-	endif
 	" Regardless of whether undo cache was valid, buffer contents may have been
 	" clobbered (e.g., by user deletion).
-	if contents_invalid
+	if a:contents_invalid || s:undo_cache.dirty
+		" TODO: Consider methodizing dirty flag (and objectizing cache).
+		let s:undo_cache.dirty = 0
 		" Replace undo buffer's contents with new tree.
 		silent %d
 		call append(0, s:undo_cache.geom.lines)
@@ -1552,56 +1650,88 @@ endfu
 
 " Parse 'splitwin' opt.
 " Format: comma-separated list of h, v, t components: e.g.,
-" h10-20j,v20%-40%L,t10-10h
-" h20l,v20%-40%L,t10-10h
+" h10-20b,v20%-40%L,t10-10r
+" h20l,v20%-40%L,t10-10r
 fu! s:Parse_split_opt(opt)
     let ret = {
-	\ 'h': {'size': [10, 50], 'pct': [1, 1], 'side': 'b', 'full': 0},
-	\ 'v': {'size': [10, 50], 'pct': [1, 1], 'side': 'l', 'full': 0},
-	\ 't': {'size': [10, 60], 'pct': [1, 1], 'side': 'b', 'tabpos': '+'}}
+	\ 'h': {'type': 'h', 'size': [10, 50], 'pct': [1, 1], 'side': 'b'},
+	\ 'v': {'type': 'v', 'size': [10, 50], 'pct': [1, 1], 'side': 'l'},
+	\ 't': {'type': 't', 'size': [10, 60], 'pct': [1, 1], 'side': 'b', 'tabpos': '+'}}
     " 1=split-type, 2=min-or-only, 3=[%], [4=max, 5=[%]], 6=side, 7=tabpos
+	" Note: This regex disallows 0%
+	" Rationale: 0 is valid only as special unconstrained indicator.
     let re = '\([hvt]\)'
-	    \ . '\(0\|[1-9][0-9]*\)\(%\)\?'
-	    \ . '\%(-\%(\(0\|[1-9][0-9]*\)\(%\)\?\)\)\?'
+	    \ . '\(0\|[1-9][0-9]*\(%\)\?\)'
+	    \ . '\%(-\%(\(0\|[1-9][0-9]*\(%\)\?\)\)\)\?'
 	    \ . '\([albrALBR]\)'
 	    \ . '\([-+^$]\)\?'
     " Design Decision: Whitespace has no meaning in opt string, so just strip.
     for spec in split(substitute(a:opt, '\s\+', '', 'g'), ',')
-	let ml = matchlist(spec, re)
-	if empty(ml)
-	    echomsg "Warning: Ignoring invalid option 'splitwin' option: `"
-		\ . spec . "'"
-	    continue
-	endif
-	let [_, hvt, min, minpct, max, maxpct, side, tabpos; rest] = ml
-	let el = {}
-	if empty(max)
-	    let el.size = str2nr(min)
-	    let el.pct = !empty(minpct)
-	else
-	    let el.size = [str2nr(min), str2nr(max)]
-	    let el.pct = [!empty(minpct), !empty(maxpct)]
-	endif
-	let el.side = tolower(side)
-	if hvt == 't'
-	    let el.tabpos = tabpos
-	else
-	    let el.full = side =~ '\u'
-	    if !empty(tabpos)
-		" Reject the invalid entry.
-		echomsg "Warning: Ignoring invalid 'splitwin' component: tab pos modifier"
-		    \ . " in non-tab component: `"
-		    \ . spec . "'"
-		continue
-	    endif
-	endif
-	let ret[hvt] = el
+		let ml = matchlist(spec, re)
+		if empty(ml)
+			echomsg "Warning: Ignoring invalid 'splitwin' option: `"
+			\ . spec . "'"
+			continue
+		endif
+		let [_, hvt, min, minpct, max, maxpct, side, tabpos; rest] = ml
+		let el = {}
+		if empty(max)
+			let el.size = str2nr(min)
+			let el.pct = !empty(minpct)
+		else
+			let [min, max] = [str2nr(min), str2nr(max)]
+			" Make sure ranges are rational. (Keep in mind that 0 is always valid as
+			" 'unconstrained' indicator.)
+			if min && max && min > max
+				echomsg "Warning: Ignoring invalid 'splitwin' component:"
+					\ . " range min > range max: `" . spec . "'"
+				continue
+			endif
+			let el.size = [min, max]
+			let el.pct = [!empty(minpct), !empty(maxpct)]
+		endif
+		let el.side = tolower(side)
+		let el.type = hvt
+		if hvt == 't'
+			" Default to opening tabs after current tab.
+			let el.tabpos = empty(tabpos) ? '+' : tabpos
+		else
+			" non-tab type
+			if !empty(tabpos)
+				" Reject the invalid entry.
+				echomsg "Warning: Ignoring invalid 'splitwin' component:"
+					\ . " tab pos modifier in non-tab component: `" . spec . "'"
+				continue
+			endif
+			" Validate side values against type.
+			if hvt == 'h' && side !~? '[ab]' || hvt == 'v' && side !~? '[lr]'
+				echomsg "Warning: Ignoring invalid 'splitwin' component:"
+					\ . " invalid 'side' modifier: `" . spec . "'"
+				continue
+			endif
+
+		endif
+		let ret[hvt] = el
     endfor
     return ret
 endfu
 
+fu! s:Get_splitinfo(splithow)
+	let si = s:Parse_split_opt(
+		\ exists('g:undotree_splitwin') ? g:undotree_splitwin : '')
+	" TODO: Don't hardcode 'h' as default.
+	let splithow = !empty(a:splithow)
+		\ ? a:splithow
+		\ : exists('g:undotree_splithow') ? g:undotree_splithow : 'h'
+	return si[splithow]
+endfu
+
+
 " Global mappings
 nnoremap <silent> <leader>u :call <SID>Open_undo_window()<CR>
+nnoremap <silent> <leader>hu :call <SID>Open_undo_window('h')<CR>
+nnoremap <silent> <leader>vu :call <SID>Open_undo_window('v')<CR>
+nnoremap <silent> <leader>tu :call <SID>Open_undo_window('t')<CR>
 
 fu! s:Test_only()
 	let xs = S_Cons("baz", {})
