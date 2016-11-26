@@ -985,10 +985,17 @@ fu! s:Unconfigure_parent()
 	let s:undo_cache = {}
 endfu
 
-fu! s:Unconfigure_child()
+fu! s:Unconfigure_child(bnr)
 	" Remove the child autocommands.
 	au! undo_tree_child
-	" TODO: Perhaps also remove mappings.
+	" Caveat!: Cannot assume we'll be in child, as BufWinLeave autocmd doesn't
+	" guarantee it.
+	" Note: Though Is_child_configured checks only for autocmds, might be nice
+	" to remove <buffer> mappings as well, but :mapclear doesn't support the
+	" <buffer=N> form, and we can't guarantee we're in the child buffer. In any
+	" event, we're safe, since child mappings check for existence of active
+	" parent; moreover, when parent buffer leaves its last window, we do a
+	" deferred :bdelete of the child, which does remove maps.
 endfu
 
 " Goto specified window.
@@ -1032,17 +1039,17 @@ endfu
 fu! s:Create_mappings_in_child()
 	" Create buffer-local mapping(s)
 	" To refresh the tree forcibly
-	nnoremap <silent> <buffer> <leader>r :call <SID>Refresh_child()
+	nnoremap <silent> <nowait> <buffer> R :call <SID>Refresh_child()<CR>
 
 	" Moving up/down and changing undo/redo path through tree.
 	" Design Decision: No reason to avoid using regular Vim motion commands.
 	" Rationale: Cursor movement is highly constrained.
-	nnoremap <silent> <buffer> k :call <SID>Move_in_tree('up')<CR>
-	nnoremap <silent> <buffer> j :call <SID>Move_in_tree('down')<CR>
-	nnoremap <silent> <buffer> h :call <SID>Move_in_tree('left')<CR>
-	nnoremap <silent> <buffer> l :call <SID>Move_in_tree('right')<CR>
-	nnoremap <silent> <buffer> c :call <SID>Center_tree(1)<CR>
-	nnoremap <silent> <buffer> g :<C-U>call <SID>Goto_node_in_tree()<CR>
+	nnoremap <silent> <nowait> <buffer> k :call <SID>Move_in_tree('up')<CR>
+	nnoremap <silent> <nowait> <buffer> j :call <SID>Move_in_tree('down')<CR>
+	nnoremap <silent> <nowait> <buffer> h :call <SID>Move_in_tree('left')<CR>
+	nnoremap <silent> <nowait> <buffer> l :call <SID>Move_in_tree('right')<CR>
+	nnoremap <silent> <nowait> <buffer> C :call <SID>Center_tree(1)<CR>
+	nnoremap <silent> <nowait> <buffer> G :<C-U>call <SID>Goto_node_in_tree()<CR>
 endfu
 
 fu! s:Create_syntax_in_child()
@@ -1211,8 +1218,7 @@ fu! s:Parent_BufWinLeave(bnr)
 	endif
 endfu
 fu! s:Child_BufWinLeave(bnr)
-	silent %d
-	call s:Unconfigure_child()
+	call s:Unconfigure_child(a:bnr)
 endfu
 
 " Called From: child buffer BufDelete autocmd
@@ -1233,9 +1239,10 @@ fu! s:Child_BufEnter()
 	" this case, parent will not have a window, and the child buffer will be
 	" queued for hiding.
 	if p_wnr > 0
-		" Invoke non-forced refresh.
-		call s:Refresh_cache(0)
-		call s:Refresh_undo_window(0)
+		call s:Goto_win(p_wnr)
+		" Invoke non-forced refresh, with content validity determined solely by
+		" the call to s:Refresh_cache.
+		call s:Refresh_undo_window(s:Refresh_cache(0))
 		call s:Configure_cursor_in_child()
 	endif
 endfu
@@ -1536,15 +1543,22 @@ fu! s:Refresh_child() " entry
 	" intentionally opens unlisted undo buffer).
 	" TODO: Consider removing the child autocmds and mappings when the child is
 	" hidden. Could populate them only when undo buffer is opened.
-	if s:bufnr < 0 || bufwinnr(s:bufnr) < 0
+	let p_wnr = bufwinnr(s:bufnr)
+	if s:bufnr < 0 || p_wnr < 0
 		echomsg "Warning: Cannot refresh undo buffer with no associated parent."
 		return
 	endif
 	" There's a visible and active parent. Forcibly refresh
+	call s:Goto_win(p_wnr)
 	call s:Refresh_cache(1)
 	call s:Refresh_undo_window(1)
 endfu
 
+" TODO: Bugfix needed: Currently, this isn't always being called from the
+" parent, and it doesn't move to the parent. Either make it move to the parent,
+" or...
+" Assumption: Called from parent with undo cache valid
+" Return: nonzero if cache is rebuilt.
 fu! s:Refresh_cache(force)
 	" Do we need to update the tree or is cache still valid?
 	" Get Vim's undo tree to support freshness check, and if necessary, to serve
@@ -1570,7 +1584,10 @@ fu! s:Refresh_cache(force)
 		\ }
 		" TODO: Remove this...
 		let g:uc = s:undo_cache
+		" Let caller know cache has been changed.
+		return 1
 	endif
+	return 0
 endfu
 
 " This one's tied to mapping or command for opening undo on current buffer.
@@ -1599,7 +1616,9 @@ fu! s:Open_undo_window(...) " entry
 		let contents_invalid = !s:Is_child_configured()
 	endif
 	" Make sure cache is up-to-date.
-	call s:Refresh_cache(0)
+	" Caveat: Intentionally *not* short-circuiting call to s:Refresh_cache.
+	" (Vim doesn't have a ||= operator...)
+	let contents_invalid = s:Refresh_cache(0) || contents_invalid
 	" TODO: Consider whether Prepare_child's tab reusal logic should consider
 	" old parent or only new. For now, just consider new: wouldn't want to close
 	" last window on old parent. To consider old, we'd need to pass it to
