@@ -1052,9 +1052,37 @@ fu! s:Create_mappings_in_child()
 	nnoremap <silent> <nowait> <buffer> G :<C-U>call <SID>Goto_node_in_tree()<CR>
 endfu
 
+" Return string like ` ctermfg=<cterm_clr> guifg=<gui_clr>', taking
+" 'path_hlgroup' option into account, defaulting to an appropriate default
+" highlight group.
+fu! s:Get_undoredo_path_color_attrs()
+	let [ret, gid] = ['', 0]
+	if exists('g:undotree_path_hlgroup')
+		" Assumption: synIDtrans can handle 0
+		let gid = synIDtrans(hlID(g:undotree_path_hlgroup))
+	endif
+	if !gid
+		" Default to one of Vim's default highlight groups.
+		let gid = synIDtrans(hlID('Title'))
+	endif
+	if gid
+		" Design Decision: Could just let mode default to whatever's active, but
+		" I like setting both ctermfg= and guifg=.
+		for mode in ['cterm', 'gui']
+			let clr = synIDattr(gid, 'fg')
+			if !empty(clr)
+				let ret .= ' ' . mode . 'fg=' . clr
+			endif
+		endfor
+	endif
+	return ret
+endfu
+
 fu! s:Create_syntax_in_child()
-	" TODO: Could do this once up front.
-	hi undo_redo_path gui=bold cterm=bold term=bold guifg=blue ctermfg=Blue
+	" Design Decision: Could do this once up front, but re-doing it is cheap,
+	" and allows changes to g:undotree_path_hlgroup to be taken into account.
+	exe 'hi undo_redo_path gui=bold cterm=bold term=bold'
+		\ .	s:Get_undoredo_path_color_attrs()
 endfu
 
 " Object to hold saved option settings for save/restore mechanism.
