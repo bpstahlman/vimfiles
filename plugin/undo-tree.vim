@@ -1598,6 +1598,9 @@ fu! s:Refresh_child() " entry
 	" There's a visible and active parent. Forcibly refresh
 	call s:Goto_win(p_wnr)
 	call s:Refresh_cache(1)
+	" TODO: Decide whether to force the window refresh, or only the cache
+	" refresh: i.e., if cache was up to date, perhaps we should pass 0 here...
+	" Note: Has implications for centering tree...
 	call s:Refresh_undo_window(1)
 endfu
 
@@ -1711,6 +1714,7 @@ fu! s:Refresh_undo_window(contents_invalid)
 		" TODO: Remove this...
 		let g:uc = s:undo_cache
 		call s:undo_cache.syn.Update(s:undo_cache.tree.cur)
+		call s:Center_tree(1)
 	endif
 
 endfu
