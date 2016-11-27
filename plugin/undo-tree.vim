@@ -35,9 +35,21 @@ fu! s:Show_undo_tree()
 
 	call s:Recurse_tree(t.entries, 0)
 endfu
-" TODO: Use this in tree display building.
+
+" Return the leaf node at end of current redo path.
+fu! s:Node_get_leaf() dict
+	let t = self
+	while !empty(t.children.cur)
+		let t = t.children.cur
+	endwhile
+	return t
+endfu
+
+" TODO: Add arg that selects between detailed and non-detailed display.
 fu! s:Node_get_geom() dict
 	let w = len(self.seq) + 2
+	" Design Decision: The -1 ensures that when len is even, we center on
+	" the last char in the left half, not first in right.
 	let xs = -(w - 1) / 2
 	let xe = xs + w - 1
 	return {'w': w, 'e': [xs, xe]}
@@ -73,6 +85,7 @@ fu! s:Make_node(e, parent, lvl)
 		\,'prev': {}
 		\,'next': {}
 		\,'parent': a:parent
+		\,'Get_leaf': function('s:Node_get_leaf')
 		\,'Get_geom': function('s:Node_get_geom')
 		\,'Make_current': function('s:Node_make_current')
 		\}
@@ -91,7 +104,9 @@ fu! s:Make_root(tree, ...)
 	let ret.cur = {}
 	" Note: No inheritance forces kludgy stuff like this.
 	" TODO: Consider better way.
+	let ret.Get_leaf = function('s:Node_get_leaf')
 	let ret.Get_geom = function('s:Node_get_geom')
+	let ret.Make_current = function('s:Node_make_current')
 	return ret
 endfu
 fu! s:Insert_sorted(ls, o)
@@ -266,11 +281,11 @@ endfu
 " Note: If one array is shorter than the other, missing elements are {}.
 " List implementation:
 " {'el': <element1>, 'next': {'el': <element2>, 'next': {...'next': {}
-fu! S_Cons(val, xs)
+fu! s:Cons(val, xs)
 	return {'el': a:val, 'next': a:xs}
 endfu
 " Note: Best when you maintain pointer to final element of list.
-fu! S_Conc(val, xs)
+fu! s:Conc(val, xs)
 	let x = a:xs
 	while !empty(x)
 		let x = x.next
@@ -280,37 +295,37 @@ fu! S_Conc(val, xs)
 	" Return new tail el
 	return x
 endfu
-fu! S_Set_cdr(val, cons)
+fu! s:Set_cdr(val, cons)
 	let a:cons.next = {'el': a:val, 'next': {}}
 	return a:cons.next
 endfu
-fu! S_Foldl(f, acc, xs)
+fu! s:Foldl(f, acc, xs)
 	" Note: Take type of xs into account, handling both arrays and lists.
 	" TODO: More efficient way than converting to list.
-	let [x, acc] = [type(a:xs) == 3 ? S_To_list(a:xs) : a:xs, a:acc]
+	let [x, acc] = [type(a:xs) == 3 ? s:To_list(a:xs) : a:xs, a:acc]
 	while !empty(x)
 		let acc = a:f(acc, x.el)
 		let x = x.next
 	endwhile
 	return acc
 endfu
-fu! S_To_list(ary)
+fu! s:To_list(ary)
 	let ret = {}
 	let tail = ret
 	for x in a:ary
-		let tail = S_Conc(x, tail)
+		let tail = s:Conc(x, tail)
 	endfor
 	return ret
 endfu
-fu! S_Reverse(xs)
+fu! s:Reverse(xs)
 	let [x, ret] = [a:xs, {}]
 	while !empty(x)
-		let ret = S_Cons(x.el, ret)
+		let ret = s:Cons(x.el, ret)
 		let x = x.next
 	endwhile
 	return ret
 endfu
-fu! S_Map(f, xs)
+fu! s:Map(f, xs)
 	let [x, ret] = [a:xs, {}]
 	" Note: tail will advance, ret will not.
 	let tail = ret
@@ -318,12 +333,12 @@ fu! S_Map(f, xs)
 		let val = call(a:f, [x.el])
 		" Note: Something tricky's going on here: ret and tail will be
 		" equivalent after first iteration only.
-		let tail = S_Conc(val, tail)
+		let tail = s:Conc(val, tail)
 		let x = x.next
 	endwhile
 	return ret
 endfu
-fu! S_Zip(xs, ys, ...)
+fu! s:Zip(xs, ys, ...)
 	let [x, y, ret] = [a:xs, a:ys, {}]
 	let discard_unmatched = a:0 && a:1
 	let tail = ret
@@ -332,18 +347,18 @@ fu! S_Zip(xs, ys, ...)
 			" Special case: Certain applications don't need unmatched elements.
 			break
 		endif
-		let tail = S_Conc([empty(x) ? {} : x.el, empty(y) ? {} : y.el], tail)
+		let tail = s:Conc([empty(x) ? {} : x.el, empty(y) ? {} : y.el], tail)
 		if !empty(x) | let x = x.next | endif
 		if !empty(y) | let y = y.next | endif
 	endwhile
 	return ret
 endfu
-fu! S_Unzip(xs)
+fu! s:Unzip(xs)
 	let [x, ret] = [a:xs, [{}, {}]]
 	let tail = [ret[0], ret[1]]
 	while !empty(x)
-		let tail[0] = S_Conc(x.el[0], tail[0])
-		let tail[1] = S_Conc(x.el[1], tail[1])
+		let tail[0] = s:Conc(x.el[0], tail[0])
+		let tail[1] = s:Conc(x.el[1], tail[1])
 		let x = x.next
 	endwhile
 	return ret
@@ -362,7 +377,7 @@ fu! s:Move_tree_fn(tree_pos)
 		\ 'ptrees': a:tree_pos[0].ptrees}
 endfu
 
-" Note: Meant to be used with S_Map
+" Note: Meant to be used with s:Map
 fu! s:Move_extent_fn(dx, e_el)
 	return [a:e_el[0] + a:dx,  a:e_el[1] + a:dx]
 endfu
@@ -371,7 +386,7 @@ fu! s:Move_extent(arg, ...)
 	" contained in an array.
 	let [e, dx] = a:0 ? [a:arg, a:1] : [a:arg[0], a:arg[1]]
 	" Create a partial that passes dx as first arg.
-	return S_Map(function('s:Move_extent_fn', [dx]), e)
+	return s:Map(function('s:Move_extent_fn', [dx]), e)
 endfu
 
 fu! s:Merge_fn(e_pair)
@@ -379,12 +394,12 @@ fu! s:Merge_fn(e_pair)
 		\ empty(a:e_pair[0]) ? a:e_pair[1][0] : a:e_pair[0][0],
 		\ empty(a:e_pair[1]) ? a:e_pair[0][1] : a:e_pair[1][1]]
 endfu
-fu! S_Merge(e1, e2)
-	return S_Map(function('s:Merge_fn'), S_Zip(a:e1, a:e2))
+fu! s:Merge(e1, e2)
+	return s:Map(function('s:Merge_fn'), s:Zip(a:e1, a:e2))
 endfu
 
 fu! s:Merge_list(es)
-	return S_Foldl(function('S_Merge'), {}, a:es)
+	return s:Foldl(function('s:Merge'), {}, a:es)
 endfu
 
 
@@ -397,36 +412,22 @@ fu! s:Fit_fn(max, e_pair)
 	return d > a:max ? d : a:max
 endfu
 fu! s:Fit(e1, e2)
-	return S_Foldl(function('s:Fit_fn'), 0, S_Zip(a:e1, a:e2, 1))
-
-	"let ret = 0
-	"" Note: Use min() in lieu of max() since unmatched levels aren't constrained
-	"" by neighboring child.
-	"let [n1, n2, n] = [len(a:e1), len(a:e2), min(nx, ny)]
-	"let i = 0
-	"while i < n
-	"	" TODO: Make min separation (1) configurable? At least, don't hard-code.
-	"	let d = a:e1[i][1] - a:e2[i][0] + 1
-	"	if d > ret
-	"		let ret = d
-	"	endif
-	"endwhile
-	"return ret
+	return s:Foldl(function('s:Fit_fn'), 0, s:Zip(a:e1, a:e2, 1))
 endfu
 " Caveat: Vim doesn't do TCO, so implement both left and right folds without
 " recursion.
 fu! s:Fitlistl_fn(acc, e)
 	let [tail, acc] = a:acc
 	let dx = s:Fit(acc, a:e)
-	let tail = S_Conc(dx, tail)
-	let acc = S_Merge(acc, s:Move_extent(a:e, dx))
+	let tail = s:Conc(dx, tail)
+	let acc = s:Merge(acc, s:Move_extent(a:e, dx))
 	return [tail, acc]
 endfu
 fu! s:Fitlistl(es)
 	let ret = {}
 	let tail = ret
-	let es = type(a:es) == 3 ? S_To_list(a:es) : a:es
-	call S_Foldl(function('s:Fitlistl_fn'), [tail, {}], es)
+	let es = type(a:es) == 3 ? s:To_list(a:es) : a:es
+	call s:Foldl(function('s:Fitlistl_fn'), [tail, {}], es)
 	return ret
 endfu
 fu! s:Negate_fn(val)
@@ -436,7 +437,7 @@ fu! s:Flip_extent_fn(e_el)
 	return [-a:e_el[1], -a:e_el[0]]
 endfu
 fu! s:Flip_extent(e)
-	return S_Map(function('s:Flip_extent_fn'), a:e)
+	return s:Map(function('s:Flip_extent_fn'), a:e)
 endfu
 
 " TODO: Consider whether it's better to implement in terms of Fitlistl, or to
@@ -444,12 +445,12 @@ endfu
 " TODO: Pick up here... Still implement in terms of Fitlistl?
 " TODO: Test this one...
 fu! s:Fitlistr(es)
-	let es = type(a:es) == 3 ? S_To_list(a:es) : a:es
-	let es = S_Reverse(es)
-	let es = S_Map(function('s:Flip_extent'), es)
+	let es = type(a:es) == 3 ? s:To_list(a:es) : a:es
+	let es = s:Reverse(es)
+	let es = s:Map(function('s:Flip_extent'), es)
 	let es = s:Fitlistl(es)
-	let es = S_Map(function('s:Negate_fn'), es)
-	let es = S_Reverse(es)
+	let es = s:Map(function('s:Negate_fn'), es)
+	let es = s:Reverse(es)
 	return es
 endfu
 
@@ -459,7 +460,7 @@ endfu
 
 fu! s:Fitlist(es)
 	" Note: Avoid extra function call to s:Mean.
-	return S_Map(function('s:Mean_fn'), S_Zip(s:Fitlistl(a:es), s:Fitlistr(a:es)))
+	return s:Map(function('s:Mean_fn'), s:Zip(s:Fitlistl(a:es), s:Fitlistr(a:es)))
 endfu
 
 fu! s:Design(t)
@@ -469,18 +470,18 @@ fu! s:Design(t)
 	let tc = a:t.children.fst
 	while !empty(tc)
 		let [tree, extent] = s:Design(tc)
-		let trees_tail = S_Conc(tree, trees_tail)
-		let extents_tail = S_Conc(extent, extents_tail)
+		let trees_tail = s:Conc(tree, trees_tail)
+		let extents_tail = s:Conc(extent, extents_tail)
 		let tc = tc.next
 	endwhile
 	let positions = s:Fitlist(extents)
-	let ptrees = S_Map(function('s:Move_tree_fn'), S_Zip(trees, positions))
-	let pextents = S_Map(function('s:Move_extent'), S_Zip(extents, positions))
+	let ptrees = s:Map(function('s:Move_tree_fn'), s:Zip(trees, positions))
+	let pextents = s:Map(function('s:Move_extent'), s:Zip(extents, positions))
 	" Note: Leave space for surrounding [...]
 	" TODO: Perhaps methodize getting label text/size somehow.
 	let w = len(a:t.seq) + 2
 	let e = [-w/2, w/2 + w%2]
-	let resultextent = S_Cons(e, s:Merge_list(pextents))
+	let resultextent = s:Cons(e, s:Merge_list(pextents))
 	" TODO: Consider a cleaner way to put x on the actual node. Perhaps in a
 	" later stage?
 	let a:t.x = 0
@@ -594,13 +595,14 @@ endfu
 " Special function used to generate accumulator in a fold over a list of
 " extents.
 " Accumulator is a list of 2 elements:
-"   largest negative offset (used to calculate bias)
-"   width of tree
-fu! s:Extent_bias_width_fn(acc, e_el)
-	let [bias, w] = [abs(a:e_el[0]), a:e_el[1] - a:e_el[0] + 1]
+"   largest negative offset
+"   largest positive offset
+" Note: The result may be used to calculate bias and overall tree width.
+fu! s:Extent_minmax_fn(acc, e_el)
+	let [min, max] = [a:e_el[0], a:e_el[1]]
 	return [
-		\ bias > a:acc[0] ? bias : a:acc[0],
-		\ w > a:acc[1] ? w : a:acc[1]]
+		\ min < a:acc[0] ? min : a:acc[0],
+		\ max > a:acc[1] ? max : a:acc[1]]
 endfu
 
 fu! s:Build_tree_display(tree, extent)
@@ -610,7 +612,8 @@ fu! s:Build_tree_display(tree, extent)
 	" Note: Can't really apply the bias in the tree itself since the x values in
 	" tree are relative to parent. We *could* store absolute positions in the
 	" tree, but I don't really like that.
-	let [x, w] = S_Foldl(function('s:Extent_bias_width_fn'), [0, 0], a:extent)
+	let [xmin, xmax] = s:Foldl(function('s:Extent_minmax_fn'), [0, 0], a:extent)
+	let [x, w] = [abs(xmin), xmax - xmin + 1]
 	" Breadth-first traversal
 	" Fifo elements: [<node>, <absolute-parent_x>, <lvl>]
 	let fifo = [[a:tree, x, 0]]
@@ -644,11 +647,11 @@ fu! s:Build_tree_display(tree, extent)
 		endwhile
 		" Process current node.
 		" Build the label, leaving space for surrounding [...].
+		" TODO: text should also be returned by Get_geom, and we need to pass
+		" arg indicating desired display mode (e.g., detailed or short).
 		let text = ' ' . t.seq . ' '
-		" TODO: Think through rounding/truncating...
-		" Design Decision: The -1 ensures that when len is even, we center on
-		" the last char in the left half, not first in right.
-		let text_x = x - (len(text) - 1) / 2
+		let gi = t.Get_geom()
+		let text_x = x + gi.e[0]
 		call lines.add(lrow, text_x, text)
 		" Draw lower vertical for all but root.
 		if !empty(t.parent)
@@ -1044,12 +1047,13 @@ fu! s:Create_mappings_in_child()
 	" Moving up/down and changing undo/redo path through tree.
 	" Design Decision: No reason to avoid using regular Vim motion commands.
 	" Rationale: Cursor movement is highly constrained.
-	nnoremap <silent> <nowait> <buffer> k :call <SID>Move_in_tree('up')<CR>
-	nnoremap <silent> <nowait> <buffer> j :call <SID>Move_in_tree('down')<CR>
-	nnoremap <silent> <nowait> <buffer> h :call <SID>Move_in_tree('left')<CR>
-	nnoremap <silent> <nowait> <buffer> l :call <SID>Move_in_tree('right')<CR>
-	nnoremap <silent> <nowait> <buffer> C :call <SID>Center_tree(1)<CR>
-	nnoremap <silent> <nowait> <buffer> G :<C-U>call <SID>Goto_node_in_tree()<CR>
+	nnoremap <silent> <nowait> <buffer> k  :call <SID>Move_in_tree('up')<CR>
+	nnoremap <silent> <nowait> <buffer> j  :call <SID>Move_in_tree('down')<CR>
+	nnoremap <silent> <nowait> <buffer> h  :call <SID>Move_in_tree('left')<CR>
+	nnoremap <silent> <nowait> <buffer> l  :call <SID>Move_in_tree('right')<CR>
+	nnoremap <silent> <nowait> <buffer> C  :call <SID>Center_tree(1)<CR>
+	nnoremap <silent> <nowait> <buffer> G  :<C-U>call <SID>Goto_node_in_tree(0)<CR>
+	nnoremap <silent> <nowait> <buffer> gg :<C-U>call <SID>Goto_node_in_tree(1)<CR>
 endfu
 
 " Return string like ` ctermfg=<cterm_clr> guifg=<gui_clr>', taking
@@ -1514,27 +1518,42 @@ endfu
 
 " Goto (and center on) the node whose seq number user supplied as count to a
 " mapping.
-fu! s:Goto_node_in_tree()
+fu! s:Goto_node_in_tree(root_is_default)
 	" Note: You can't supply 0 as a count, but a user may want to go to the root
-	" node. This is ok: if he omits the count, v:count will be 0.
+	" node. Also, there are 2 different maps that invoke this function, and
+	" they should produce different behavior when invoked without count:
+	" gg => root
+	" G  => end of redo path
+	" Note: When count is omitted, v:count will be 0.
 	let seq = v:count
-	" Get the node, bearing in mind that there's not guarantee it exists.
-	let gnode = has_key(s:undo_cache.geom.geom.nodes, seq)
-		\ ? s:undo_cache.geom.geom.nodes[seq] : {}
-	if empty(gnode)
-		echomsg "Warning: Node " . seq . " does not exist."
-		return
+	if !seq
+		if a:root_is_default
+			let node = s:undo_cache.tree
+		else
+			" Default to leaf node at end of current redo path.
+			let node = s:undo_cache.tree.cur.Get_leaf()
+		endif
+	else
+		" Get the node, bearing in mind that there's no guarantee it exists.
+		let gnode = has_key(s:undo_cache.geom.geom.nodes, seq)
+			\ ? s:undo_cache.geom.geom.nodes[seq] : {}
+		if empty(gnode)
+			echomsg "Warning: Node " . seq . " does not exist."
+			return
+		endif
+		let node = gnode.node
 	endif
+
 	" Node exists: make it current
-	let s:undo_cache.tree.cur = gnode.node
+	let s:undo_cache.tree.cur = node
 	" Alter the undo-redo path to include it.
-	call gnode.node.Make_current()
+	call node.Make_current()
 	" Accomplish the change in the actual buffer.
-	call s:Undo_to(gnode.node.seq)
+	call s:Undo_to(node.seq)
 	" Center on the new current node.
-	call s:Center_tree(1, gnode.node.seq)
+	call s:Center_tree(1, node.seq)
 	" Update display.
-	call s:undo_cache.syn.Update(gnode.node)
+	call s:undo_cache.syn.Update(node)
 	" Output summary of current change.
 	call s:Describe_node()
 
@@ -1684,6 +1703,9 @@ fu! s:Refresh_undo_window(contents_invalid)
 		" Replace undo buffer's contents with new tree.
 		silent %d
 		call append(0, s:undo_cache.geom.lines)
+		" Append adds a final blank line, which serves no purpose, and which we
+		" don't want to impact window sizing, so delete it.
+		$d
 		" Now do highlighting
 		call s:undo_cache.syn.Clear()
 		" TODO: Remove this...
@@ -1779,28 +1801,28 @@ nnoremap <silent> <leader>vu :call <SID>Open_undo_window('v')<CR>
 nnoremap <silent> <leader>tu :call <SID>Open_undo_window('t')<CR>
 
 fu! s:Test_only()
-	let xs = S_Cons("baz", {})
-	let xs = S_Cons("bar", xs)
-	let xs = S_Cons("foo", xs)
-	let xs_upper = S_Map(function('toupper'), xs)
-	let xs_rev = S_Reverse(xs)
-	let xs_zipped = S_Zip(xs_upper, xs_rev)
-	let xs_zswapped = S_Map(function('s:Swap_tuple_fn'), xs_zipped)
-	let xs_unzipped = S_Unzip(xs_zswapped)
+	let xs = s:Cons("baz", {})
+	let xs = s:Cons("bar", xs)
+	let xs = s:Cons("foo", xs)
+	let xs_upper = s:Map(function('toupper'), xs)
+	let xs_rev = s:Reverse(xs)
+	let xs_zipped = s:Zip(xs_upper, xs_rev)
+	let xs_zswapped = s:Map(function('s:Swap_tuple_fn'), xs_zipped)
+	let xs_unzipped = s:Unzip(xs_zswapped)
 	let es = [[
 			\ [1, 3], [-1, 4], [8, 10]], [
 			\ [4, 5], [5, 8],  [10, 14], [9, 11]], [
 			\ [6, 9], [8, 9],  [15, 19], [11, 16]]]
-	let es = map(es, 'S_To_list(v:val)')
-	let em = S_Merge(es[0], es[1])
-	let em = S_Merge(em, es[2])
+	let es = map(es, 's:To_list(v:val)')
+	let em = s:Merge(es[0], es[1])
+	let em = s:Merge(em, es[2])
 	let em2 = s:Merge_list(es)
 	let em_moved = s:Move_extent(em2, 100)
 	let es2 = [[
 			\ [-3, 3], [-4, 5], [-7, 6]], [
 			\ [-2, 5], [-1, 6],  [-5, 14], [-3, 11]], [
 			\ [-5, 4], [-4, 5],  [-2, 15], [-1, 16]]]
-	let es2 = map(es2, 'S_To_list(v:val)')
+	let es2 = map(es2, 's:To_list(v:val)')
 	let e_fit01 = s:Fit(es2[0], es2[1])
 	let e_fit12 = s:Fit(es2[1], es2[2])
 	let e_fitlistl = s:Fitlistl(es2)
