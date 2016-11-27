@@ -1028,11 +1028,10 @@ fu! s:Create_autocmds_in_parent()
 endfu
 
 " Called From: buffer being considered as candidate parent
+" Return nonzero iff we can open an undo buffer for current buffer.
 fu! s:Is_valid_parent()
 	" TODO More checks? E.g., 'buftype', etc...?
-	" Question: Any way to use undotree() for this test? E.g., do nofile buffers
-	" have undo trees?
-	return &modifiable
+	return &modifiable && bufnr('%') != s:undo_bufnr
 endfu
 
 fu! s:Configure_parent()
