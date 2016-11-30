@@ -1201,24 +1201,34 @@ fu! s:Delete_children()
 	exe 'bd ' . s:undo_bufnr
 endfu
 
-" Hide all occurrences of child buffer in current tab.
-" Assumption: Caller is about to show child in deterministic location, so this
-" function must take care not to trigger BufWinLeave.
-" TODO: Consider making this a 'hide all child bufs but one in specific window'
-" so we could run it *after* positioning the child window, and could drop this
-" assumption.
+" Hide all occurrences of child buffer in any tab (with the exception of a child
+" buffer that happens to be in current window). Leave cursor in the window that
+" was active on function entry.
 fu! s:Hide_children()
-	" TODO: Make this work across multiple tabs, or at least provide option.
-	let winnr = bufwinnr(s:undo_bufnr)
-	while winnr > 0
-		" Child is in a window. Attempt to hide it, noting that command will
-		" fail (harmlessly) if it's the last window.
+	let [wid_orig, tnr_cur] = [win_getid(), tabpagenr()]
+	" Get a sorted list of [tnr, wnr, wid] triples, with the triple
+	" corresponding to current window filtered out.
+	" Note: The sort by tabnr minimizes the need for jumps between tabs when
+	" closing windows.
+	" Note: Yes. That's quite a bit of trouble to avoid harmless but redundant
+	" calls to win_gotid()...
+	let triples = sort(map(filter(
+		\ win_findbuf(s:undo_bufnr), 'v:val != wid_orig'),
+		\ 'extend(win_id2tabwin(v:val), [v:val])'))
+	for [tnr, wnr, wid] in triples
+		if tnr != tnr_cur
+			" Change tab without triggering autocmds.
+			noauto call win_gotoid(wid)
+			let tnr_cur = tnr
+		endif
+		" Attempt to hide the child, noting that command will fail (harmlessly)
+		" if it's the last window.
 		" Caveat: 'noauto' modifier needed to prevent BufWinLeave firing for the
 		" child.
-		" Assumption: The hide is temporary. Caller will bring it back.
-		exe 'silent! noauto ' . winnr . 'close'
-		let winnr = bufwinnr(s:undo_bufnr)
-	endwhile
+		exe 'silent! noauto ' . wnr . 'close'
+	endfor
+	" Return to starting window.
+	noauto call win_gotoid(wid_orig)
 endfu
 
 " Design Decision: When parent buffer is no longer displayed, unconfigure parent
@@ -1273,7 +1283,7 @@ fu! s:Child_BufEnter()
 		call s:Goto_win(p_wnr)
 		" Invoke non-forced refresh, with content validity determined solely by
 		" the call to s:Refresh_cache.
-		call s:Refresh_undo_window(s:Refresh_cache(0))
+		call s:Refresh_undo_window(s:Refresh_cache(0), 0)
 		call s:Configure_cursor_in_child()
 	endif
 endfu
@@ -1338,7 +1348,7 @@ fu! s:Position_child(clear, splithow)
 		" See whether there's a tab we can re-use.
 		let tabnr = s:Get_reusable_tab()
 		if tabnr > 0
-			call s:Hide_children()
+			"call s:Hide_children()
 			" Go to the parent window in the reusable tab.
 			exe 'normal! ' . tabnr . 'gt'
 			" Note: From this point on, looks like non-tab invocation (e.g.,
@@ -1348,7 +1358,7 @@ fu! s:Position_child(clear, splithow)
 	endif
 	if si.type == 't' && tabnr < 0
 		" Create a tab at configured location and open parent in it.
-		call s:Hide_children()
+		"call s:Hide_children()
 		let tabnr = tabpagenr()
 		let tabpos = si.tabpos == '+' ? tabnr + 1 :
 			\ si.tabpos == '-' ? tabnr - 1 :
@@ -1360,7 +1370,7 @@ fu! s:Position_child(clear, splithow)
 		" Rationale: Facilitates deterministic window positioning.
 		" TODO: Decide about children displayed in other tabs. (Keep in mind that
 		" they're deleted automatically in most cases.)
-		call s:Hide_children()
+		"call s:Hide_children()
 	endif
 	" Now for the split within the tab...
 	let split_mod = si.side =~ '[al]' ? 'aboveleft' : si.side =~ '[AL]'
@@ -1376,15 +1386,20 @@ fu! s:Position_child(clear, splithow)
 		" Caveat: Wanted to wrap name in [...], but that makes Vim think it's
 		" directory.
 		exe 'silent ' . split_mod . ' new ' . cmd . expand('%') . '.undo'
-		let s:undo_bufnr = bufnr('%')
+		let [s:undo_bufnr, s:undo_winid] = [bufnr('%'), win_getid()]
 	else
 		" Note: 'noauto' modifier prevents premature attempt to refresh.
 		exe 'silent noauto ' . split_mod . ' sb' . cmd . s:undo_bufnr
+		" Bufnr remains the same, but win ID has changed.
+		let s:undo_winid = win_getid()
 		if a:clear
 			silent %d
 		endif
 	endif
-	" We're in child now.
+	" Now that we're safely in child, close all other windows containing child
+	" (across all tabs).
+	" Note: Deferring till this point avoids spurious BufWinLeave.
+	"call s:Hide_children()
 	let c_wnr = winnr()
 	" Expand the parent to occupy all available space.
 	call s:Goto_win(p_wnr)
@@ -1401,7 +1416,7 @@ fu! s:Position_child(clear, splithow)
 	" Make sur the parent's viewport hasn't changed.
 	call s:Goto_win(p_wnr)
 	call winrestview(wsv)
-	" TODO: Consider child's viewport: will we always center later?
+	" Note: Caller responsible for child's viewport.
 	call s:Goto_win(c_wnr)
 
 endfu
@@ -1600,7 +1615,7 @@ fu! s:Refresh_child() " entry
 	" TODO: Decide whether to force the window refresh, or only the cache
 	" refresh: i.e., if cache was up to date, perhaps we should pass 0 here...
 	" Note: Has implications for centering tree...
-	call s:Refresh_undo_window(1)
+	call s:Refresh_undo_window(1, 0)
 endfu
 
 " TODO: Bugfix needed: Currently, this isn't always being called from the
@@ -1674,7 +1689,7 @@ fu! s:Open_undo_window(...) " entry
 	" Prepare_child.
 	call s:Prepare_child(contents_invalid, splithow)
 	" Everything should be in order now with the 2 windows.
-	call s:Refresh_undo_window(contents_invalid)
+	call s:Refresh_undo_window(contents_invalid, 1)
 endfu
 
 " Called From: One of the following...
@@ -1683,7 +1698,7 @@ endfu
 " 3) child BufEnter autocmd
 " Assumption: Both parent and child windows are visible and data structures are
 " consistent.
-fu! s:Refresh_undo_window(contents_invalid)
+fu! s:Refresh_undo_window(contents_invalid, syntax_invalid)
 	if s:bufnr < 0 || bufwinnr(s:bufnr) < 0
 		" Note: This generally wouldn't happen because we delete the child (and
 		" therefore its autocmds) when parent is removed from last window;
@@ -1708,10 +1723,15 @@ fu! s:Refresh_undo_window(contents_invalid)
 		" Append adds a final blank line, which serves no purpose, and which we
 		" don't want to impact window sizing, so delete it.
 		$d
-		" Now do highlighting
-		call s:undo_cache.syn.Clear()
 		" TODO: Remove this...
 		let g:uc = s:undo_cache
+	endif
+	" There are times when contents are still valid, but syntax is not (e.g.,
+	" when buffer has moved to a new window); syntax is always invalid after
+	" contents have changed.
+	if a:contents_invalid || a:syntax_invalid
+		" Now do highlighting
+		call s:undo_cache.syn.Clear()
 		call s:undo_cache.syn.Update(s:undo_cache.tree.cur)
 		call s:Center_tree(1)
 	endif
