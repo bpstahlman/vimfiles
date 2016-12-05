@@ -815,6 +815,13 @@ fu! s:Update_syn_tree_node(ids, node, lvl, col)
 
 endfu
 
+" Return nonzero iff tree needs to be updated.
+" Note: No reason to introduce distinct dirty flag, since Clear() sets seq to
+" -1, and Update() sets it to valid seq number.
+fu! s:Is_syn_dirty() dict
+	return self.seq < 0
+endfu
+
 " Assumption: Called from child buffer
 fu! s:Clear_syn_tree() dict
 	let self.ids = []
@@ -927,6 +934,7 @@ fu! s:Make_syn_tree(geom)
 		\ 'ids': [],
 		\ 'seq': -1,
 		\ 'Clear': function('s:Clear_syn_tree'),
+		\ 'Is_dirty': function('s:Is_syn_dirty'),
 		\ 'Update': function('s:Update_syn'),
 		\ 'geom': a:geom
 		\ }
@@ -935,8 +943,8 @@ fu! s:Make_syn_tree(geom)
 endfu
 
 " For convenience, ensure these script-locals always exist.
-let s:bufnr = -1
-let s:undo_bufnr = -1
+let [s:bufnr, s:winid] = [-1, -1]
+let [s:undo_bufnr, s:undo_winid] = [-1, -1]
 let s:undo_cache = {}
 let s:actions = {}
 
@@ -972,7 +980,7 @@ fu! s:Do_deferred_actions()
 		unlet! s:updatetime_save
 	endif
 	for [name, args] in items(s:actions)
-		call call(function('s:' . name, args))
+		call call(function('s:' . name), args)
 	endfor
 	let s:actions = {}
 	" Make sure we're not invoked again until something else is queued.
@@ -982,30 +990,42 @@ endfu
 
 " Make the current buffer no longer the current parent.
 fu! s:Unconfigure_parent()
-	" Remove the parent autocommands.
-	au! undo_tree_parent
-	let s:bufnr = -1
-	let s:undo_cache = {}
+	" Skip if we've already been unconfigured.
+	" Rationale: Make redundant calls (e.g. from different autocmds) harmless.
+	if s:winid > 0
+		" Remove the parent autocommands.
+		au! undo_tree_parent
+		let s:bufnr = -1
+		let s:winid = -1
+		let s:undo_cache = {}
+	endif
 endfu
 
-fu! s:Unconfigure_child(bnr)
-	" Remove the child autocommands.
-	au! undo_tree_child
-	" Caveat!: Cannot assume we'll be in child, as BufWinLeave autocmd doesn't
-	" guarantee it.
-	" Note: Though Is_child_configured checks only for autocmds, might be nice
-	" to remove <buffer> mappings as well, but :mapclear doesn't support the
-	" <buffer=N> form, and we can't guarantee we're in the child buffer. In any
-	" event, we're safe, since child mappings check for existence of active
-	" parent; moreover, when parent buffer leaves its last window, we do a
-	" deferred :bdelete of the child, which does remove maps.
-endfu
-
-" Goto specified window.
-" Assumption: Called under internal control: hence, we need to suppress
-" autocmds (especially BufEnter).
-fu! s:Goto_win(winnr)
-	exe 'noauto ' . a:winnr . "wincmd \<C-W>"
+" Note: Redundant calls are safe.
+fu! s:Unconfigure_child()
+	if s:undo_winid > 0
+		noauto call win_gotoid(s:undo_winid)
+		" Clear child winid, but leave its bufnr intact to facilitate reuse.
+		let s:undo_winid = -1
+		" TODO: Decide whether we should delete the cache and buffer contents at
+		" this point.
+		let s:undo_cache = {}
+		" Since we know we want to close child buffer, go ahead and empty it.
+		" Rationale: In case our deferred delete of child fails, at least the
+		" window will be empty.
+		silent %d
+		" Remove the child autocommands.
+		" Note: Deleting a buffer doesn't remove its buf-local autocmds.
+		au! undo_tree_child
+		" Caveat!: Cannot assume we'll be in child, as BufWinLeave autocmd doesn't
+		" guarantee it.
+		" Note: Though Is_child_configured checks only for autocmds, might be nice
+		" to remove <buffer> mappings as well, but :mapclear doesn't support the
+		" <buffer=N> form, and we can't guarantee we're in the child buffer. In any
+		" event, we're safe, since child mappings check for existence of active
+		" parent; moreover, when parent buffer leaves its last window, we do a
+		" deferred :bdelete of the child, which does remove maps.
+	endif
 endfu
 
 fu! s:Create_autocmds_in_child()
@@ -1015,7 +1035,11 @@ fu! s:Create_autocmds_in_child()
 		au BufDelete <buffer> call s:Child_BufDelete(expand("<abuf>"))
 		au BufEnter <buffer> call s:Child_BufEnter()
 		au BufLeave <buffer> call s:Child_BufLeave()
+		au TextChanged <buffer> call s:Child_TextChanged()
+		au TextChangedI <buffer> call s:Child_TextChanged()
 		au BufWinLeave <buffer> call s:Child_BufWinLeave(expand("<abuf>"))
+		au WinEnter call s:WinEnter()
+		au WinLeave call s:WinLeave()
 	augroup END
 endfu
 
@@ -1024,12 +1048,13 @@ fu! s:Create_autocmds_in_parent()
 	aug undo_tree_parent
 		au!
 		au BufWinLeave <buffer> call s:Parent_BufWinLeave(expand("<abuf>"))
+		au BufEnter call s:BufEnter()
 	augroup END
 endfu
 
 " Called From: buffer being considered as candidate parent
 " Return nonzero iff we can open an undo buffer for current buffer.
-fu! s:Is_valid_parent()
+fu! s:In_potential_parent()
 	" TODO More checks? E.g., 'buftype', etc...?
 	return &modifiable && bufnr('%') != s:undo_bufnr
 endfu
@@ -1090,6 +1115,9 @@ endfu
 
 " Object to hold saved option settings for save/restore mechanism.
 let s:opts = {}
+
+" TODO: Remove s:script_path and s:Get_opt_setter if they end up not being
+" needed.
 " Note: No good way to get script name from inside function.
 let s:script_path = expand('<sfile>:p')
 " Return full path of script that last set option whose *full* name is input.
@@ -1107,18 +1135,14 @@ fu! s:Restore_opt(name)
 	if has_key(s:opts, a:name)
 		exe 'let &' . a:name ' = s:opts[a:name]'
 		call remove(s:opts, a:name)
-	else
-		" Getting here implies internal error or race-condition: to be safe,
-		" just set back to default.
-		exe 'set ' . a:name . '&'
 	endif
 endfu
 
-" Rationale: The reason for checking setter is that if we somehow managed to do
-" 2 consecutive overrides from this script, we might inadvertently save our own
-" setting for subsequent restoration. This would be particularly bad if the
-" option were 'guicursor'. Refusing to save a value we set ensures this can't
-" happen (at the cost of a bit of complexity).
+" Rationale: The reason for refusing to save an already-overridden value is that
+" if we somehow managed to do 2 consecutive overrides from this script, we might
+" inadvertently save our own setting for subsequent restoration. This would be
+" particularly bad if the option were 'guicursor'. Refusing to save an override
+" ensures this can't happen (at the cost of a bit of complexity).
 " TODO: Doing the save only in BufEnter (and in Configure_child when we're sure
 " the BufEnter has been skipped) could also prevent the problem scenario, and
 " would obviate the need for the more complex override mechanism. Consider
@@ -1126,8 +1150,8 @@ endfu
 " TODO: Consider adding a 'local' flag parameter. (May not be necessary, given
 " that we typically wouldn't need to 'override' local params.)
 fu! s:Override_opt(name, value)
-	let setter = s:Get_opt_setter(a:name)
-	if setter != s:script_path
+	"let setter = s:Get_opt_setter(a:name)
+	if !has_key(s:opts, a:name)
 		" Save old value.
 		exe 'let s:opts[a:name] = &' . a:name
 	endif
@@ -1143,31 +1167,9 @@ fu! s:Configure_cursor_in_child()
 	endif
 endfu
 
+" Note: Redundant calls are safe.
 fu! s:Unconfigure_cursor_in_child()
 	call s:Restore_opt(has('gui') ? 'guicursor' : 't_ve')
-endfu
-
-" TODO: Decide between this simple approach and the more complex approach in the
-" non-<...>_child versions.
-fu! s:Configure_cursor_in_child_simple()
-	if has('gui')
-		let s:cursor_save = &guicursor
-		" TODO: Any advantage to creating special Cursor group?
-		set guicursor=n-v:block-NONE
-	else
-		let s:cursor_save = &t_ve
-		set t_ve=
-	endif
-endfu
-
-fu! s:Unconfigure_cursor_in_child_simple()
-	if exists('s:cursor_save')
-		if has('gui')
-			let &guicursor = s:cursor_save
-		else
-			let &t_ve = s:cursor_save
-		endif
-	endif
 endfu
 
 " TODO: Perhaps make it so stuff isn't redone unnecessarily (though all of this
@@ -1185,6 +1187,18 @@ fu! s:Configure_child()
 	setl nowrap
 endfu
 
+fu! s:In_child()
+	return s:undo_bufnr == bufnr('%') && s:undo_winid == win_getid()
+endfu
+
+" Return nonzero if active parent in current tab in window whose ID is s:winid.
+" Note: This function does some paranoid checking.
+fu! s:Is_active_parent()
+	let wnr = win_id2win(s:winid)
+	" Extra check, just in case Vim ever re-uses window IDs
+	return wnr && s:bufnr == winbufnr(wnr)
+endfu
+
 fu! s:Is_child_configured()
 	if s:undo_bufnr > 0
 		if exists('#undo_tree_child#BufEnter#<buffer=' . s:undo_bufnr .'>')
@@ -1197,7 +1211,7 @@ endfu
 
 " Hide any open child buffers.
 fu! s:Delete_children()
-	" Note: Intentionally deleting autocmds/maps.
+	" Note: Intentionally deleting maps and such.
 	exe 'bd ' . s:undo_bufnr
 endfu
 
@@ -1211,7 +1225,7 @@ fu! s:Hide_children()
 	" Note: The sort by tabnr minimizes the need for jumps between tabs when
 	" closing windows.
 	" Note: Yes. That's quite a bit of trouble to avoid harmless but redundant
-	" calls to win_gotid()...
+	" calls to win_gotoid()...
 	let triples = sort(map(filter(
 		\ win_findbuf(s:undo_bufnr), 'v:val != wid_orig'),
 		\ 'extend(win_id2tabwin(v:val), [v:val])'))
@@ -1231,65 +1245,119 @@ fu! s:Hide_children()
 	noauto call win_gotoid(wid_orig)
 endfu
 
-" Design Decision: When parent buffer is no longer displayed, unconfigure parent
-" and delete child.
-" Rationale: Unconfiguring parent simplifies logic by avoiding need to make
-" child smart about resurrecting parent in proper position, and deleting child
-" gets rid of autocmds and such that might otherwise be problematic in absence
-" of parent. (Note that the child's bufnr will still exist, and it can still be
-" resurrected on next undo buffer open request.)
-" Called From: parent buffer BufWinLeave autocmd
-" Caveat: bnr is input because bufnr('%') is not guaranteed to work at this
-" point.
-fu! s:Parent_BufWinLeave(bnr)
+fu! s:Orphan_child()
 	call s:Unconfigure_parent()
-	if s:undo_bufnr > 0 && bufwinnr(s:undo_bufnr) > 0
-		" Since we know we want to close child buffer, go ahead and empty it.
-		" Rationale: In case our deferred delete of child fails, at least the
-		" window will be empty.
-		" TODO: Consider putting this in Unconfigure_child.
-		silent %d
-		" Also unconfigure child so we don't need to worry about it's autocmds
+	" TODO: Determine whether there could be any reason to call Delete_children
+	" when s:undo_winid has already been cleared (-1). I'm thinking not.
+	if s:undo_winid > 0
+		" Also unconfigure child so we don't need to worry about its autocmds
 		" triggering again.
-		" Rationale: Autocmds will be removed in deferred Delete_children, but
-		" this eliminates race-condition.
+		" Rationale: :bd doesn't delete <buffer> autocmds.
 		call s:Unconfigure_child()
 		" Queue deletion of child buffer(s).
 		call s:Defer_action('Delete_children')
 	endif
 endfu
+
+" Design Decision: When parent buffer leaves its original window, unconfigure
+" parent and unconfigure/delete child buffer.
+" Rationale: Unconfiguring parent simplifies logic by avoiding need to make
+" child smart about resurrecting parent in proper position, and deleting child
+" gets rid of maps and such that might otherwise be problematic in absence of
+" parent. (Note that the child's bufnr will still exist, and it can still be
+" resurrected on next open request.)
+" Note: The reason we need both BufWinLeave and BufLeave is that a buffer can be
+" deleted (e.g., with `:bd N') without triggering BufLeave, and the special
+" parent window could be closed without deleting the buffer.
+
+" Parent buffer is being deleted, or perhaps just hidden/unloaded.
+fu! s:Parent_BufWinLeave(bnr)
+	call s:Orphan_child()
+endfu
+
+" Detect when parent buffer has departed its original window.
+fu! s:BufEnter()
+	if s:winid == win_getid() && s:bufnr != bufnr('%')
+		" Parent buffer is leaving original window!
+		call s:Orphan_child()
+	endif
+endfu
+
+" Child buffer is being deleted, or perhaps just hidden/unloaded.
+" Note: BufDelete implies BufWinLeave (though the converse is not true), so
+" there is some harmless redundancy.
 fu! s:Child_BufWinLeave(bnr)
-	call s:Unconfigure_child(a:bnr)
+	call s:Unconfigure_child()
 endfu
 
-" Called From: child buffer BufDelete autocmd
 " Note: User shouldn't typically delete the child manually, but if he does, we
-" will lose the autocmds in the child buffer, so we need to ensure that a new
-" one is created next time one is needed.
+" will lose the maps in the child buffer, so we need to ensure that the child
+" goes through full reconfiguration next time it's needed.
 fu! s:Child_BufDelete(bnr)
-	" Design Decision: No need to unparent.
-	" Rationale: If user opens undo window on same parent again, we'll create a
-	" new undo buf automatically, but the cache may still be valid.
-	let s:undo_bufnr = -1
+	call s:Unconfigure_child()
 endfu
 
-" Each time child buf is entered, we need to ensure it's still valid.
+" Each time child buf is entered in its special window, we need to check to see
+" whether it's in need of refresh.
+" Called When: Moving to child buf's special window.
+" Assumption: Since child is unconfigured when child buffer first leaves special
+" window, a BufEnter in the special child window should always imply window
+" change, rather than (e.g.) :buffer command.
 fu! s:Child_BufEnter()
-	let p_wnr = s:bufnr > 0 ? bufwinnr(s:bufnr) : -1
-	" Caveat: BufEnter will fire when parent is in process of deletion, but in
-	" this case, parent will not have a window, and the child buffer will be
-	" queued for hiding.
-	if p_wnr > 0
-		call s:Goto_win(p_wnr)
-		" Invoke non-forced refresh, with content validity determined solely by
-		" the call to s:Refresh_cache.
-		call s:Refresh_undo_window(s:Refresh_cache(0), 0)
+	" Ignore BufEnter in non-special window.
+	if s:In_child()
+		" Now make sure parent is still active and in its special window.
+		" Caveat: BufEnter will fire when parent is in process of deletion, but in
+		" this case, parent will not have a window, and the child buffer will be
+		" queued for hiding.
+		" Assumption: window ID's are not re-used.
+		" Assumption: If parent is closed with (e.g.) :q, parent BufWinLeave
+		" fires before child BufEnter.
+		if s:Is_active_parent()
+			" TODO: Consider factoring this logic out into non-autocmd function.
+			" Invoke non-forced refresh.
+			call s:Refresh_cache(0)
+			call s:Refresh_undo_window()
+			call s:Center_tree(0)
+			call s:Configure_cursor_in_child()
+		endif
+	endif
+endfu
+
+" Use this to determine when child is leaving its special window.
+" Called When:
+" 1) Child buf is leaving special window
+" 2) Cursor is leaving special window for one that doesn't contain child buf
+" Note: In both cases, we want to restore cursor, but in the 2nd case, WinLeave
+" is going to fire after BufLeave.
+" Caveat: WinLeave doesn't fire for :new, so we can't rely on it for 2nd case.
+fu! s:Child_BufLeave()
+	if s:undo_winid == win_getid()
+		call s:Unconfigure_cursor_in_child()
+	endif
+endfu
+
+" In case user changes child buffer contents.
+fu! s:Child_TextChanged()
+	" TODO Best way to invalidate buffer contents (but not cache itself)
+	if !empty(s:undo_cache)
+		let s:undo_cache.dirty = 1
+	endif
+endfu
+
+" Note: WinEnter/Leave used to determine when cursor needs to be shown/hidden.
+" Important Note: If child appears in multiple windows, only one gets special
+" cursor treatment.
+fu! s:WinEnter()
+	if s:undo_winid == win_getid()
 		call s:Configure_cursor_in_child()
 	endif
 endfu
 
-fu! s:Child_BufLeave()
-	call s:Unconfigure_cursor_in_child()
+fu! s:WinLeave()
+	if s:undo_winid == win_getid()
+		call s:Unconfigure_cursor_in_child()
+	endif
 endfu
 
 " Calculate child size in the variable direction, taking into account the input
@@ -1333,54 +1401,20 @@ endfu
 
 " Assumption: Called from parent with undo cache valid
 " Note: Always end up in child window.
-fu! s:Position_child(clear, splithow)
+fu! s:Position_child(splithow)
 	let geom = s:undo_cache.geom
 	" Use splithow hint to extract and parse applicable 'splitinfo' component.
 	let si = s:Get_splitinfo(a:splithow)
 	" Save viewport so we can restore after opening (or re-opening) child.
 	" Rationale: Opening child window (e.g.) can effectively scroll the parent.
-	let wsv = winsaveview()
-	" Handle scenarios in which we're going to switch to a different tab
-	" (possibly but not necessarily after creating).
-	" Design Decision: If we goto/create tab, first hide children in start tab.
-	let tabnr = -1
-	if si.type == 't' || empty(a:splithow)
-		" See whether there's a tab we can re-use.
-		let tabnr = s:Get_reusable_tab()
-		if tabnr > 0
-			"call s:Hide_children()
-			" Go to the parent window in the reusable tab.
-			exe 'normal! ' . tabnr . 'gt'
-			" Note: From this point on, looks like non-tab invocation (e.g.,
-			" will call Hide_children for this tab).
-			call s:Goto_win(bufwinnr(s:bufnr))
-		endif
-	endif
-	if si.type == 't' && tabnr < 0
-		" Create a tab at configured location and open parent in it.
-		"call s:Hide_children()
-		let tabnr = tabpagenr()
-		let tabpos = si.tabpos == '+' ? tabnr + 1 :
-			\ si.tabpos == '-' ? tabnr - 1 :
-			\ si.tabpos == '^' ? 0 : tabpagenr('$') + 1
-		exe tabpos . 'tab sb' . s:bufnr
-	else
-		" We didn't create a new tab, though we could be reusing existing. In
-		" either case, hide (don't delete) any existing children in this tab.
-		" Rationale: Facilitates deterministic window positioning.
-		" TODO: Decide about children displayed in other tabs. (Keep in mind that
-		" they're deleted automatically in most cases.)
-		"call s:Hide_children()
-	endif
-	" Now for the split within the tab...
-	let split_mod = si.side =~ '[al]' ? 'aboveleft' : si.side =~ '[AL]'
-		\ ? 'topleft' : si.side =~ '[br]' ? 'belowright' : 'botright'
+	let p_wsv = winsaveview()
+	" Configure the split
+	let split_mod = si.side =~? '[al]' ? 'aboveleft' : 'belowright'
 	if si.side =~ '[lr]'
 		let split_mod .= ' vert'
 	endif
 	" Note: 'silent' prevents annoying and misleading [new file] msg.
 	let cmd = ' +setl\ buftype=nofile\ bufhidden=hide\ noswapfile '
-	let p_wnr = winnr()
 	if s:undo_bufnr < 0
 		" Create new window containing scratch buffer.
 		" Caveat: Wanted to wrap name in [...], but that makes Vim think it's
@@ -1388,36 +1422,45 @@ fu! s:Position_child(clear, splithow)
 		exe 'silent ' . split_mod . ' new ' . cmd . expand('%') . '.undo'
 		let [s:undo_bufnr, s:undo_winid] = [bufnr('%'), win_getid()]
 	else
+		" Re-using child buffer.
+		if s:undo_winid > 0
+			" Child buf is in special window. Save its viewport for restore
+			" after we've pulled it into a new window.
+			noauto call win_gotoid(s:undo_winid)
+			let c_wsv = winsaveview()
+			noauto call win_gotoid(s:winid)
+		endif
 		" Note: 'noauto' modifier prevents premature attempt to refresh.
 		exe 'silent noauto ' . split_mod . ' sb' . cmd . s:undo_bufnr
 		" Bufnr remains the same, but win ID has changed.
 		let s:undo_winid = win_getid()
-		if a:clear
-			silent %d
+		if exists('l:c_wsv')
+			call winrestview(c_wsv)
 		endif
 	endif
 	" Now that we're safely in child, close all other windows containing child
 	" (across all tabs).
 	" Note: Deferring till this point avoids spurious BufWinLeave.
-	"call s:Hide_children()
-	let c_wnr = winnr()
-	" Expand the parent to occupy all available space.
-	call s:Goto_win(p_wnr)
+	call s:Hide_children()
 	let size_cmd = si.side =~? '[ab]' ? '_' : '|'
-	exe 'wincmd ' . size_cmd
+	if si.side =~ '\u'
+		" Expand the parent to occupy all available space.
+		noauto call win_gotoid(s:winid)
+		exe 'wincmd ' . size_cmd
+	endif
 	" Calculate desired size of child, taking options and available space into
 	" account.
 	" Note: The -2 accounts for unusable space: divider and 1 line/col min
 	let avail_sz = (si.side =~? '[ab]' ? winheight(0) : winwidth(0)) - 2
 	let sz = s:Calc_child_size(si, avail_sz)
 	" Make the child the calculated size.
-	call s:Goto_win(c_wnr)
+	noauto call win_gotoid(s:undo_winid)
 	exe sz . 'wincmd ' . size_cmd
 	" Make sur the parent's viewport hasn't changed.
-	call s:Goto_win(p_wnr)
-	call winrestview(wsv)
+	noauto call win_gotoid(s:winid)
+	call winrestview(p_wsv)
 	" Note: Caller responsible for child's viewport.
-	call s:Goto_win(c_wnr)
+	noauto call win_gotoid(s:undo_winid)
 
 endfu
 
@@ -1447,8 +1490,8 @@ endfu
 " Make sure an undo_buf exists, is visible, and is properly configured, creating
 " if necessary.
 " Assumption: In parent buffer
-fu! s:Prepare_child(clear, splithow)
-	call s:Position_child(a:clear, a:splithow)
+fu! s:Prepare_child(splithow)
+	call s:Position_child(a:splithow)
 	" Note: We call this even when buf already existed, to ensure it's got all
 	" the mappings and autocmds we'll need. (It's unlikely, but possible, that
 	" someone deleted maps/autocmds, for instance.)
@@ -1469,15 +1512,15 @@ endfu
 " Undo parent buf to the undo state whose seq number is input.
 " Post Condition: Doesn't change active window.
 fu! s:Undo_to(seq)
-	let [wnr, p_wnr] = [winnr(), bufwinnr(s:bufnr)]
-	if wnr != p_wnr
-		call s:Goto_win(p_wnr)
+	let wid = win_getid()
+	if wid != s:winid
+		noauto call win_gotoid(s:winid)
 	endif
 	" Note: Execute undo silently to avoid a hit-enter prompt.
 	silent exe 'undo ' . a:seq
-	if wnr != p_wnr
+	if wid != s:winid
 		" Return to starting window without triggering BufEnter.
-		noauto wincmd p
+		noauto call win_gotoid(wid)
 	endif
 endfu
 
@@ -1579,8 +1622,7 @@ endfu
 " BufEnter. Hmm... What if user executes a :bd or something. Well, in that case,
 " parent's BufDelete would fire, clearing data structures.
 fu! s:Move_in_tree(dir) " entry
-	"let [p_bnr, p_wnr] = s:Get_parent_bufwin()
-	if s:bufnr < 0 || bufwinnr(s:bufnr) < 0
+	if s:bufnr < 0 || s:winid < 0 || !win_id2win(s:winid)
 		echomsg "Warning: Cannot traverse undo tree for inactive parent buffer"
 	endif
 	" Grab tree and invoke specified movement method.
@@ -1597,25 +1639,30 @@ fu! s:Move_in_tree(dir) " entry
 endfu
 
 " Invoked from child's <buffer> map.
-" Assumption: Can't get here unless we're in true child buffer.
+" Assumption: Can't get here unless we're in true child buffer (though we will
+" need to check to be sure we're in special window).
 fu! s:Refresh_child() " entry
+	if !s:In_child()
+		" Ignore invocation from non-special child window.
+		return
+	endif
 	" Make sure parent is still loaded and visible.
 	" Note: Shouldn't get here if not, but it's possible (e.g., if user
 	" intentionally opens unlisted undo buffer).
 	" TODO: Consider removing the child autocmds and mappings when the child is
 	" hidden. Could populate them only when undo buffer is opened.
-	let p_wnr = bufwinnr(s:bufnr)
-	if s:bufnr < 0 || p_wnr < 0
+	if !s:Is_active_parent()
 		echomsg "Warning: Cannot refresh undo buffer with no associated parent."
+		call s:Orphan_child()
 		return
 	endif
 	" There's a visible and active parent. Forcibly refresh
-	call s:Goto_win(p_wnr)
 	call s:Refresh_cache(1)
 	" TODO: Decide whether to force the window refresh, or only the cache
 	" refresh: i.e., if cache was up to date, perhaps we should pass 0 here...
 	" Note: Has implications for centering tree...
-	call s:Refresh_undo_window(1, 0)
+	call s:Refresh_undo_window()
+	call s:Center_tree(1)
 endfu
 
 " TODO: Bugfix needed: Currently, this isn't always being called from the
@@ -1623,7 +1670,9 @@ endfu
 " or...
 " Assumption: Called from parent with undo cache valid
 " Return: nonzero if cache is rebuilt.
-fu! s:Refresh_cache(force)
+fu! s:Refresh_cache(force, ...)
+	" Make sure we're in parent.
+	noauto call win_gotoid(s:winid)
 	" Do we need to update the tree or is cache still valid?
 	" Get Vim's undo tree to support freshness check, and if necessary, to serve
 	" as basis of new tree.
@@ -1650,98 +1699,97 @@ fu! s:Refresh_cache(force)
 		let g:uc = s:undo_cache
 		" Let caller know cache has been changed.
 		return 1
+	elseif a:0 && a:1
+		let s:undo_cache.dirty = 1
 	endif
 	return 0
 endfu
 
 " This one's tied to mapping or command for opening undo on current buffer.
 fu! s:Open_undo_window(...) " entry
-	if !s:Is_valid_parent()
+	if !s:In_potential_parent()
 		echoerr "Can't display undo tree for this buffer."
 		return
 	endif
 	let splithow = a:0 ? a:1 : ''
 	" Cancel any pending delete of child buffer we're about to re-use.
 	call s:Cancel_action('Delete_children')
-	let p_bnr = bufnr('%')
-	let contents_invalid = 0
-	if s:bufnr != p_bnr
+	let [p_bnr, p_wid] = [bufnr('%'), win_getid()]
+	if p_bnr != s:bufnr
 		" New parent (either no current parent or parent changing)
 		if s:bufnr > 0
 			" We have existing parent. Unconfigure old.
 			call s:Unconfigure_parent()
 		endif
-		let s:bufnr = p_bnr
+		let [s:bufnr, s:winid] = [p_bnr, p_wid]
 		call s:Configure_parent()
-		" Request clearance (or creation) of undo buffer.
-		let contents_invalid = 1
-	else
-		" Find out whether it's even possible that child's contents are valid.
-		let contents_invalid = !s:Is_child_configured()
+	elseif p_wid != s:winid
+		" Same parent buffer but different window.
+		let s:winid = p_wid
 	endif
 	" Make sure cache is up-to-date.
-	" Caveat: Intentionally *not* short-circuiting call to s:Refresh_cache.
-	" (Vim doesn't have a ||= operator...)
-	let contents_invalid = s:Refresh_cache(0) || contents_invalid
-	" TODO: Consider whether Prepare_child's tab reusal logic should consider
-	" old parent or only new. For now, just consider new: wouldn't want to close
-	" last window on old parent. To consider old, we'd need to pass it to
-	" Prepare_child.
-	call s:Prepare_child(contents_invalid, splithow)
+	call s:Refresh_cache(0)
+	" Note: Syntax is currently associated with child window, which always
+	" changes, due to the way we do child positioning.
+	call s:undo_cache.syn.Clear()
+	" TODO: Need a way to restore child viewport in case in which nothing is
+	" really changing: i.e., user hit \u with child already open - in such
+	" cases, we wouldn't really want viewport to change.
+	call s:Prepare_child(splithow)
 	" Everything should be in order now with the 2 windows.
-	call s:Refresh_undo_window(contents_invalid, 1)
+	call s:Refresh_undo_window()
+	" Rationale: Forced centering when we open undo buffer prevents our seeing
+	" entire tree, even when the child window can accommodate.
+	call s:Center_tree(0)
 endfu
 
 " Called From: One of the following...
 " 1) undo buffer 'refresh' mapping
 " 2) global mapping/command requesting undo window for parent
 " 3) child BufEnter autocmd
-" Assumption: Both parent and child windows are visible and data structures are
-" consistent.
-fu! s:Refresh_undo_window(contents_invalid, syntax_invalid)
-	if s:bufnr < 0 || bufwinnr(s:bufnr) < 0
-		" Note: This generally wouldn't happen because we delete the child (and
-		" therefore its autocmds) when parent is removed from last window;
-		" however, because the child deletion is deferred, it's theoretically
-		" possible to get here.
-		" TODO: Consider unconfiguring the child when we schedule the child
-		" deletion. If we do that, we can remove this check.
-		echomsg "Warning: Cannot refresh undo buffer with no associated parent."
-		return
-	endif
-	" We want to move to the window even if it's up to date.
-	call s:Goto_win(bufwinnr(s:undo_bufnr))
-
+" Assumption: Both parent and child windows are visible (in special windows in
+" curent tab) and cache is up-to-date, albeit possibly 'dirty' (i.e., in need of
+" write to buffer).
+fu! s:Refresh_undo_window()
+	" We want to move to the special undo window even if all is up-to-date.
+	noauto call win_gotoid(s:undo_winid)
 	" Regardless of whether undo cache was valid, buffer contents may have been
-	" clobbered (e.g., by user deletion).
-	if a:contents_invalid || s:undo_cache.dirty
-		" TODO: Consider methodizing dirty flag (and objectizing cache).
-		let s:undo_cache.dirty = 0
+	" clobbered (e.g., by user buffer deletion/text modification).
+	" TODO: Consider refactoring flags: here are the things that could
+	" potentially be invalid:
+	" -cache itself has been changed, which means buffer contents are invalid
+	" -buffer contents could have been invalidated by user modification
+	"  (shouldn't happen)
+	" -syntax could have been invalidated by \u making a new parent win special.
+	if s:undo_cache.dirty
 		" Replace undo buffer's contents with new tree.
 		silent %d
 		call append(0, s:undo_cache.geom.lines)
 		" Append adds a final blank line, which serves no purpose, and which we
 		" don't want to impact window sizing, so delete it.
 		$d
-		" TODO: Remove this...
-		let g:uc = s:undo_cache
-	endif
-	" There are times when contents are still valid, but syntax is not (e.g.,
-	" when buffer has moved to a new window); syntax is always invalid after
-	" contents have changed.
-	if a:contents_invalid || a:syntax_invalid
-		" Now do highlighting
+		" Caveat: The preceding :$d can shift the viewport.
+		norm! gg
+		" TODO: Consider methodizing dirty flag (and objectizing cache).
+		let s:undo_cache.dirty = 0
 		call s:undo_cache.syn.Clear()
-		call s:undo_cache.syn.Update(s:undo_cache.tree.cur)
-		call s:Center_tree(1)
 	endif
-
+	" Note: Besides cache change, there are 2 other reasons syntax might be
+	" dirty:
+	"   buffer contents changed
+	"   syntax invalidated by making different parent window special
+	if s:undo_cache.syn.Is_dirty()
+		" Update highlighting
+		call s:undo_cache.syn.Update(s:undo_cache.tree.cur)
+	endif
 endfu
 
 " Parse 'splitwin' opt.
 " Format: comma-separated list of h, v, t components: e.g.,
 " h10-20b,v20%-40%L,t10-10r
 " h20l,v20%-40%L,t10-10r
+" TODO: Get rid of tab component, and possibly even split option into distinct
+" vert/hori options.
 fu! s:Parse_split_opt(opt)
     let ret = {
 	\ 'h': {'type': 'h', 'size': [10, 50], 'pct': [1, 1], 'side': 'b'},
@@ -1816,7 +1864,6 @@ fu! s:Get_splitinfo(splithow)
 	return si[splithow]
 endfu
 
-
 " Global mappings
 nnoremap <silent> <leader>u :call <SID>Open_undo_window()<CR>
 nnoremap <silent> <leader>hu :call <SID>Open_undo_window('h')<CR>
@@ -1868,5 +1915,5 @@ fu! s:Test_only()
 	echo "e_fitlist: " . string(e_fitlist)
 
 endfu
-" vim:ts=4:sw=4:tw=80
 
+" vim:ts=4:sw=4:tw=80
