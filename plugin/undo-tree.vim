@@ -45,14 +45,20 @@ fu! s:Node_get_leaf() dict
 	return t
 endfu
 
+
 " TODO: Add arg that selects between detailed and non-detailed display.
-fu! s:Node_get_geom() dict
-	let w = len(self.seq) + 2
+fu! s:Node_get_geom(detailed) dict
+	" Note: Add the surrounding spaces, which will be converted to brackets upon
+	" node selection.
+	let text = a:detailed
+		\ ? printf(" %d @ %c ", self.seq, self.time)
+		\ : (' ' . self.seq . ' ')
+	let w = len(text)
 	" Design Decision: The -1 ensures that when len is even, we center on
 	" the last char in the left half, not first in right.
 	let xs = -(w - 1) / 2
 	let xe = xs + w - 1
-	return {'w': w, 'e': [xs, xe]}
+	return {'w': w, 'e': [xs, xe], 'text': text}
 endfu
 
 " Make this node the current one in the tree.
@@ -455,7 +461,16 @@ fu! s:Fitlistr(es)
 endfu
 
 fu! s:Mean_fn(pair)
-	return (a:pair[0] + a:pair[1]) / 2
+	let num = a:pair[0] + a:pair[1]
+	if num % 2
+		" Caveat: Effectively round down to prevent integer truncation towards 0
+		" Rationale: Truncation impacts fitlistl and fitlistr lists differently,
+		" resulting in nodes being positioned too close together.
+		" TODO: Decide whether to round down or up.
+		let num -= 1
+	endif
+	" Assumption: num is even
+	return num / 2
 endfu
 
 fu! s:Fitlist(es)
@@ -463,13 +478,13 @@ fu! s:Fitlist(es)
 	return s:Map(function('s:Mean_fn'), s:Zip(s:Fitlistl(a:es), s:Fitlistr(a:es)))
 endfu
 
-fu! s:Design(t)
+fu! s:Design(t, detailed)
 	" Walk the children.
 	let [trees, extents] = [{}, {}]
 	let [trees_tail, extents_tail] = [trees, extents]
 	let tc = a:t.children.fst
 	while !empty(tc)
-		let [tree, extent] = s:Design(tc)
+		let [tree, extent] = s:Design(tc, a:detailed)
 		let trees_tail = s:Conc(tree, trees_tail)
 		let extents_tail = s:Conc(extent, extents_tail)
 		let tc = tc.next
@@ -479,9 +494,8 @@ fu! s:Design(t)
 	let pextents = s:Map(function('s:Move_extent'), s:Zip(extents, positions))
 	" Note: Leave space for surrounding [...]
 	" TODO: Perhaps methodize getting label text/size somehow.
-	let w = len(a:t.seq) + 2
-	let e = [-w/2, w/2 + w%2]
-	let resultextent = s:Cons(e, s:Merge_list(pextents))
+	let gi = a:t.Get_geom(a:detailed)
+	let resultextent = s:Cons(gi.e, s:Merge_list(pextents))
 	" TODO: Consider a cleaner way to put x on the actual node. Perhaps in a
 	" later stage?
 	let a:t.x = 0
@@ -605,7 +619,8 @@ fu! s:Extent_minmax_fn(acc, e_el)
 		\ max > a:acc[1] ? max : a:acc[1]]
 endfu
 
-fu! s:Build_tree_display(tree, extent)
+" TODO: Pull generation of regexes into this function.
+fu! s:Build_tree_display(tree, extent, detailed)
 	" Tree is centered at 0, but we need its left edge at 0. Determine the bias,
 	" and while we're at it, the width, both of which will be stored on the geom
 	" object we create).
@@ -623,7 +638,7 @@ fu! s:Build_tree_display(tree, extent)
 	" Hash geom info by node id (seq number)
 	let nodes = {}
 	" Note: lines will be added later.
-	let ret = {'geom': {'x_bias': x, 'width': w, 'nodes': nodes}, 'lines': []}
+	let ret = {'x_bias': x, 'width': w, 'nodes': nodes, 'lines': []}
 	while !empty(fifo)
 		let [t, parent_x, lvl] = remove(fifo, 0)
 		" Calculate absolute x position in grid.
@@ -649,10 +664,9 @@ fu! s:Build_tree_display(tree, extent)
 		" Build the label, leaving space for surrounding [...].
 		" TODO: text should also be returned by Get_geom, and we need to pass
 		" arg indicating desired display mode (e.g., detailed or short).
-		let text = ' ' . t.seq . ' '
-		let gi = t.Get_geom()
+		let gi = t.Get_geom(a:detailed)
 		let text_x = x + gi.e[0]
-		call lines.add(lrow, text_x, text)
+		call lines.add(lrow, text_x, gi.text)
 		" Draw lower vertical for all but root.
 		if !empty(t.parent)
 			if t.x < 0
@@ -661,6 +675,15 @@ fu! s:Build_tree_display(tree, extent)
 				let [off, text] = [-1, '\']
 			else
 				let [off, text] = [0, '|']
+			endif
+			if abs(t.x) == 1
+				" Can we shift the / or \ outward by 1 without visual annoyance?
+				" TODO: Decide whether to shift only for multi-digit seq
+				" numbers. Eventually, will probably put a space of padding on
+				" odd-width extents so that all can be shifted.
+				"if gi.w > 3
+					let off += t.x
+				"endif
 			endif
 			call lines.add(lrow - 1, x + off, text)
 			" Calculate effective x to be used in subsequent calculations.
@@ -703,8 +726,8 @@ fu! s:Build_tree_display(tree, extent)
 					" c->r
 					" Note: We get here when 'effective' xprev is 0, even when
 					" node is a unit to the left or right of parent.
-					let text_x = parent_x + 1
-					let text = repeat('_', xe - 2)
+					let text_x = parent_x
+					let text = '|' . repeat('_', xe - 2)
 				endif
 				"echo printf("seq=%d lrow=%d: Adding `%s' at %d", t.seq, lrow-2, text, text_x)
 				call lines.add(lrow - 2, text_x, text)
@@ -766,10 +789,12 @@ endfu
 " node: child node
 " lvl: 0-based level of child
 " col: child col
-fu! s:Update_syn_tree_node(ids, node, lvl, col)
+" TODO: Let this be based entirely on lvl, with the regexes pulled from geom
+" cache where they were stored by Build_tree_display.
+fu! s:Update_syn_tree_node(ids, node, lvl, col, detailed)
 	let rows_per_lvl = 3
 	let row = a:lvl * rows_per_lvl + 1
-	let gi = a:node.Get_geom()
+	let gi = a:node.Get_geom(a:detailed)
 	let re = s:Make_regex('[[(]\?[0-9]\+[])]\?', [row, a:col + gi.e[0]], gi.w)
 	" TODO: Don't hardcode the priorities like this.
 	" Note: Priority 10 is default. It will override hlsearch and such, but
@@ -833,9 +858,9 @@ endfu
 " gnode: {'node': {}, 'col': <colnr>, 'row': <rownr>}
 " TODO: Make more generic by changing 'erase' flag to an arg that indicates the
 " wrap char desired.
-fu! s:Bracket_node(gnode, erase)
+fu! s:Bracket_node(gnode, erase, detailed)
 	let [tnode, row, col] = [a:gnode.node, a:gnode.row, a:gnode.col]
-	let gi = tnode.Get_geom()
+	let gi = tnode.Get_geom(a:detailed)
 	let [scol, ecol] = [col + gi.e[0], col + gi.e[1]]
 	"echomsg "gi: " . string(gi) . ", scol=" . scol . ", ecol=" . ecol
 	" TODO: Make change manually? Or with setline()?
@@ -866,7 +891,7 @@ fu! s:Update_syn_tree(node) dict
 		call remove(self.ids, lvl, -1)
 	endif
 	let [tp, t] = [a:node.parent, a:node]
-	" Note: Positions in geom.nodes are 1-based (col nr)
+	" Note: Positions in self.geom.nodes are 1-based (col nr)
 	" Note: If child is root, initialize colp to root's col.
 	let colp = self.geom.nodes[(empty(tp) ? t : tp).seq].col
 	while !empty(t)
@@ -874,7 +899,7 @@ fu! s:Update_syn_tree(node) dict
 		" Design Decision: Could also lookup x in self.geom.nodes, but this
 		" avoids hash lookup.
 		let col = colp + t.x
-		call s:Update_syn_tree_node(self.ids[-1], t, lvl, col)
+		call s:Update_syn_tree_node(self.ids[-1], t, lvl, col, self.detailed)
 		let [t, colp] = [t.children.cur, col]
 		let lvl += 1
 	endwhile
@@ -913,7 +938,7 @@ fu! s:Update_syn(cur) dict
 	if self.seq >= 0
 		" De-select old
 		let old = self.geom.nodes[self.seq]
-		call s:Bracket_node(old, 1)
+		call s:Bracket_node(old, 1, self.detailed)
 		" Find common ancestor of old and new
 		let anc = s:Get_common_ancestor(old.node, a:cur)
 	else
@@ -924,7 +949,7 @@ fu! s:Update_syn(cur) dict
 	" adding it to public interface. Look for better way...
 	call call('s:Update_syn_tree', [anc], self)
 	" Select new
-	call s:Bracket_node(self.geom.nodes[a:cur.seq], 0)
+	call s:Bracket_node(self.geom.nodes[a:cur.seq], 0, self.detailed)
 	" Cache new
 	let self.seq = a:cur.seq
 endfu
@@ -936,7 +961,8 @@ fu! s:Make_syn_tree(geom)
 		\ 'Clear': function('s:Clear_syn_tree'),
 		\ 'Is_dirty': function('s:Is_syn_dirty'),
 		\ 'Update': function('s:Update_syn'),
-		\ 'geom': a:geom
+		\ 'geom': a:geom.Get(),
+		\ 'detailed': a:geom.Is_detailed()
 		\ }
 
 	return me
@@ -1339,9 +1365,8 @@ endfu
 
 " In case user changes child buffer contents.
 fu! s:Child_TextChanged()
-	" TODO Best way to invalidate buffer contents (but not cache itself)
 	if !empty(s:undo_cache)
-		let s:undo_cache.dirty = 1
+		call s:undo_cache.Set_dirty()
 	endif
 endfu
 
@@ -1365,13 +1390,14 @@ endfu
 " Assumption: undo cache is valid
 fu! s:Calc_child_size(splitinfo, avail_sz)
 	let si = a:splitinfo
+	let geom = s:undo_cache.geom.Get()
 	if type(si.size) == 3
 		" Size is range
 		" Determine undo tree size
 		" TODO: Geom is candidate for objectification...
 		let tree_sz = si.side =~? '[ba]'
-			\ ? len(s:undo_cache.geom.lines)
-			\ : s:undo_cache.geom.geom.width
+			\ ? len(geom.lines)
+			\ : geom.width
 		" Note: At this point, size of 0 means 'unconstrained'
 		if si.size[1] > 0
 			" Note: Can produce max of 0, but min of 1 will be imposed later.
@@ -1402,7 +1428,7 @@ endfu
 " Assumption: Called from parent with undo cache valid
 " Note: Always end up in child window.
 fu! s:Position_child(splithow)
-	let geom = s:undo_cache.geom
+	let geom = s:undo_cache.geom.Get()
 	" Use splithow hint to extract and parse applicable 'splitinfo' component.
 	let si = s:Get_splitinfo(a:splithow)
 	" Save viewport so we can restore after opening (or re-opening) child.
@@ -1501,7 +1527,7 @@ endfu
 fu! s:Describe_node(...)
 	" If user didn't pass a seq number, describe current node.
 	let seq = a:0 ? a:1 : s:undo_cache.tree.cur.seq 
-	let t = s:undo_cache.geom.geom.nodes[seq].node
+	let t = s:undo_cache.geom.Get().nodes[seq].node
 	if t.seq == 0
 		echo "At root of undo tree"
 	else
@@ -1536,12 +1562,12 @@ fu! s:Calculate_tree_node_offset(...)
 	let [vscroll, hscroll] = [line('.') - winline(), col('.') - wincol()]
 	let [wh, ww] = [winheight(0), winwidth(0)]
 	" Get the geom node corresponding to desired center.
-	let gnode = s:undo_cache.geom.geom.nodes[seq]
+	let gnode = s:undo_cache.geom.Get().nodes[seq]
 	let [t, row, col] = [gnode.node, gnode.row, gnode.col]
 	" Calculate 1-based offset from edge of window.
 	let [row_rel, col_rel] = [row - vscroll, col - hscroll]
 	" Check edges of node to see whether any part is not visible.
-	let gi = t.Get_geom()
+	let gi = t.Get_geom(s:undo_cache.Get_display_mode())
 	" Note: +1 needed to ensure we center on middle of odd number of rows.
 	if row_rel < 1 || row_rel > wh ||
 		\ col_rel + gi.e[0] < 1 || col_rel + gi.e[1] > ww
@@ -1592,8 +1618,8 @@ fu! s:Goto_node_in_tree(root_is_default)
 		endif
 	else
 		" Get the node, bearing in mind that there's no guarantee it exists.
-		let gnode = has_key(s:undo_cache.geom.geom.nodes, seq)
-			\ ? s:undo_cache.geom.geom.nodes[seq] : {}
+		let geom = s:undo_cache.geom.Get()
+		let gnode = has_key(geom.nodes, seq) ? geom.nodes[seq] : {}
 		if empty(gnode)
 			echomsg "Warning: Node " . seq . " does not exist."
 			return
@@ -1622,6 +1648,12 @@ endfu
 " BufEnter. Hmm... What if user executes a :bd or something. Well, in that case,
 " parent's BufDelete would fire, clearing data structures.
 fu! s:Move_in_tree(dir) " entry
+	if s:undo_bufnr < 0 || s:undo_winid != win_getid()
+		" Ignore maps in non-special child window.
+		" TODO: If we stick with this approach, should probably use normal! to
+		" let the key sequence have its normal effect.
+		return
+	endif
 	if s:bufnr < 0 || s:winid < 0 || !win_id2win(s:winid)
 		echomsg "Warning: Cannot traverse undo tree for inactive parent buffer"
 	endif
@@ -1665,12 +1697,96 @@ fu! s:Refresh_child() " entry
 	call s:Center_tree(1)
 endfu
 
-" TODO: Bugfix needed: Currently, this isn't always being called from the
-" parent, and it doesn't move to the parent. Either make it move to the parent,
-" or...
+fu! s:Build_active_geom(tree) dict
+	" TODO: Thinking I may no longer need tree returned, now that positions are
+	" stored on b:undo_tree.
+	" Note: Though it seems a bit odd, I'm not using ptree here because
+	" positions have already been placed on tree itself.
+	let detailed = self.Is_detailed()
+	let [ptree, extent] = s:Design(a:tree, detailed)
+	let self.ary[self.idx] = s:Build_tree_display(a:tree, extent, detailed)
+	let self.dirty = 1
+endfu
+
+fu! s:Toggle_active_geom() dict
+	let self.idx = (self.idx + 1) % 2
+	if empty(self.ary[self.idx])
+		call self.Build()
+	endif
+endfu
+
+fu! s:Get_active_geom() dict
+	return self.ary[self.idx]
+endfu
+
+fu! s:Is_geom_dirty() dict
+	return self.dirty
+endfu
+
+fu! s:Is_geom_detailed() dict
+	return self.idx
+endfu
+
+fu! s:Clear_geom_dirty() dict
+	let self.dirty = 0
+endfu
+
+fu! s:Toggle_display_mode() dict
+	call self.geom.Toggle()
+	let self.syn = s:Make_syn_tree(self.geom)
+endfu
+
+fu! s:Get_display_mode() dict
+	return self.geom.Is_detailed()
+endfu
+
+" TODO: Probably get rid of this dirty flag, which indicates only whether
+" changes have been made to undo buffer since cache was last refreshed.
+fu! s:Set_cache_dirty() dict
+	let self.dirty = 1
+endfu
+
+fu! s:Clear_cache_dirty() dict
+	let self.dirty = 0
+endfu
+
+fu! s:Is_cache_dirty() dict
+	return self.dirty
+endfu
+
+fu! s:Make_undo_cache(tree, detailed)
+	let me = {
+		\ 'dirty': 1,
+		\ 'tree': a:tree,
+		\ 'geom': {
+			\ 'idx': !!a:detailed,
+			\ 'ary': [{}, {}],
+			\ 'dirty': 1,
+			\ 'Build': function('s:Build_active_geom', a:tree),
+			\ 'Toggle': function('s:Toggle_active_geom'),
+			\ 'Is_dirty': function('s:Is_geom_dirty'),
+			\ 'Is_detailed': function('s:Is_geom_detailed'),
+			\ 'Clear_dirty': function('s:Clear_geom_dirty'),
+			\ 'Get': function('s:Get_active_geom'),
+		\ },
+		\ 'syn': {},
+		\ 'Toggle_display_mode': function('s:Toggle_display_mode'),
+		\ 'Get_display_mode': function('s:Get_display_mode'),
+		\ 'Set_dirty': function('s:Set_cache_dirty'),
+		\ 'Clear_dirty': function('s:Clear_cache_dirty'),
+		\ 'Is_dirty': function('s:Is_cache_dirty')
+	\}
+	call me.geom.Build(a:tree)
+	" Now build highlighting object.
+	let me.syn = s:Make_syn_tree(me.geom)
+	return me
+endfu
+
 " Assumption: Called from parent with undo cache valid
 " Return: nonzero if cache is rebuilt.
 fu! s:Refresh_cache(force, ...)
+	" Is this a forced re-init? E.g., should we revert to default display?
+	let reinit = a:0 ? !!a:1 : 0
 	" Make sure we're in parent.
 	noauto call win_gotoid(s:winid)
 	" Do we need to update the tree or is cache still valid?
@@ -1680,27 +1796,21 @@ fu! s:Refresh_cache(force, ...)
 	" BufEnter on the parent.
 	" Rationale: Buffer can be changed only when user visits it.
 	let v_ut = undotree()
-	if empty(s:undo_cache) || a:force || s:undo_cache.tree.meta.seq_last != v_ut.seq_last
+	if empty(s:undo_cache) || a:force
+		\ || s:undo_cache.tree.meta.seq_last != v_ut.seq_last
+		" Build a proper tree from Vim's representation
 		let tree = s:Make_undo_tree(v_ut)
-		" TODO: Thinking I may no longer need tree returned, now that positions are
-		" stored on b:undo_tree.
-		let [ptree, extent] = s:Design(tree)
-		let geom = s:Build_tree_display(tree, extent)
-		" Now build highlighting object.
-		let syn = s:Make_syn_tree(geom.geom)
-		" Cache what we've built.
-		let s:undo_cache = {
-			\ 'dirty': 1,
-			\ 'tree': tree,
-			\ 'geom': geom,
-			\ 'syn': syn
-		\ }
+		" Determine starting display mode (simple or detailed)
+		let detailed = !reinit && !empty(s:undo_cache)
+			\ ? s:undo_cache.Get_display_mode()
+			\ : exists('g:undotree_detailed') && !!g:undotree_detailed
+		" Build a cache object.
+		let s:undo_cache = s:Make_undo_cache(tree, detailed)
+
 		" TODO: Remove this...
 		let g:uc = s:undo_cache
 		" Let caller know cache has been changed.
 		return 1
-	elseif a:0 && a:1
-		let s:undo_cache.dirty = 1
 	endif
 	return 0
 endfu
@@ -1728,7 +1838,7 @@ fu! s:Open_undo_window(...) " entry
 		let s:winid = p_wid
 	endif
 	" Make sure cache is up-to-date.
-	call s:Refresh_cache(0)
+	call s:Refresh_cache(0, 1)
 	" Note: Syntax is currently associated with child window, which always
 	" changes, due to the way we do child positioning.
 	call s:undo_cache.syn.Clear()
@@ -1761,18 +1871,17 @@ fu! s:Refresh_undo_window()
 	" -buffer contents could have been invalidated by user modification
 	"  (shouldn't happen)
 	" -syntax could have been invalidated by \u making a new parent win special.
-	if s:undo_cache.dirty
+	if s:undo_cache.Is_dirty() || s:undo_cache.geom.Is_dirty()
 		" Replace undo buffer's contents with new tree.
 		silent %d
-		call append(0, s:undo_cache.geom.lines)
+		call append(0, s:undo_cache.geom.Get().lines)
 		" Append adds a final blank line, which serves no purpose, and which we
 		" don't want to impact window sizing, so delete it.
 		$d
 		" Caveat: The preceding :$d can shift the viewport.
 		norm! gg
-		" TODO: Consider methodizing dirty flag (and objectizing cache).
-		let s:undo_cache.dirty = 0
-		call s:undo_cache.syn.Clear()
+		call s:undo_cache.Clear_dirty()
+		call s:undo_cache.geom.Clear_dirty()
 	endif
 	" Note: Besides cache change, there are 2 other reasons syntax might be
 	" dirty:
