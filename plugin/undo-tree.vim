@@ -1064,8 +1064,8 @@ fu! s:Create_autocmds_in_child()
 		au TextChanged <buffer> call s:Child_TextChanged()
 		au TextChangedI <buffer> call s:Child_TextChanged()
 		au BufWinLeave <buffer> call s:Child_BufWinLeave(expand("<abuf>"))
-		au WinEnter call s:WinEnter()
-		au WinLeave call s:WinLeave()
+		au WinEnter * call s:WinEnter()
+		au WinLeave * call s:WinLeave()
 	augroup END
 endfu
 
