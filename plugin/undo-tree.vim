@@ -478,6 +478,42 @@ fu! s:Fitlist(es)
 	return s:Map(function('s:Mean_fn'), s:Zip(s:Fitlistl(a:es), s:Fitlistr(a:es)))
 endfu
 
+" Modify list of child positions in place to ensure that no child is offset
+" exactly 1 unit from its parent. If a child must be moved 1 unit left or right,
+" move all siblings to its outside by the same amount.
+fu! s:Optimize_child_positions(positions)
+	let [p, p1, p2] = [a:positions, {}, {}]
+	while !empty(p)
+		let x = p.el
+		if x > 1
+			break
+		elseif x == -1
+			let p1 = p
+		elseif x == 1
+			let p2 = p
+			break
+		endif
+		let p = p.next
+	endwhile
+	if !empty(p1)
+		" Adjust from beginning to p1 (inclusive)
+		let p = a:positions
+		while !empty(p)
+			let p.el -= 1
+			if p is p1 | break | endif
+			let p = p.next
+		endwhile
+	endif
+	if !empty(p2)
+		" Adjust from p2 to the end
+		let p = p2
+		while !empty(p)
+			let p.el += 1
+			let p = p.next
+		endwhile
+	endif
+endfu
+
 fu! s:Design(t, detailed)
 	" Walk the children.
 	let [trees, extents] = [{}, {}]
@@ -490,10 +526,12 @@ fu! s:Design(t, detailed)
 		let tc = tc.next
 	endwhile
 	let positions = s:Fitlist(extents)
+	" Modify list in place to ensure that no child is offset exactly 1 col from
+	" parent.
+	" Rationale: Prevents annoying visual disturbance in tree.
+	call s:Optimize_child_positions(positions)
 	let ptrees = s:Map(function('s:Move_tree_fn'), s:Zip(trees, positions))
 	let pextents = s:Map(function('s:Move_extent'), s:Zip(extents, positions))
-	" Note: Leave space for surrounding [...]
-	" TODO: Perhaps methodize getting label text/size somehow.
 	let gi = a:t.Get_geom(a:detailed)
 	let resultextent = s:Cons(gi.e, s:Merge_list(pextents))
 	" TODO: Consider a cleaner way to put x on the actual node. Perhaps in a
