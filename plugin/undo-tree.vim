@@ -1139,7 +1139,7 @@ fu! s:Create_mappings_in_child()
 	nnoremap <silent> <nowait> <buffer> j  :call <SID>Move_in_tree('down')<CR>
 	nnoremap <silent> <nowait> <buffer> h  :call <SID>Move_in_tree('left')<CR>
 	nnoremap <silent> <nowait> <buffer> l  :call <SID>Move_in_tree('right')<CR>
-	nnoremap <silent> <nowait> <buffer> C  :call <SID>Center_tree(1)<CR>
+	nnoremap <silent> <nowait> <buffer> C  :call <SID>Center_tree(1, 0)<CR>
 	nnoremap <silent> <nowait> <buffer> G  :<C-U>call <SID>Goto_node_in_tree(0)<CR>
 	nnoremap <silent> <nowait> <buffer> gg :<C-U>call <SID>Goto_node_in_tree(1)<CR>
 endfu
@@ -1382,7 +1382,7 @@ fu! s:Child_BufEnter()
 			" Invoke non-forced refresh.
 			call s:Refresh_cache(0)
 			call s:Refresh_undo_window()
-			call s:Center_tree(0)
+			call s:Center_tree(0, 1)
 			call s:Configure_cursor_in_child()
 		endif
 	endif
@@ -1596,7 +1596,24 @@ endfu
 "   visible: 1 if entire node is visible
 "   dy: # of rows by which to shift view down to center
 "   dx: # of cols by which to shift view right to center
-fu! s:Calculate_tree_node_offset(...)
+" Input(s):
+"   limit  zero iff it's ok to scroll end of buffer above bottom of window.
+"   [seq]  (optional) seq number of node to center (default current node)
+" Design Decision: Don't try to prevent a shift that Vim (harmlessly) disallows:
+" e.g., trying to center the root node will most likely fail (unless window is
+" very short), but so what? Vim itself ensures that we shift only as far as
+" possible and no further. The shift we must limit (when 'limit' is set) is the
+" one that Vim allows, but which we may wish to prevent in certain scenarios:
+" namely, the shift that would pull empty lines into view. When 'limit' input is
+" set, we not only limit such shifts, but actually attempt, if possible, to
+" prevent empty lines/cols altogether.
+" Rationale: There are scenarios in which the desire for centering is tempered
+" by a desire to show as much of the tree as possible: in such cases, we bring
+" the node towards the center only until further such shifting would diminish
+" the visible portion of the tree.
+" TODO: Any advantage to having this in separate function? If not, subsume into
+" Center_tree.
+fu! s:Calculate_tree_node_offset(limit, ...)
 	let ret = {'visible': 1}
 	" If user didn't pass a seq number, center on current.
 	let seq = a:0 ? a:1 : s:undo_cache.tree.cur.seq 
@@ -1618,16 +1635,26 @@ fu! s:Calculate_tree_node_offset(...)
 	" Calculate delta: pos delta => scroll view right/down to center.
 	let ret.dy = row_rel - (wh + 1) / 2
 	let ret.dx = col_rel - (ww + 1) / 2
+	if a:limit
+		" Minimize the number of empty lines/cols at edge of window.
+		" If buffer is smaller than window, of course, we won't be able to avoid
+		" empty lines/cols, but the 'limit' flag requests fewer empties even at
+		" the cost of not centering.
+		let ret.dy = min([ret.dy, line('$') - vscroll - wh])
+		let ret.dx = min([ret.dx, col('$') - hscroll - ww])
+	endif
 	return ret
 endfu
 
 " If 'force' flag is true or requested node is even partially outside view,
 " center tree on current node (default) or node whose seq is input.
+" If 'limit' flag is true, minimize the number of completely empty lines/cols at
+" edge of window (even at cost of centering).
 " Assumption: In child buffer with consistent cache
-fu! s:Center_tree(force, ...)
+fu! s:Center_tree(force, limit, ...)
 	" If user didn't pass a seq number, center on current.
 	let seq = a:0 ? a:1 : s:undo_cache.tree.cur.seq 
-	let oi = s:Calculate_tree_node_offset(seq)
+	let oi = s:Calculate_tree_node_offset(a:limit, seq)
 	if !a:force && oi.visible
 		" Not forcing and node is already fully visible.
 		return
@@ -1676,7 +1703,7 @@ fu! s:Goto_node_in_tree(root_is_default)
 	" Accomplish the change in the actual buffer.
 	call s:Undo_to(node.seq)
 	" Center on the new current node.
-	call s:Center_tree(1, node.seq)
+	call s:Center_tree(1, 1, node.seq)
 	" Update display.
 	call s:undo_cache.syn.Update(node)
 	" Output summary of current change.
@@ -1707,7 +1734,7 @@ fu! s:Move_in_tree(dir) " entry
 	" Update display.
 	call s:undo_cache.syn.Update(s:undo_cache.tree.cur)
 	" Center iff current node is not fully visible.
-	call s:Center_tree(0)
+	call s:Center_tree(0, 1)
 	" Output summary of current change.
 	call s:Describe_node()
 endfu
@@ -1736,7 +1763,7 @@ fu! s:Refresh_child() " entry
 	" refresh: i.e., if cache was up to date, perhaps we should pass 0 here...
 	" Note: Has implications for centering tree...
 	call s:Refresh_undo_window()
-	call s:Center_tree(1)
+	call s:Center_tree(1, 1)
 endfu
 
 fu! s:Build_active_geom(tree) dict
@@ -1890,9 +1917,11 @@ fu! s:Open_undo_window(...) " entry
 	call s:Prepare_child(splithow)
 	" Everything should be in order now with the 2 windows.
 	call s:Refresh_undo_window()
-	" Rationale: Forced centering when we open undo buffer prevents our seeing
-	" entire tree, even when the child window can accommodate.
-	call s:Center_tree(0)
+	" Forcibly center current node in limited mode.
+	" Rationale: Centering is good, but should not prevent our seeing as much of
+	" the tree as possible. (Note that this is especially important when we've
+	" sized the child window large enough to display the entire tree.)
+	call s:Center_tree(1, 1)
 endfu
 
 " Called From: One of the following...
