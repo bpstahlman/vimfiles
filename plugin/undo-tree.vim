@@ -1425,10 +1425,13 @@ endfu
 
 " Calculate child size in the variable direction, taking into account the input
 " splitinfo (applicable component only) and available space (in free direction).
-" Assumption: undo cache is valid
-fu! s:Calc_child_size(splitinfo, avail_sz)
+" Assumption: undo cache is valid and parent is established
+fu! s:Calc_child_size(splitinfo)
 	let si = a:splitinfo
 	let geom = s:undo_cache.geom.Get()
+	let avail_sz = si.side =~? '[ab]'
+		\ ? winheight(0) + winheight(win_id2win(s:winid))
+		\ : winwidth(0) + winwidth(win_id2win(s:winid))
 	if type(si.size) == 3
 		" Size is range
 		" Determine undo tree size
@@ -1437,16 +1440,18 @@ fu! s:Calc_child_size(splitinfo, avail_sz)
 			\ ? len(geom.lines)
 			\ : geom.width
 		" Note: At this point, size of 0 means 'unconstrained'
+		" Note: The avail_sz - 1 accounts for parent's min height/width.
 		if si.size[1] > 0
 			" Note: Can produce max of 0, but min of 1 will be imposed later.
-			let max_sz = si.pct[1] ? a:avail_sz * si.size[1] / 100 : si.size[1]
+			let max_sz = min([avail_sz - 1,
+				\ si.pct[1] ? avail_sz * si.size[1] / 100 : si.size[1]])
 		else
-			let max_sz = a:avail_sz
+			let max_sz = avail_sz - 1
 		endif
 		" Note: Either the if or else block can produce min of 0: in either
 		" case, we must eventually impose hard min of 1.
 		if si.size[0] > 0
-			let min_sz = si.pct[0] ? a:avail_sz * si.size[0] / 100 : si.size[0]
+			let min_sz = si.pct[0] ? avail_sz * si.size[0] / 100 : si.size[0]
 		else
 			let min_sz = si.size[0]
 		endif
@@ -1457,7 +1462,7 @@ fu! s:Calc_child_size(splitinfo, avail_sz)
 		let sz = max([sz, min_sz])
 	else
 		" Size is exact
-		let sz = si.pct ? a:avail_sz * si.size / 100 : si.size
+		let sz = si.pct ? avail_sz * si.size / 100 : si.size
 	endif
 	" Impose hard min of 1
 	return max([sz, 1])
@@ -1472,9 +1477,10 @@ fu! s:Position_child(splithow)
 	" Save viewport so we can restore after opening (or re-opening) child.
 	" Rationale: Opening child window (e.g.) can effectively scroll the parent.
 	let p_wsv = winsaveview()
+	let p_wid = win_getid()
 	" Configure the split
 	let split_mod = si.side =~? '[al]' ? 'aboveleft' : 'belowright'
-	if si.side =~ '[lr]'
+	if si.side =~? '[lr]'
 		let split_mod .= ' vert'
 	endif
 	" Note: 'silent' prevents annoying and misleading [new file] msg.
@@ -1514,9 +1520,7 @@ fu! s:Position_child(splithow)
 	endif
 	" Calculate desired size of child, taking options and available space into
 	" account.
-	" Note: The -2 accounts for unusable space: divider and 1 line/col min
-	let avail_sz = (si.side =~? '[ab]' ? winheight(0) : winwidth(0)) - 2
-	let sz = s:Calc_child_size(si, avail_sz)
+	let sz = s:Calc_child_size(si)
 	" Make the child the calculated size.
 	noauto call win_gotoid(s:undo_winid)
 	exe sz . 'wincmd ' . size_cmd
