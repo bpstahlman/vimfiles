@@ -45,14 +45,28 @@ fu! s:Node_get_leaf() dict
 	return t
 endfu
 
+fu! s:Seconds_to_dhms_str(seconds)
+	let units = [[86400, 'd'], [3600, 'h'], [60, 'm'], [1, 's']]
+	let ret = ''
+	let s = localtime() - a:seconds
+	for unit in units
+		let [us, s] = [s / unit[0], s % unit[0]]
+		if us
+			"if !empty(ret) | let ret .= ' ' | endif
+			let ret .= us . unit[1]
+		endif
+	endfor
+	return ret
+endfu
 
-" TODO: Add arg that selects between detailed and non-detailed display.
 fu! s:Node_get_geom(detailed) dict
 	" Note: Add the surrounding spaces, which will be converted to brackets upon
 	" node selection.
-	let text = a:detailed
-		\ ? printf(" %d @ %c ", self.seq, self.time)
-		\ : (' ' . self.seq . ' ')
+	if a:detailed && self.seq
+		let text = printf(" %d@%s ", self.seq, s:Seconds_to_dhms_str(self.time))
+	else
+		let text = ' ' . self.seq . ' '
+	endif
 	let w = len(text)
 	" Design Decision: The -1 ensures that when len is even, we center on
 	" the last char in the left half, not first in right.
@@ -683,14 +697,16 @@ fu! s:Build_tree_display(tree, extent, detailed)
 		let x = parent_x + t.x
 		" Get index of row containing the label.
 		let lrow = lvl * rows_per_lvl
-		" Hash node and its absolute x pos by seq number.
-		" Rationale: Associates nodes with actual canvas location.
+		" Hash node information by seq number.
+		" Rationale: Associates nodes with actual canvas location. Note that
+		" geom info is stored not only for convenience, but also because under
+		" detailed display, the geometry can change with time.
 		" Note: +1 converts from 0-based string offsets to 1-based row/col.
 		" Design Decision: Adding 'row' key to nodes object as convenience,
 		" though it could be derived from lvl.
 		" TODO: Decide whether the convenience justifies the denormalization.
-		" Note: Currently, not even using 'row'.
-		let nodes[t.seq] = {'node': t, 'col': x + 1, 'row': lrow + 1 }
+		let gi = t.Get_geom(a:detailed)
+		let nodes[t.seq] = {'node': t, 'col': x + 1, 'row': lrow + 1, 'geom': gi }
 		" Add this node's children
 		let tc = t.children.fst
 		while !empty(tc)
@@ -700,9 +716,6 @@ fu! s:Build_tree_display(tree, extent, detailed)
 		endwhile
 		" Process current node.
 		" Build the label, leaving space for surrounding [...].
-		" TODO: text should also be returned by Get_geom, and we need to pass
-		" arg indicating desired display mode (e.g., detailed or short).
-		let gi = t.Get_geom(a:detailed)
 		let text_x = x + gi.e[0]
 		call lines.add(lrow, text_x, gi.text)
 		" Draw lower vertical for all but root.
@@ -803,77 +816,88 @@ fu! s:Dbg(lvl, fmt, ...)
 endfu
 
 " Inputs:
-" atom: the pattern to match
-" pos: constraint pos (1-based [row, col])
-" [len]: constraint length
-fu! s:Make_regex(atom, pos, ...)
+" patt:        the pattern to match
+" pos:         constraint pos (1-based [row, col])
+" [len]:       constraint length
+"              Design Decision: Don't support multiline patterns: no use-case.
+" [anchor(s)]: optional bool or [bool, bool] indicating whether or not patt is
+"              anchored at edge(s). If List provided, begin/end anchor are
+"              specified separately. (Defaults to unanchored.)
+fu! s:Make_regex(patt, pos, ...)
 	if a:0
-		" range
-		" TODO: Make sure we don't need separate \%c for == case.
-		let re = '\%' . a:pos[0] . 'l\&\%>' . (a:pos[1] - 1)
-			\ . 'c\&\%<' . (a:pos[1] + a:1) . 'c'
+		let len = a:1
+		let anchors = a:0 > 1
+			\ ? type(a:2) == 3 ? a:2 : repeat([!!a:2], 2) : [0, 0]
+		" Range
+		let re = '\%' . a:pos[0] . 'l\&\%('
+			\ . '\%' . (anchors[0] ? a:pos[1] : '>' . (a:pos[1] - 1)) . 'c\&'
+			\ . '\%(' . a:patt . '\)'
+			\ . '\%' . (anchors[1]
+				\ ? (a:pos[1] + len)
+				\ : '<' . (a:pos[1] + len + 1))
+			\ . 'c\)'
 	else
-		" exact position
-		let re = '\%' . a:pos[0] . 'l\&\%' . a:pos[1] . 'c'
+		" Exact position
+		let re = '\%' . a:pos[0] . 'l\&\%' . a:pos[1] . 'c\&' . a:patt
 	endif
 	" TODO: Consider optimal way to apply constraint: e.g., is it faster to
-	" check the atom or the constraint?
-	let re .= '\&' . a:atom
+	" check the patt or the constraint?
 	return re
 endfu
 
 " Inputs:
 " ids: list of matchadd ids for the level being built.
-" node: child node
-" lvl: 0-based level of child
-" col: child col
+" gnode: child geom node
+" detailed: nonzero if detailed node display is desired
 " TODO: Let this be based entirely on lvl, with the regexes pulled from geom
 " cache where they were stored by Build_tree_display.
-fu! s:Update_syn_tree_node(ids, node, lvl, col, detailed)
-	let rows_per_lvl = 3
-	let row = a:lvl * rows_per_lvl + 1
-	let gi = a:node.Get_geom(a:detailed)
-	let re = s:Make_regex('[[(]\?[0-9]\+[])]\?', [row, a:col + gi.e[0]], gi.w)
+fu! s:Update_syn_tree_node(ids, gnode, detailed)
+	let [node, gi, row, col] =
+		\ [a:gnode.node, a:gnode.geom, a:gnode.row, a:gnode.col]
+	let re = s:Make_regex('.*', [row, col + gi.e[0]], gi.w)
 	" TODO: Don't hardcode the priorities like this.
 	" Note: Priority 10 is default. It will override hlsearch and such, but
 	" should be lowest of the undo-tree groups.
 	call add(a:ids, matchadd('undo_redo_path', re, 10))
-	if !a:lvl
+	if !node.lvl
 		" Nothing else to do for root.
 		return
 	endif
 
 	" Vertical or diagonal up to horizontal header bar
-	if a:node.x < 0
+	if node.x < 0
 		let [off, text] = [1, '/']
-	elseif a:node.x > 0
+	elseif node.x > 0
 		" Escape for regex
 		let [off, text] = [-1, '\\']
 	else
 		let [off, text] = [0, '|']
 	endif
-	let re = s:Make_regex(text, [row - 1, a:col + off])
+	let re = s:Make_regex(text, [row - 1, col + off])
 	call add(a:ids, matchadd('undo_redo_path', re, 10))
 
 	" Horizontal header bar
 	" Note: repeat() will produce empty string for negative count, and this
 	" will happen, for instance, when child is unit distance from parent.
-	if a:node.x < 0
-		let [off, text] = [2, repeat('_', -a:node.x - 2)]
-	elseif a:node.x > 0
-		let [off, text] = [-a:node.x + 1, repeat('_', a:node.x - 2)]
+	if node.x < 0
+		let [off, text] = [2, repeat('_', -node.x - 2)]
+	elseif node.x > 0
+		let [off, text] = [-node.x + 1, repeat('_', node.x - 2)]
 	else
 		" Child directly under parent => no horizontal
 		let [off, text] = [0, '']
 	endif
 	if !empty(text)
 		" We have a piece of horizontal to display.
-		let re = s:Make_regex(text, [row - 2, a:col + off])
+		let re = s:Make_regex(text, [row - 2, col + off])
 		call add(a:ids, matchadd('undo_redo_path', re, 10))
 	endif
 
 	" Vertical to parent
-	let re = s:Make_regex('|', [row - 2, a:col - a:node.x])
+	if col - node.x <= 2
+		echo "Ooops! seq=" . node.seq . " node.x=" . node.x . " col=" . col
+	endif
+	let re = s:Make_regex('|', [row - 2, col - node.x])
 	call add(a:ids, matchadd('undo_redo_path', re, 10))
 
 endfu
@@ -897,8 +921,8 @@ endfu
 " TODO: Make more generic by changing 'erase' flag to an arg that indicates the
 " wrap char desired.
 fu! s:Bracket_node(gnode, erase, detailed)
-	let [tnode, row, col] = [a:gnode.node, a:gnode.row, a:gnode.col]
-	let gi = tnode.Get_geom(a:detailed)
+	let [tnode, row, col, gi] =
+		\ [a:gnode.node, a:gnode.row, a:gnode.col, a:gnode.geom]
 	let [scol, ecol] = [col + gi.e[0], col + gi.e[1]]
 	"echomsg "gi: " . string(gi) . ", scol=" . scol . ", ecol=" . ecol
 	" TODO: Make change manually? Or with setline()?
@@ -929,17 +953,11 @@ fu! s:Update_syn_tree(node) dict
 		call remove(self.ids, lvl, -1)
 	endif
 	let [tp, t] = [a:node.parent, a:node]
-	" Note: Positions in self.geom.nodes are 1-based (col nr)
-	" Note: If child is root, initialize colp to root's col.
-	let colp = self.geom.nodes[(empty(tp) ? t : tp).seq].col
 	while !empty(t)
 		call add(self.ids, [])
-		" Design Decision: Could also lookup x in self.geom.nodes, but this
-		" avoids hash lookup.
-		let col = colp + t.x
-		call s:Update_syn_tree_node(self.ids[-1], t, lvl, col, self.detailed)
-		let [t, colp] = [t.children.cur, col]
-		let lvl += 1
+		let gnode = self.geom.nodes[t.seq]
+		call s:Update_syn_tree_node(self.ids[-1], gnode, self.detailed)
+		let t = t.children.cur
 	endwhile
 endfu
 
@@ -1142,6 +1160,7 @@ fu! s:Create_mappings_in_child()
 	nnoremap <silent> <nowait> <buffer> C  :call <SID>Center_tree(1, 0)<CR>
 	nnoremap <silent> <nowait> <buffer> G  :<C-U>call <SID>Goto_node_in_tree(0)<CR>
 	nnoremap <silent> <nowait> <buffer> gg :<C-U>call <SID>Goto_node_in_tree(1)<CR>
+	nnoremap <silent> <nowait> <buffer> D  :<C-U>call <SID>Toggle_detailed_display()<CR>
 endfu
 
 " Return string like ` ctermfg=<cterm_clr> guifg=<gui_clr>', taking
@@ -1739,6 +1758,15 @@ fu! s:Move_in_tree(dir) " entry
 	call s:Describe_node()
 endfu
 
+fu! s:Toggle_detailed_display()
+	if !s:In_child()
+		" Ignore invocation from non-special child window.
+		return
+	endif
+	call s:undo_cache.Toggle_display_mode()
+	call s:Refresh_undo_window()
+endfu
+
 " Invoked from child's <buffer> map.
 " Assumption: Can't get here unless we're in true child buffer (though we will
 " need to check to be sure we're in special window).
@@ -1800,8 +1828,11 @@ fu! s:Clear_geom_dirty() dict
 	let self.dirty = 0
 endfu
 
+" Assumption: In child buffer
 fu! s:Toggle_display_mode() dict
 	call self.geom.Toggle()
+	" Caveat: Need to clear old syntax before releasing the object.
+	call self.syn.Clear()
 	let self.syn = s:Make_syn_tree(self.geom)
 endfu
 
@@ -1831,7 +1862,7 @@ fu! s:Make_undo_cache(tree, detailed)
 			\ 'idx': !!a:detailed,
 			\ 'ary': [{}, {}],
 			\ 'dirty': 1,
-			\ 'Build': function('s:Build_active_geom', a:tree),
+			\ 'Build': function('s:Build_active_geom', [a:tree]),
 			\ 'Toggle': function('s:Toggle_active_geom'),
 			\ 'Is_dirty': function('s:Is_geom_dirty'),
 			\ 'Is_detailed': function('s:Is_geom_detailed'),
@@ -1845,7 +1876,7 @@ fu! s:Make_undo_cache(tree, detailed)
 		\ 'Clear_dirty': function('s:Clear_cache_dirty'),
 		\ 'Is_dirty': function('s:Is_cache_dirty')
 	\}
-	call me.geom.Build(a:tree)
+	call me.geom.Build()
 	" Now build highlighting object.
 	let me.syn = s:Make_syn_tree(me.geom)
 	return me
