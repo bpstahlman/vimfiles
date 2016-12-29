@@ -882,6 +882,21 @@ fu! s:Make_ago(...)
 			endfor
 		endif
 	endfu
+	" Using the nodes hash (if necessary), convert the lists of time components
+	" to a single string using logic designed to minimize the string's length
+	" without throwing away useful information.
+	" Logic: Pre-processing in Add method discarded any nonzero components in
+	" excess of display_sigfigs; additionally, the pre-processing discards
+	" seconds component if display_seconds is false *unless* seconds component
+	" is the sole nonzero component, in which case it is retained. The Finalize
+	" method keeps up to display_sigfigs components, but once it has 1 nonzero
+	" component, it will retain additional components only if they contribute to
+	" the 'uniqueness' of the displayed time: e.g., if display_sigfigs == 2 and
+	" the nonzero components are 3d,5h, the 5h would be discarded if there are
+	" no other nodes with time of 3d,5h,... Additionally, the 5h would be
+	" discarded if all nodes with '3d,5h' are exactly '3d,5h' (i.e., have
+	" insignificant minute and second components), since in that case, the '5h'
+	" is not helping to differentiate.
 	fu! me.Finalize()
 		for [seq, comps] in items(self.nodes)
 			let [msi, lsi] = [-1, -1]
@@ -910,18 +925,18 @@ fu! s:Make_ago(...)
 				let s = 'now'
 			else
 				" Build the string of components.
-				let [s, sep] = ['', '-']
+				let s = ''
 				for i in range(msi, lsi)
 					" Use only nonzero components.
 					if comps[i]
 						let comp = comps[i]
-						if comp < 0
+						if comp < 0 && empty(s)
 							" Shouldn't happen often, but if 1st component is
 							" negative, it means future time, which we'll
-							" indicate with a leading `+' and plus separators.
-							let [sep, comp] = ['+', abs(comp)]
+							" indicate with a leading `+'.
+							let [s, comp] = ['+', abs(comp)]
 						endif
-						if sep == '+' || !empty(s) | let s .= sep | endif
+						if !empty(s) | let s .= ',' | endif
 						let s .= comp . s:TIME_UNITS[i][1]
 					endif
 				endfor
@@ -1035,11 +1050,9 @@ fu! s:Is_syn_dirty() dict
 	return self.seq < 0
 endfu
 
-" Assumption: Called from child buffer
 fu! s:Clear_syn_tree() dict
 	let self.ids = []
 	let self.seq = -1
-	call clearmatches()
 endfu
 
 " Add or erase brackets around input node from geom.nodes dictionary.
@@ -2087,7 +2100,8 @@ fu! s:Refresh_undo_window()
 	" Note: Even if cache wasn't refreshed, syntax could have been invalidated
 	" because \u made a different parent window special.
 	if s:undo_cache.syn.Is_dirty()
-		" Update highlighting
+		" Highlight from scratch.
+		call clearmatches()
 		call s:undo_cache.syn.Update(s:undo_cache.tree.cur)
 	endif
 endfu
