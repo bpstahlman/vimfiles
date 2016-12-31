@@ -785,14 +785,6 @@ fu! s:Build_tree_display(ptree, pextent, detailed)
 	return ret
 endfu
 
-" TODO: Rework so that the parent hash holds an object with child's bnr and
-" whatever data object the plugin wants to store in it. Also, perhaps it could
-" hold a random magic number to give greater confidence on identity of child
-" buffer.
-let s:undo_infos = {}
-let s:parent_to_child = {}
-let s:child_to_parent = {}
-
 let s:Debug_level = -1
 fu! s:Dbg(lvl, fmt, ...)
 	if a:lvl > s:Debug_level
@@ -801,8 +793,95 @@ fu! s:Dbg(lvl, fmt, ...)
 	echo call('printf', extend([a:fmt], a:000))
 endfu
 
-" NOte: These defaults correspond to global settings g:undotree_display_sigfigs
+" TODO: Consider using json_encode/decode in conjunction with Capitalized
+" globals to have marks persisted.
+" Note: By default, 'viminfo' doesn't contain `!', which means global variables
+" won't be saved for most users unless they change their 'viminfo' setting.
+" Thus, I'm not sure it makes sense to persist marks.
+let s:marks = {'files': {}}
+
+fu! s:marks.Add(file, ltr, seq) dict
+	" Assumption: Caller ensures there's a valid filename.
+	let path = fnamemodify(a:file, ':p')
+	" Do we have any entry for this file yet? If not, create.
+	if has_key(self.files, path)
+		let pentry = self.files[path]
+	else
+		let pentry = {'marks': {}, 'seqs': {}}
+		let self.files[path] = pentry
+	endif
+	" Update MRU timestamp.
+	let pentry.ts = localtime()
+	" Check for obsolete mapping.
+	if has_key(pentry.marks, a:ltr)
+		" Remove ltr from list of marks pointing to this seq.
+		" Assumption: Item must exist.
+		let seq = pentry.marks[a:ltr]
+		call remove(pentry.seqs[seq], index(pentry.seqs[seq], a:ltr))
+	endif
+	" Map ltr->seq
+	let pentry.marks[a:ltr] = a:seq
+	" Map seq->[ltr,...]
+	if !has_key(pentry.seqs, a:seq)
+		let pentry.seqs[a:seq] = [a:ltr]
+	else
+		" Grow the list of ltr's pointing to this seq
+		call insert(pentry.seqs[a:seq], a:ltr)
+	endif
+endfu
+
+fu! s:marks.Remove(file, ltr) dict
+	let path = fnamemodify(a:file, ':p')
+	if has_key(self.files, path)
+		let pentry = self.files[path]
+		" Update MRU timestamp.
+		let pentry.ts = localtime()
+		" Check for obsolete mapping.
+		if has_key(pentry.marks, a:ltr)
+			" Remove ltr from list of marks pointing to this seq.
+			" Assumption: Presence of ltr in marks hash guarantees existence.
+			let seq = pentry.marks[a:ltr]
+			call remove(pentry.seqs[seq], index(pentry.seqs[seq], a:ltr))
+			call remove(pentry.marks, a:ltr)
+			if empty(pentry.marks)
+				" No reason to keep path's key if it contains no marks.
+				call remove(self.files, path)
+			endif
+		endif
+	endif
+endfu
+
+fu! s:marks.Get_seq(file, ltr) dict
+	let path = fnamemodify(a:file, ':p')
+	if has_key(self.files, path)
+		let self.files[path].ts = localtime()
+		if has_key(self.files[path].marks, a:ltr)
+			return self.files[path].marks[a:ltr]
+		endif
+	endif
+	return -1
+endfu
+
+fu! s:marks.Get_marks(file, seq) dict
+	let path = fnamemodify(a:file, ':p')
+	if has_key(self.files, path)
+		let self.files[path].ts = localtime()
+		if has_key(self.files[path].seqs, a:seq)
+			return self.files[path].seqs[a:seq]
+		endif
+	endif
+	return -1
+endfu
+
+" Called whenever we've obtained the vim undotree for a buffer.
+" TODO: This is only needed if I support persisting marks across sessions.
+fu! s:marks.Gc(file, vut)
+	let path = fnamemodify(a:file, ':p')
+endfu
+
+" Note: These defaults correspond to global settings g:undotree_display_sigfigs
 " and g:undotree_display_seconds, respectively.
+" TODO: Probably move all such defaults to common location.
 let s:DEFAULT_DISPLAY_SIGFIGS = 2
 let s:DEFAULT_DISPLAY_SECONDS = 0
 let s:TIME_UNITS = [[86400, 'd'], [3600, 'h'], [60, 'm'], [1, 's']]
@@ -1065,6 +1144,7 @@ fu! s:Bracket_node(gnode, erase, detailed)
 	let [scol, ecol] = [col + gi.e[0], col + gi.e[1]]
 	"echomsg "gi: " . string(gi) . ", scol=" . scol . ", ecol=" . ecol
 	" TODO: Make change manually? Or with setline()?
+	setl modifiable
 	let s = getline(row)
 	call setline(row,
 		\ strpart(s, 0, scol - 1) .
@@ -1072,6 +1152,7 @@ fu! s:Bracket_node(gnode, erase, detailed)
 		\ strpart(s, scol, gi.w - 2) .
 		\ (a:erase ? ' ' : ']') .
 		\ strpart(s, ecol))
+	setl nomodifiable
 endfu
 
 " Assumption: Input node is valid. (Note that root node can never be
@@ -1284,7 +1365,21 @@ fu! s:Configure_parent()
 	call s:Create_autocmds_in_parent()
 endfu
 
-fu! s:Create_mappings_in_child()
+" TODO: Consider implementing Get_parent_path accessor to avoid passing hte
+" parent path down the call chain like this.
+fu! s:Create_mark_mappings_in_child(parent_path)
+	" Create maps for all possible lowercase marks.
+	for ltr in map(range(char2nr('a'), char2nr('z')), 'nr2char(v:val)')
+		exe printf('nnoremap <silent> <nowait> <buffer> m%s'
+			\ . ' :<C-U>call <SID>Set_mark("%s", "%s")<CR>',
+			\ ltr, escape(a:parent_path, '"\'), ltr)
+		exe printf('nnoremap <silent> <nowait> <buffer> ''%s'
+			\ . ' :<C-U>call <SID>Goto_mark("%s", "%s")<CR>',
+			\ ltr, escape(a:parent_path, '"\'), ltr)
+	endfor
+endfu
+
+fu! s:Create_mappings_in_child(parent_path)
 	" Create buffer-local mapping(s)
 	" To refresh the tree forcibly
 	nnoremap <silent> <nowait> <buffer> R :call <SID>Refresh_child()<CR>
@@ -1297,9 +1392,13 @@ fu! s:Create_mappings_in_child()
 	nnoremap <silent> <nowait> <buffer> h  :call <SID>Move_in_tree('left')<CR>
 	nnoremap <silent> <nowait> <buffer> l  :call <SID>Move_in_tree('right')<CR>
 	nnoremap <silent> <nowait> <buffer> C  :call <SID>Center_tree(1, 0)<CR>
-	nnoremap <silent> <nowait> <buffer> G  :<C-U>call <SID>Goto_node_in_tree(0)<CR>
-	nnoremap <silent> <nowait> <buffer> gg :<C-U>call <SID>Goto_node_in_tree(1)<CR>
+	nnoremap <silent> <nowait> <buffer> G  :<C-U>call <SID>Goto_node_in_tree(v:count)<CR>
+	" Note: gg works like G except that when no count is supplied, it defaults
+	" to leaf node, not root.
+	nnoremap <silent> <nowait> <buffer> gg
+		\ :<C-U>call <SID>Goto_node_in_tree(v:count ? v:count : -1)<CR>
 	nnoremap <silent> <nowait> <buffer> D  :<C-U>call <SID>Toggle_display_mode_handler()<CR>
+	call s:Create_mark_mappings_in_child(a:parent_path)
 endfu
 
 " Return string like ` ctermfg=<cterm_clr> guifg=<gui_clr>', taking
@@ -1397,9 +1496,9 @@ endfu
 " TODO: Perhaps make it so stuff isn't redone unnecessarily (though all of this
 " should be safe to redo).
 " TODO: Make sure child has all requisite autocmds and such.
-fu! s:Configure_child()
+fu! s:Configure_child(parent_path)
 	call s:Create_autocmds_in_child()
-	call s:Create_mappings_in_child()
+	call s:Create_mappings_in_child(a:parent_path)
 	call s:Create_syntax_in_child()
 	" Note: This will also be called in child BufEnter, but that call may have
 	" been skipped due to :noauto.
@@ -1640,7 +1739,7 @@ fu! s:Position_child(splithow)
 		let split_mod .= ' vert'
 	endif
 	" Note: 'silent' prevents annoying and misleading [new file] msg.
-	let cmd = ' +setl\ buftype=nofile\ bufhidden=hide\ noswapfile '
+	let cmd = ' +setl\ buftype=nofile\ bufhidden=hide\ noswapfile\ nomodifiable '
 	if s:undo_bufnr < 0
 		" Create new window containing scratch buffer.
 		" Caveat: Wanted to wrap name in [...], but that makes Vim think it's
@@ -1715,11 +1814,14 @@ endfu
 " if necessary.
 " Assumption: In parent buffer
 fu! s:Prepare_child(splithow)
+	" Before creating/moving to child, save parent's path to obviate need for
+	" Configure_child to switch back to parent's buffer to get it.
+	let p_path = expand('%:p')
 	call s:Position_child(a:splithow)
 	" Note: We call this even when buf already existed, to ensure it's got all
 	" the mappings and autocmds we'll need. (It's unlikely, but possible, that
 	" someone deleted maps/autocmds, for instance.)
-	call s:Configure_child()
+	call s:Configure_child(p_path)
 endfu
 
 fu! s:Describe_node(...)
@@ -1824,29 +1926,21 @@ fu! s:Center_tree(force, limit, ...)
 	endif
 endfu
 
-" Goto (and center on) the node whose seq number user supplied as count to a
-" mapping.
-fu! s:Goto_node_in_tree(root_is_default)
-	" Note: You can't supply 0 as a count, but a user may want to go to the root
-	" node. Also, there are 2 different maps that invoke this function, and
-	" they should produce different behavior when invoked without count:
-	" gg => root
-	" G  => end of redo path
-	" Note: When count is omitted, v:count will be 0.
-	let seq = v:count
-	if !seq
-		if a:root_is_default
-			let node = s:undo_cache.tree
-		else
-			" Default to leaf node at end of current redo path.
-			let node = s:undo_cache.tree.cur.Get_leaf()
-		endif
+" Goto (and center on) the node whose seq number is provided, or leaf node if
+" input seq == -1.
+fu! s:Goto_node_in_tree(seq)
+	if a:seq < 0
+		" Default to leaf node at end of current redo path.
+		let node = s:undo_cache.tree.cur.Get_leaf()
+	elseif !a:seq
+		" Root node
+		let node = s:undo_cache.tree
 	else
 		" Get the node, bearing in mind that there's no guarantee it exists.
 		let geom = s:undo_cache.geom
-		let gnode = has_key(geom.nodes, seq) ? geom.nodes[seq] : {}
+		let gnode = has_key(geom.nodes, a:seq) ? geom.nodes[a:seq] : {}
 		if empty(gnode)
-			echomsg "Warning: Node " . seq . " does not exist."
+			echomsg "Warning: Node " . a:seq . " does not exist."
 			return
 		endif
 		let node = gnode.node
@@ -1867,6 +1961,40 @@ fu! s:Goto_node_in_tree(root_is_default)
 
 endfu
 
+fu! s:Set_mark(parent_path, ltr)
+	" TODO: Functionize this test, as it's used in multiple places.
+	if s:undo_bufnr < 0 || s:undo_winid != win_getid()
+		" Ignore maps in non-special child window.
+		" TODO: If we stick with this approach, should probably use normal! to
+		" let the key sequence have its normal effect.
+		return
+	endif
+	if s:bufnr < 0 || s:winid < 0 || !win_id2win(s:winid)
+		" TODO: Can this happen?
+		echomsg "Warning: Cannot traverse undo tree for inactive parent buffer"
+	endif
+	call s:marks.Add(a:parent_path, a:ltr, s:undo_cache.tree.cur.seq)
+endfu
+
+fu! s:Goto_mark(parent_path, ltr)
+	" TODO: Functionize this test, as it's used in multiple places.
+	if s:undo_bufnr < 0 || s:undo_winid != win_getid()
+		" Ignore maps in non-special child window.
+		" TODO: If we stick with this approach, should probably use normal! to
+		" let the key sequence have its normal effect.
+		return
+	endif
+	if s:bufnr < 0 || s:winid < 0 || !win_id2win(s:winid)
+		" TODO: Can this happen?
+		echomsg "Warning: Cannot traverse undo tree for inactive parent buffer"
+	endif
+	let seq = s:marks.Get_seq(a:parent_path, a:ltr)
+	if seq >= 0
+		" TODO: Get rid of defaults_to_root arg.
+		call s:Goto_node_in_tree(seq)
+	endif
+endfu
+
 " Called From: child buffer maps for moving in tree.
 " Assumption: Can be invoked only when fresh undo data structures exist.
 " Rationale: Invoked from undo buffer mappings, and freshness is checked in
@@ -1880,6 +2008,7 @@ fu! s:Move_in_tree(dir) " entry
 		return
 	endif
 	if s:bufnr < 0 || s:winid < 0 || !win_id2win(s:winid)
+		" TODO: Can this happen?
 		echomsg "Warning: Cannot traverse undo tree for inactive parent buffer"
 	endif
 	" Grab tree and invoke specified movement method.
@@ -1931,7 +2060,6 @@ fu! s:Refresh_child() " entry
 	call s:Center_tree(1, 1)
 endfu
 
-"let nodes[t.seq] = {'node': t, 'col': x + 1, 'row': lrow + 1, 'geom': gi }
 " TODO: Consider calling this Build_tree_display_pre, as it builds a portion of
 " the objects in the node hash and passes it along for use in both Design() and
 " Build_tree_display proper.
@@ -1974,6 +2102,13 @@ fu! s:Build_nodes_hash(tree, detailed)
 	return nodes
 endfu
 
+fu! s:Dbg_build(uc)
+	let a:uc.dirty = 1
+	let nodes = s:Build_nodes_hash(a:uc.tree, a:uc.detailed)
+	let [ptree, pextent] = s:Design(nodes, a:uc.tree)
+	let a:uc.geom = s:Build_tree_display(ptree, pextent, a:uc.detailed)
+	let a:uc.syn = s:Make_syn_tree(a:uc.geom, a:uc.detailed)
+endfu
 fu! s:Make_undo_cache(tree, detailed)
 	let me = {
 		\ 'dirty': 1,
@@ -1994,7 +2129,8 @@ fu! s:Make_undo_cache(tree, detailed)
 		let self.detailed = !self.detailed
 		call self.Build()
 	endfu
-	call me.Build()
+	"call me.Build()
+	call s:Dbg_build(me)
 	return me
 endfu
 
@@ -2087,12 +2223,16 @@ fu! s:Refresh_undo_window()
 	" -buffer contents could have been invalidated by user modification
 	"  (shouldn't happen - don't guard against this)
 	if s:undo_cache.dirty
+		" TODO: Is this best strategy, or do we need a more complex mechanism to
+		" manage 'modifiable'?
+		setl modifiable
 		" Replace undo buffer's contents with new tree.
 		silent %d
 		call append(0, s:undo_cache.geom.lines)
 		" Append adds a final blank line, which serves no purpose, and which we
 		" don't want to impact window sizing, so delete it.
 		$d
+		setl nomodifiable
 		" Caveat: The preceding :$d can shift the viewport.
 		norm! gg
 		let s:undo_cache.dirty = 0
