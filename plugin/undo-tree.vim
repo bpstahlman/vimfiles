@@ -64,16 +64,27 @@ fu! s:Make_node_geom(node, detailed, ...)
 	" Note: Add the surrounding spaces, which will be converted to brackets upon
 	" node selection.
 	if a:detailed && a:node.seq
-		let text = printf(" %d@%s ", a:node.seq, a:1)
+		let text = [printf(" #%s ", a:node.seq), a:1]
 	else
-		let text = ' ' . a:node.seq . ' '
+		let text = [' ' . a:node.seq . ' ']
 	endif
-	let w = len(text)
-	" Design Decision: The -1 ensures that when len is even, we center on
-	" the last char in the left half, not first in right.
-	let xs = -(w - 1) / 2
-	let xe = xs + w - 1
-	return {'w': w, 'e': [xs, xe], 'text': text}
+	let [w, es] = [[], []]
+	let e = [0, 0]
+	for t in text
+		let w_ = len(t)
+		call add(w, w_)
+		" Design Decision: The -1 ensures that when len is even, we center on
+		" the last char in the left half, not first in right.
+		let xs_ = -(w_ - 1) / 2
+		let e_ = [xs_, xs_ + w_ - 1]
+		call add(es, e_)
+		" Update merged extent.
+		if e_[0] < e[0] | let e[0] = e_[0] | endif
+		if e_[1] > e[1] | let e[1] = e_[1] | endif
+	endfor
+	" Note: es is array of extents ([[xs1, xe1], ...]; e is a single extent
+	" ([xs_min, xe_max]) representing a fold of es.
+	return {'w': w, 'es': es, 'e': e, 'text': text}
 endfu
 
 " Make this node the current one in the tree.
@@ -430,13 +441,12 @@ fu! s:Merge_list(es)
 	return s:Foldl(function('s:Merge'), {}, a:es)
 endfu
 
-
 fu! s:Fit_fn(max, e_pair)
 	" Assumption: Caller ensures matched pairs (using discard_unmatched optional
 	" arg to Zip).
-	" TODO: Make min separation configurable? At least, don't hard-code.
-	" Note: Space for any brackets is included in label width.
-	let d = a:e_pair[0][1] - a:e_pair[1][0] + 1
+	" Note: +2 gives a single space between the elements. Any additional
+	" required spacing (e.g., for brackets) is represented in label itself.
+	let d = a:e_pair[0][1] - a:e_pair[1][0] + 2
 	return d > a:max ? d : a:max
 endfu
 fu! s:Fit(e1, e2)
@@ -692,7 +702,11 @@ fu! s:Build_tree_display(ptree, pextent, detailed)
 	" Fifo elements: [<node>, <absolute-parent_x>, <lvl>]
 	let fifo = [[a:ptree, x, 0]]
 	" TODO: Make this part of some sort of global config.
-	let rows_per_lvl = 3
+	" Break row height into fixed and non-fixed (label) portions (noting that
+	" non-fixed portion may be different for root and non-root levels).
+	let [fixed_ht, rlbl_ht, nrlbl_ht] = [2, 1, a:detailed ? 2 : 1]
+	" Cache rows per level and amount by which root level is shorter.
+	let [rows_per_lvl, root_diff] = [fixed_ht + nrlbl_ht, nrlbl_ht - rlbl_ht]
 	let lines = s:Make_gridlines()
 	" Hash geom info by node id (seq number)
 	let nodes = {}
@@ -705,8 +719,8 @@ fu! s:Build_tree_display(ptree, pextent, detailed)
 		let [t, gi] = [ptree.node, ptree.geom]
 		" Calculate absolute x position in grid.
 		let x = parent_x + ptree.x
-		" Get index of row containing the label.
-		let lrow = lvl * rows_per_lvl
+		" Get index of top (possibly only) row containing label.
+		let lrow = lvl * rows_per_lvl - (lvl ? root_diff : 0)
 		" Hash node information by seq number.
 		" Rationale: Associates nodes with actual canvas location.
 		" Note: Geom info is fixed in Design and stored, not only for
@@ -725,9 +739,13 @@ fu! s:Build_tree_display(ptree, pextent, detailed)
 			let pts = pts.next
 		endwhile
 		" Process current node.
-		" Build the label, leaving space for surrounding [...].
-		let text_x = x + gi.e[0]
-		call lines.add(lrow, text_x, gi.text)
+		" Build the seq # label (and the 'ago' time label as well, if mode is
+		" detailed).
+		let i = 0
+		while i < len(gi.text)
+			call lines.add(lrow + i, x + gi.es[i][0], gi.text[i])
+			let i += 1
+		endwhile
 		" Draw lower vertical for all but root.
 		if !empty(t.parent)
 			if t.x < 0
@@ -1074,11 +1092,16 @@ endfu
 fu! s:Update_syn_tree_node(ids, gnode, detailed)
 	let [node, gi, row, col] =
 		\ [a:gnode.node, a:gnode.geom, a:gnode.row, a:gnode.col]
-	let re = s:Make_regex('.*', [row, col + gi.e[0]], gi.w)
-	" TODO: Don't hardcode the priorities like this.
-	" Note: Priority 10 is default. It will override hlsearch and such, but
-	" should be lowest of the undo-tree groups.
-	call add(a:ids, matchadd('undo_redo_path', re, 10))
+	" Loop over the 1 or 2 rows of node text beginning at row.
+	let i = 0
+	while i < len(gi.es)
+		let re = s:Make_regex('.*', [row + i, col + gi.es[i][0]], gi.w[i])
+		" TODO: Don't hardcode the priorities like this.
+		" Note: Priority 10 is default. It will override hlsearch and such, but
+		" should be lowest of the undo-tree groups.
+		call add(a:ids, matchadd('undo_redo_path', re, 10))
+		let i += 1
+	endwhile
 	if !node.lvl
 		" Nothing else to do for root.
 		return
@@ -1141,7 +1164,10 @@ endfu
 fu! s:Bracket_node(gnode, erase, detailed)
 	let [tnode, row, col, gi] =
 		\ [a:gnode.node, a:gnode.row, a:gnode.col, a:gnode.geom]
-	let [scol, ecol] = [col + gi.e[0], col + gi.e[1]]
+	" TODO: For now, just bracket the seq # row (always first when more than
+	" one); consider whether we should do something for the 'ago' time row as
+	" well.
+	let [scol, ecol] = [col + gi.es[0][0], col + gi.es[0][1]]
 	"echomsg "gi: " . string(gi) . ", scol=" . scol . ", ecol=" . ecol
 	" TODO: Make change manually? Or with setline()?
 	setl modifiable
@@ -1149,7 +1175,7 @@ fu! s:Bracket_node(gnode, erase, detailed)
 	call setline(row,
 		\ strpart(s, 0, scol - 1) .
 		\ (a:erase ? ' ' : '[') .
-		\ strpart(s, scol, gi.w - 2) .
+		\ strpart(s, scol, gi.w[0] - 2) .
 		\ (a:erase ? ' ' : ']') .
 		\ strpart(s, ecol))
 	setl nomodifiable
@@ -1878,15 +1904,22 @@ fu! s:Calculate_tree_node_offset(limit, ...)
 	" Determine current horiz/vert view scroll amounts.
 	let [vscroll, hscroll] = [line('.') - winline(), col('.') - wincol()]
 	let [wh, ww] = [winheight(0), winwidth(0)]
-	" Get the geom node corresponding to desired center.
+	" Get the geom node corresponding to node.
 	let gnode = s:undo_cache.geom.nodes[seq]
-	let [t, row, col] = [gnode.node, gnode.row, gnode.col]
-	" Calculate 1-based offset from edge of window.
-	let [row_rel, col_rel] = [row - vscroll, col - hscroll]
+	let [gi, t] = [gnode.geom, gnode.node]
+	" Calculate center point (which, may be in the middle of a sequence of label
+	" rows).
+	let nrows = len(gi.text)
+	let [row1, row2] = [gnode.row, gnode.row + nrows - 1]
+	let [row, col] = [(row1 + row2) / 2, gnode.col]
+	" Calculate 1-based offset from edge of window to points of interest.
+	let [row_rel, row1_rel, row2_rel, col_rel] =
+		\ [row - vscroll, row1 - vscroll, row2 - vscroll, col - hscroll]
 	" Check edges of node to see whether any part is not visible.
-	let gi = gnode.geom
-	" Note: +1 needed to ensure we center on middle of odd number of rows.
-	if row_rel < 1 || row_rel > wh ||
+	" Note: For check with bottom of window, use bottom of node (whose row may
+	" differ from row of top), and for check with edges, use the merged extent
+	" (which may take multiple rows into account).
+	if row1_rel < 1 || row2_rel > wh ||
 		\ col_rel + gi.e[0] < 1 || col_rel + gi.e[1] > ww
 		let ret.visible = 0
 	endif
