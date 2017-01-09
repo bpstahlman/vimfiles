@@ -413,7 +413,7 @@ fu! s:Move_tree_fn(tree_pos)
 		\ 'node': a:tree_pos[0].node,
 		\ 'x': new_x,
 		\ 'geom': a:tree_pos[0].geom,
-		\ 'ptrees': a:tree_pos[0].ptrees}
+		\ 'trees': a:tree_pos[0].trees}
 endfu
 
 " Note: Meant to be used with s:Map
@@ -546,7 +546,85 @@ fu! s:Optimize_child_positions(positions)
 	endif
 endfu
 
-fu! s:Design(nodes, t)
+" Convert tree to a list of nodes in reverse breadth-first traversal order.
+" E.g.: TAIL: 0 1.1 1.2 1.3 1.1.1 1.1.2 1.2.1 1.2.2 1.3.1 1.3.2 :HEAD
+" TODO: Any advantage to using my lispy lists in lieu of Vim List for bflist?
+fu! s:Tree_to_bflist(tree)
+	let [fifo, bflst] = [[a:tree], []]
+	while !empty(fifo)
+		let t = remove(fifo, 0)
+		call insert(bflst, t)
+		let tc = t.children.fst
+		while !empty(tc)
+			call add(fifo, tc)
+			let tc = tc.next
+		endwhile
+	endwhile
+	return bflst
+endfu
+
+fu! s:Design(nodes, tree)
+	" Walk the children.
+	let bflst = s:Tree_to_bflist(a:tree)
+	" trees/extents are accumulator lists for current sibling group.
+	" rfifo is result fifo where we push positioned extents/trees for an entire
+	" sibling group till they're required by the parent.
+	let [trees, extents, rfifo] = [{}, {}, []]
+	" Iterate breadth-first list (ordered from lower-right-most element to root
+	" working leftward/upward).
+	" Note: tp is parent node for the current sibling group.
+	let [t, tp] = [bflst, {}]
+	for t in bflst
+		if tp isnot t.parent
+			" Starting new sibling group.
+			" Note: On first iteration, we'll get here (since {} isnot {}), but
+			" not into subsequent if (since there are no extents).
+			if !empty(extents)
+				" Process old sibling group (represented by trees and extents).
+				let positions = s:Fitlist(extents)
+				" Modify list in place to ensure that no child is offset exactly
+				" 1 col from parent.
+				" Rationale: Prevents annoying visual disturbance in tree.
+				call s:Optimize_child_positions(positions)
+				" Position the trees/extents.
+				let trees = s:Map(function('s:Move_tree_fn'), s:Zip(trees, positions))
+				let extents = s:Map(function('s:Move_extent'), s:Zip(extents, positions))
+				" Add positioned trees/extents to the fifo for parent to pull.
+				call add(rfifo, [extents, trees])
+				" Clear out just-processed sibling group.
+				let [extents, trees] = [{}, {}]
+			endif
+			" Record transition to new sibling group.
+			let tp = t.parent
+		endif
+		" Pull descendant results from result fifo (if applicable); otherwise,
+		" we're at leaf and must initialize to empty lists.
+		" Note: It's actually possible to pull what was pushed this iteration.
+		let [cextents, ctrees] = !empty(t.children.fst)
+			\ ? remove(rfifo, 0) : [{}, {}]
+		" Prepend this node (along with its geometry) to descendant lists.
+		" Note: Each element of 'cextents' list is the extent for one of this
+		" node's child trees. Merge_list merges these into a single extent, onto
+		" which we cons this node's contribution, before consing the whole thing
+		" onto the 'extents' list for the current sibling group.
+		let geom = a:nodes[t.seq].geom
+		let extent = s:Cons(geom.e, s:Merge_list(cextents))
+		let tree = {'node': t, 'x': 0, 'geom': geom, 'trees': ctrees}
+		" TODO: Better way to handle this now that we're using a Vim list?
+		echo "seq: " . t.seq
+		if empty(t.parent)
+			" We've hit root. No reason to augment trees/extents...
+			" TODO: break instead?
+			return [tree, extent]
+		endif
+		" Augment extents/trees for current sibling group.
+		let extents = s:Cons(extent, extents)
+		let trees = s:Cons(tree, trees)
+	endfor
+	" Assumption: Existence of root node precludes getting here.
+endfu
+
+fu! s:Design_recursive(nodes, t)
 	" Walk the children.
 	let [trees, extents] = [{}, {}]
 	let [trees_tail, extents_tail] = [trees, extents]
@@ -612,7 +690,7 @@ endfu
 " TODO: Convert arrays used in these methods from Vim lists to singly-linked
 " lists. (Perhaps wait till I've tested basic algorithm.)
 " Note: This function is work in progress. May be abandoned. If not abandoned,
-" may be converted to cleaner BFS implementation.
+" may be converted to cleaner breadth-first implementation.
 fu! s:Design_nr(t)
 	let lvl = 0
 	let descend = 0
@@ -732,7 +810,7 @@ fu! s:Build_tree_display(ptree, pextent, detailed)
 		" TODO: Decide whether the convenience justifies the denormalization.
 		let nodes[t.seq] = {'node': t, 'col': x + 1, 'row': lrow + 1, 'geom': gi }
 		" Add this node's children to fifo
-		let pts = ptree.ptrees
+		let pts = ptree.trees
 		while !empty(pts)
 			" Note: Add parent x only, as child x can be calculated therefrom.
 			call add(fifo, [pts.el, x, lvl + 1])
