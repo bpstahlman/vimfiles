@@ -1,4 +1,3 @@
-
 " 1: Fri 14 Oct 2016 09:30:10 AM CDT: |  |
 " 2: Fri 14 Oct 2016 09:30:11 AM CDT: |  |
 "         9: Fri 14 Oct 2016 09:40:44 AM CDT: |  |
@@ -611,7 +610,6 @@ fu! s:Design(nodes, tree)
 		let extent = s:Cons(geom.e, s:Merge_list(cextents))
 		let tree = {'node': t, 'x': 0, 'geom': geom, 'trees': ctrees}
 		" TODO: Better way to handle this now that we're using a Vim list?
-		echo "seq: " . t.seq
 		if empty(t.parent)
 			" We've hit root. No reason to augment trees/extents...
 			" TODO: break instead?
@@ -1215,9 +1213,6 @@ fu! s:Update_syn_tree_node(ids, gnode, detailed)
 	endif
 
 	" Vertical to parent
-	if col - node.x <= 2
-		echo "Ooops! seq=" . node.seq . " node.x=" . node.x . " col=" . col
-	endif
 	let re = s:Make_regex('|', [row - 2, col - node.x])
 	call add(a:ids, matchadd('undo_redo_path', re, 10))
 
@@ -1351,8 +1346,19 @@ endfu
 " For convenience, ensure these script-locals always exist.
 let [s:bufnr, s:winid] = [-1, -1]
 let [s:undo_bufnr, s:undo_winid] = [-1, -1]
+let s:diff_bufnr = -1
 let s:undo_cache = {}
 let s:actions = {}
+let s:mark_seq = -1
+
+" For use by the override mechanism.
+let s:opt_overrides = {}
+
+" Option configuration
+let s:opt_cfg = {
+	\ 'showdiff': {'type': 6, 'default': v:true},
+	\ 'diffheight': {'type': 0, 'min': 2, 'default': 10}
+\ }
 
 " Safe to call if action not pending.
 fu! s:Cancel_action(fn)
@@ -1408,7 +1414,7 @@ fu! s:Unconfigure_parent()
 endfu
 
 " Note: Redundant calls are safe.
-fu! s:Unconfigure_child()
+fu! s:Unconfigure_treebuf()
 	if s:undo_winid > 0
 		noauto call win_gotoid(s:undo_winid)
 		" Clear child winid, but leave its bufnr intact to facilitate reuse.
@@ -1422,7 +1428,7 @@ fu! s:Unconfigure_child()
 		silent %d
 		" Remove the child autocommands.
 		" Note: Deleting a buffer doesn't remove its buf-local autocmds.
-		au! undo_tree_child
+		au! undo_tree_treebuf
 		" Caveat!: Cannot assume we'll be in child, as BufWinLeave autocmd doesn't
 		" guarantee it.
 		" Note: Though Is_child_configured checks only for autocmds, might be nice
@@ -1434,19 +1440,38 @@ fu! s:Unconfigure_child()
 	endif
 endfu
 
-fu! s:Create_autocmds_in_child()
+fu! s:Unconfigure_diffbuf()
+endfu
+
+fu! s:Create_autocmds_in_treebuf()
 	" Create autocmds that will permit us to clean up when child buf deleted
-	aug undo_tree_child
+	aug undo_tree_treebuf
 		au!
-		au BufDelete <buffer> call s:Child_BufDelete(expand("<abuf>"))
-		au BufEnter <buffer> call s:Child_BufEnter()
-		au BufLeave <buffer> call s:Child_BufLeave()
-		"au TextChanged <buffer> call s:Child_TextChanged()
-		"au TextChangedI <buffer> call s:Child_TextChanged()
-		au BufWinLeave <buffer> call s:Child_BufWinLeave(expand("<abuf>"))
+		au BufDelete <buffer> call s:Treebuf_BufDelete(expand("<abuf>"))
+		au BufEnter <buffer> call s:Treebuf_BufEnter()
+		au BufLeave <buffer> call s:Treebuf_BufLeave()
+		"au TextChanged <buffer> call s:Treebuf_TextChanged()
+		"au TextChangedI <buffer> call s:Treebuf_TextChanged()
+		au BufWinLeave <buffer> call s:Treebuf_BufWinLeave(expand("<abuf>"))
 		au WinEnter * call s:WinEnter()
 		au WinLeave * call s:WinLeave()
 	augroup END
+endfu
+
+fu! s:Create_autocmds_in_diffbuf()
+	" Create autocmds that will permit us to clean up when child buf deleted
+	aug undo_tree_diffbuf
+		au!
+		au BufDelete <buffer> call s:Diffbuf_BufDelete(expand("<abuf>"))
+		au BufEnter <buffer> call s:Diffbuf_BufEnter()
+		au BufLeave <buffer> call s:Diffbuf_BufLeave()
+		au BufWinLeave <buffer> call s:Diffbuf_BufWinLeave(expand("<abuf>"))
+	augroup END
+endfu
+
+fu! s:Create_mappings_in_diffbuf()
+	" Create buffer-local mapping(s)
+	" TODO: Any?
 endfu
 
 fu! s:Create_autocmds_in_parent()
@@ -1471,7 +1496,7 @@ endfu
 
 " TODO: Consider implementing Get_parent_path accessor to avoid passing hte
 " parent path down the call chain like this.
-fu! s:Create_mark_mappings_in_child(parent_path)
+fu! s:Create_mark_mappings_in_treebuf(parent_path)
 	" Create maps for all possible lowercase marks.
 	for ltr in map(range(char2nr('a'), char2nr('z')), 'nr2char(v:val)')
 		exe printf('nnoremap <silent> <nowait> <buffer> m%s'
@@ -1483,26 +1508,28 @@ fu! s:Create_mark_mappings_in_child(parent_path)
 	endfor
 endfu
 
-fu! s:Create_mappings_in_child(parent_path)
+fu! s:Create_mappings_in_treebuf(parent_path)
 	" Create buffer-local mapping(s)
 	" To refresh the tree forcibly
-	nnoremap <silent> <nowait> <buffer> R :call <SID>Refresh_child()<CR>
+	nnoremap <silent> <nowait> <buffer> R :call <SID>Refresh_treebuf()<CR>
 
 	" Moving up/down and changing undo/redo path through tree.
 	" Design Decision: No reason to avoid using regular Vim motion commands.
 	" Rationale: Cursor movement is highly constrained.
-	nnoremap <silent> <nowait> <buffer> k  :call <SID>Move_in_tree('up')<CR>
-	nnoremap <silent> <nowait> <buffer> j  :call <SID>Move_in_tree('down')<CR>
-	nnoremap <silent> <nowait> <buffer> h  :call <SID>Move_in_tree('left')<CR>
-	nnoremap <silent> <nowait> <buffer> l  :call <SID>Move_in_tree('right')<CR>
-	nnoremap <silent> <nowait> <buffer> C  :call <SID>Center_tree(1, 0)<CR>
+	nnoremap <silent> <nowait> <buffer> k  :<C-U>call <SID>Move_in_tree('up')<CR>
+	nnoremap <silent> <nowait> <buffer> j  :<C-U>call <SID>Move_in_tree('down')<CR>
+	nnoremap <silent> <nowait> <buffer> h  :<C-U>call <SID>Move_in_tree('left')<CR>
+	nnoremap <silent> <nowait> <buffer> l  :<C-U>call <SID>Move_in_tree('right')<CR>
+	nnoremap <silent> <nowait> <buffer> C  :<C-U>call <SID>Center_tree(1, 0)<CR>
 	nnoremap <silent> <nowait> <buffer> G  :<C-U>call <SID>Goto_node_in_tree(v:count)<CR>
 	" Note: gg works like G except that when no count is supplied, it defaults
 	" to leaf node, not root.
 	nnoremap <silent> <nowait> <buffer> gg
 		\ :<C-U>call <SID>Goto_node_in_tree(v:count ? v:count : -1)<CR>
-	nnoremap <silent> <nowait> <buffer> D  :<C-U>call <SID>Toggle_display_mode_handler()<CR>
-	call s:Create_mark_mappings_in_child(a:parent_path)
+	nnoremap <silent> <nowait> <buffer> X  :<C-U>call <SID>Toggle_display_mode_handler()<CR>
+	nnoremap <silent> <nowait> <buffer> q  :<C-U>call <SID>Close_undotree()<CR>
+	nnoremap <silent> <nowait> <buffer> D  :<C-U>call <SID>Toggle_diff()<CR>
+	call s:Create_mark_mappings_in_treebuf(a:parent_path)
 endfu
 
 " Return string like ` ctermfg=<cterm_clr> guifg=<gui_clr>', taking
@@ -1531,15 +1558,12 @@ fu! s:Get_undoredo_path_color_attrs()
 	return ret
 endfu
 
-fu! s:Create_syntax_in_child()
+fu! s:Create_syntax_in_treebuf()
 	" Design Decision: Could do this once up front, but re-doing it is cheap,
 	" and allows changes to g:undotree_path_hlgroup to be taken into account.
 	exe 'hi undo_redo_path gui=bold cterm=bold term=bold'
 		\ .	s:Get_undoredo_path_color_attrs()
 endfu
-
-" Object to hold saved option settings for save/restore mechanism.
-let s:opts = {}
 
 " TODO: Remove s:script_path and s:Get_opt_setter if they end up not being
 " needed.
@@ -1557,9 +1581,9 @@ fu! s:Get_opt_setter(name)
 endfu
 
 fu! s:Restore_opt(name)
-	if has_key(s:opts, a:name)
-		exe 'let &' . a:name ' = s:opts[a:name]'
-		call remove(s:opts, a:name)
+	if has_key(s:opt_overrides, a:name)
+		exe 'let &' . a:name ' = s:opt_overrides[a:name]'
+		call remove(s:opt_overrides, a:name)
 	endif
 endfu
 
@@ -1568,7 +1592,7 @@ endfu
 " inadvertently save our own setting for subsequent restoration. This would be
 " particularly bad if the option were 'guicursor'. Refusing to save an override
 " ensures this can't happen (at the cost of a bit of complexity).
-" TODO: Doing the save only in BufEnter (and in Configure_child when we're sure
+" TODO: Doing the save only in BufEnter (and in Configure_treebuf when we're sure
 " the BufEnter has been skipped) could also prevent the problem scenario, and
 " would obviate the need for the more complex override mechanism. Consider
 " whether this mechanism is justified.
@@ -1576,15 +1600,15 @@ endfu
 " that we typically wouldn't need to 'override' local params.)
 fu! s:Override_opt(name, value)
 	"let setter = s:Get_opt_setter(a:name)
-	if !has_key(s:opts, a:name)
+	if !has_key(s:opt_overrides, a:name)
 		" Save old value.
-		exe 'let s:opts[a:name] = &' . a:name
+		exe 'let s:opt_overrides[a:name] = &' . a:name
 	endif
 	" Override.
 	exe 'let &' . a:name . ' = a:value'
 endfu
 
-fu! s:Configure_cursor_in_child()
+fu! s:Configure_cursor_in_treebuf()
 	if has('gui')
 		call s:Override_opt('guicursor', 'n-v:block-NONE')
 	else
@@ -1593,26 +1617,26 @@ fu! s:Configure_cursor_in_child()
 endfu
 
 " Note: Redundant calls are safe.
-fu! s:Unconfigure_cursor_in_child()
+fu! s:Unconfigure_cursor_in_treebuf()
 	call s:Restore_opt(has('gui') ? 'guicursor' : 't_ve')
 endfu
 
 " TODO: Perhaps make it so stuff isn't redone unnecessarily (though all of this
 " should be safe to redo).
 " TODO: Make sure child has all requisite autocmds and such.
-fu! s:Configure_child(parent_path)
-	call s:Create_autocmds_in_child()
-	call s:Create_mappings_in_child(a:parent_path)
-	call s:Create_syntax_in_child()
+fu! s:Configure_treebuf(parent_path)
+	call s:Create_autocmds_in_treebuf()
+	call s:Create_mappings_in_treebuf(a:parent_path)
+	call s:Create_syntax_in_treebuf()
 	" Note: This will also be called in child BufEnter, but that call may have
 	" been skipped due to :noauto.
-	call s:Configure_cursor_in_child()
+	call s:Configure_cursor_in_treebuf()
 	" TODO: Decide whether separate function should be used for options.
 	" Rationale: Tree display falls apart if 'wrap' on
 	setl nowrap
 endfu
 
-fu! s:In_child()
+fu! s:In_treebuf()
 	return s:undo_bufnr == bufnr('%') && s:undo_winid == win_getid()
 endfu
 
@@ -1670,7 +1694,22 @@ fu! s:Hide_children()
 	noauto call win_gotoid(wid_orig)
 endfu
 
-fu! s:Orphan_child()
+fu! s:Hide_buffer(bnr)
+	let wid_orig = win_getid()
+	for wid in win_findbuf(a:bnr)
+		let [tnr, wnr] = win_id2tabwin(wid)
+		noauto call win_gotoid(wid)
+		" Attempt to hide the child, noting that command will fail (harmlessly)
+		" if it's the last window.
+		" Caveat: 'noauto' modifier needed to prevent BufWinLeave firing for the
+		" child.
+		silent! noauto hide
+	endfor
+	" Return to starting window.
+	noauto call win_gotoid(wid_orig)
+endfu
+
+fu! s:Orphan_treebuf()
 	call s:Unconfigure_parent()
 	" TODO: Determine whether there could be any reason to call Delete_children
 	" when s:undo_winid has already been cleared (-1). I'm thinking not.
@@ -1678,7 +1717,7 @@ fu! s:Orphan_child()
 		" Also unconfigure child so we don't need to worry about its autocmds
 		" triggering again.
 		" Rationale: :bd doesn't delete <buffer> autocmds.
-		call s:Unconfigure_child()
+		call s:Unconfigure_treebuf()
 		" Queue deletion of child buffer(s).
 		call s:Defer_action('Delete_children')
 	endif
@@ -1697,29 +1736,29 @@ endfu
 
 " Parent buffer is being deleted, or perhaps just hidden/unloaded.
 fu! s:Parent_BufWinLeave(bnr)
-	call s:Orphan_child()
+	call s:Orphan_treebuf()
 endfu
 
 " Detect when parent buffer has departed its original window.
 fu! s:BufEnter()
 	if s:winid == win_getid() && s:bufnr != bufnr('%')
 		" Parent buffer is leaving original window!
-		call s:Orphan_child()
+		call s:Orphan_treebuf()
 	endif
 endfu
 
 " Child buffer is being deleted, or perhaps just hidden/unloaded.
 " Note: BufDelete implies BufWinLeave (though the converse is not true), so
 " there is some harmless redundancy.
-fu! s:Child_BufWinLeave(bnr)
-	call s:Unconfigure_child()
+fu! s:Treebuf_BufWinLeave(bnr)
+	call s:Unconfigure_treebuf()
 endfu
 
 " Note: User shouldn't typically delete the child manually, but if he does, we
 " will lose the maps in the child buffer, so we need to ensure that the child
 " goes through full reconfiguration next time it's needed.
-fu! s:Child_BufDelete(bnr)
-	call s:Unconfigure_child()
+fu! s:Treebuf_BufDelete(bnr)
+	call s:Unconfigure_treebuf()
 endfu
 
 " Each time child buf is entered in its special window, we need to check to see
@@ -1728,9 +1767,9 @@ endfu
 " Assumption: Since child is unconfigured when child buffer first leaves special
 " window, a BufEnter in the special child window should always imply window
 " change, rather than (e.g.) :buffer command.
-fu! s:Child_BufEnter()
+fu! s:Treebuf_BufEnter()
 	" Ignore BufEnter in non-special window.
-	if s:In_child()
+	if s:In_treebuf()
 		" Now make sure parent is still active and in its special window.
 		" Caveat: BufEnter will fire when parent is in process of deletion, but in
 		" this case, parent will not have a window, and the child buffer will be
@@ -1744,7 +1783,7 @@ fu! s:Child_BufEnter()
 			call s:Refresh_cache(0)
 			call s:Refresh_undo_window()
 			call s:Center_tree(0, 1)
-			call s:Configure_cursor_in_child()
+			call s:Configure_cursor_in_treebuf()
 		endif
 	endif
 endfu
@@ -1756,15 +1795,24 @@ endfu
 " Note: In both cases, we want to restore cursor, but in the 2nd case, WinLeave
 " is going to fire after BufLeave.
 " Caveat: WinLeave doesn't fire for :new, so we can't rely on it for 2nd case.
-fu! s:Child_BufLeave()
+fu! s:Treebuf_BufLeave()
 	if s:undo_winid == win_getid()
-		call s:Unconfigure_cursor_in_child()
+		call s:Unconfigure_cursor_in_treebuf()
 	endif
 endfu
 
 " In case user changes child buffer contents.
 " TODO: Probably remove this, as I'm thinking we shouldn't protect against it.
-fu! s:Child_TextChanged()
+fu! s:Treebuf_TextChanged()
+endfu
+
+fu! s:Diffbuf_BufDelete()
+endfu
+fu! s:Diffbuf_BufEnter()
+endfu
+fu! s:Diffbuf_BufLeave()
+endfu
+fu! s:Diffbuf_BufBufWinLeave()
 endfu
 
 " Note: WinEnter/Leave used to determine when cursor needs to be shown/hidden.
@@ -1772,13 +1820,13 @@ endfu
 " cursor treatment.
 fu! s:WinEnter()
 	if s:undo_winid == win_getid()
-		call s:Configure_cursor_in_child()
+		call s:Configure_cursor_in_treebuf()
 	endif
 endfu
 
 fu! s:WinLeave()
 	if s:undo_winid == win_getid()
-		call s:Unconfigure_cursor_in_child()
+		call s:Unconfigure_cursor_in_treebuf()
 	endif
 endfu
 
@@ -1829,7 +1877,7 @@ endfu
 
 " Assumption: Called from parent with undo cache valid
 " Note: Always end up in child window.
-fu! s:Position_child(splithow)
+fu! s:Position_treebuf(splithow)
 	let geom = s:undo_cache.geom
 	" Use splithow hint to extract and parse applicable 'splitinfo' component.
 	let si = s:Get_splitinfo(a:splithow)
@@ -1870,6 +1918,7 @@ fu! s:Position_child(splithow)
 	" Now that we're safely in child, close all other windows containing child
 	" (across all tabs).
 	" Note: Deferring till this point avoids spurious BufWinLeave.
+	" TODO: Perhaps refactor this to use Hide_buffer...
 	call s:Hide_children()
 	let size_cmd = si.side =~? '[ab]' ? '_' : '|'
 	if si.side =~ '\u'
@@ -1891,41 +1940,333 @@ fu! s:Position_child(splithow)
 
 endfu
 
-" If there's an active tab (i.e., one containing only the current parent and the
-" child), return its tabnr, else -1.
-fu! s:Get_reusable_tab()
-	if s:bufnr < 0 || s:undo_bufnr < 0
+fu! s:Option_get(name)
+	let cfg = s:opt_cfg[a:name]
+	if !exists('g:undotree_' . a:name)
+		" User didn't override.
+		return cfg.default
+	endif
+	" User has set.
+	let v = g:undotree_{a:name}
+	let vt = type(v)
+	if cfg.type == 6 && (vt == 0 && (v == 0 || v == 1))
+		\ || cfg.type == vt
+		" Correct type
+		if vt == 0 || vt == 5
+			" Check min/max constraints if applicable.
+			if has_key(cfg, 'max') && v > cfg.max
+				echomsg printf(
+					\ "Warning: Provided %s option value of %d is greater than max:"
+					\." setting to %d",
+					\ a:name, v, cfg.max)
+				v = cfg.max
+			elseif has_key(cfg, 'min') && v < cfg.min
+				echomsg printf(
+					\ "Warning: Provided %s option value of %d is less than min:"
+					\." setting to %d",
+					\ a:name, v, cfg.min)
+				v = cfg.min
+			endif
+		endif
+	else
+		" Wrong type!
+		echomsg printf(
+			\ "Warning: Ignoring value for option '%s': must be Vim type %d",
+			\ a:name, cfg.type)
+		v = cfg.default
+	endif
+	return v
+endfu
+
+" Pick the best parent window number.
+fu! s:Set_parent()
+	if s:bufnr < 0 || bufnr(s:bufnr) < 0
+		" No valid parent buffer exists.
+		let s:winid = -1
 		return -1
 	endif
-	for c_tabnr in map(win_findbuf(s:undo_bufnr), 'win_id2tabwin(v:val)[0]')
-		" Get list of buffers in this tab (which we know contains child).
-		let bufnrs = tabpagebuflist(c_tabnr)
-		if len(bufnrs) != 2
-			" Consider only tabs containing single parent and single child.
-			continue
+	" Parent buffer exists. Is it in a window in current tab?
+	let this_tnr = tabpagenr()
+	if s:winid > 0
+		let [tnr, wnr] = win_id2tabwin(s:winid)
+		if wnr > 0 && tnr == this_tnr
+			return wnr
 		endif
-		" Note: We already know the tab contains child and one other buffer; if
-		" the other buffer is parent, this tab's the one we're looking for.
-		if index(bufnrs, s:bufnr) >= 0
-			" Found a tab containing only a single parent and child
-			return c_tabnr
+	endif
+	" Initial window doesn't exist any longer. Find one in current tab that
+	" contains the buffer. If more than one, pick tallest.
+	let [best_wnr, max_ht] = [-1, -1]
+	for winid in win_findbuf(s:bufnr)
+		let [tnr, wnr] = win_id2tabwin(winid)
+		let ht = winheight(wnr)
+		if this_tnr == tnr && ht > max_ht
+			let best_wnr = wnr
 		endif
 	endfor
-	return -1
+	let s:winid = best_wnr > 0 ? win_getid(best_wnr) : -1
+	" Could still be -1
+	return best_wnr
+endfu
+
+fu! s:Goto_parent()
+	" Assumption: Parent is visible.
+	" Rationale: BufWinLeave event...
+	noauto call win_gotoid(s:winid)
+endfu
+
+fu! s:Goto_diffbuf()
+	" Assumption: The buffer's existence has been validated.
+	exe 'noauto ' . bufwinnr(s:diff_bufnr) . 'wincmd w'
+endfu
+
+fu! s:Goto_treebuf()
+	" Assumption: The buffer's existence has been validated.
+	exe 'noauto ' . bufwinnr(s:undo_bufnr) . 'wincmd w'
+endfu
+
+" Set 'wfh' and 'wfw' for all windows in current tab page, except for any whose
+" window numbers are input. Return a pair of lists containing window ids, which
+" can be passed to Unfreeze_windows() to unfreeze only those windows that need
+" it (and only in the necessary directions):
+" Note: Intentionally using window ids rather than nrs to permit windows to be
+" closed between Freeze and Unfreeze.
+" Return Format: [[wfw-1, wfw-2, ...], [wfh-1, wfh-2, ...]]
+fu! s:Freeze_windows(...)
+	let ret = [[], []]
+	let skip_wids = a:000
+	for wnr in range(1, winnr('$'))
+		let wid = win_getid(wnr)
+		if index(skip_wids, wid) < 0
+			" Not skipping this window.
+			for wh in ['w', 'h']
+				if !getwinvar(wnr, '&wf' . wh)
+					" Freeze and record the fact that we've done so.
+					call setwinvar(wnr, '&wf' . wh, 1)
+					call add(ret[wh == 'w' ? 0 : 1], wid)
+				endif
+			endfor
+		endif
+	endfor
+	return ret
+endfu
+
+" Unfreeze windows frozen by Freeze_windows.
+" Input: Takes the pair of lists (0=width 1=height) returned by Freeze_windows.
+fu! s:Unfreeze_windows(wid_lists)
+	let whs = ['w', 'h']
+	for wids in a:wid_lists
+		" Handle one of the two dimensions.
+		let wh = remove(whs, 0)
+		for wid in wids
+			let wnr = win_id2win(wid)
+			" Make sure window hasn't been closed since freeze.
+			if wnr > 0
+				" Unfreeze
+				call setwinvar(wnr, '&wf' . wh, 0)
+			endif
+		endfor
+	endfor
+endfu
+
+" Assumption: Parent exists in window in current tab.
+fu! s:Position_diffbuf()
+	call s:Goto_parent()
+	" Save viewport so we can restore after opening (or re-opening) child.
+	" Rationale: Opening child window (e.g.) can effectively scroll the parent.
+	let p_wsv = winsaveview()
+
+	" Note: This may clear the bufnr; its purpose is to ensure that the bufnr is
+	" still valid (i.e., buffer hasn't been wiped).
+	let s:diff_bufnr = s:diff_bufnr > 0 ? bufnr(s:diff_bufnr) : -1
+	" Note: 'silent' prevents annoying and misleading [new file] msg.
+	let cmd = ' +setl\ buftype=nofile\ bufhidden=hide\ noswapfile\ nomodifiable '
+	let size = s:Option_get('diffheight')
+	try 
+		" Make sure only the parent window's size is affected by the split.
+		let ea_save = &ea | set noea
+		if s:diff_bufnr > 0
+			" Re-using child buffer.
+			" Note: bufwinnr() ignores other tabs.
+			let wnr = bufwinnr(s:diff_bufnr)
+			if wnr > 0
+				" Buf is in a window; save its viewport for restore.
+				" Design Decision: User shouldn't be opening the special bufs
+				" manually; don't bother protecting against it.
+				exe 'noauto ' . wnr . 'wincmd w'
+				let c_wsv = winsaveview()
+				" Return to parent.
+				noauto wincmd p
+				" Make sure we end up with the diff displayed in only 1 window.
+				" TODO: I'm thinking ok to generate BufWinLeave here, as that
+				" should be significant only for parent under redesign.
+				call s:Hide_buffer(s:diff_bufnr)
+			endif
+			" Note: 'noauto' modifier prevents premature attempt to refresh.
+			exe 'silent noauto below ' . s:diff_bufnr . 'sb' . cmd
+			" IMPORTANT TODO: Set its size (since sb doesn't accept one...
+			" !!!!! UNDER CONSTRUCTION !!!!!
+			" Use Freeze_windows mechanism to ensure that the additional height
+			" is given to parent!!!
+			exe 'wincmd ' . size . '_'
+			if exists('l:c_wsv')
+				" Buffer was already displayed; restore its viewport.
+				call winrestview(c_wsv)
+			endif
+		else
+			" Create new window containing scratch buffer.
+			" Caveat: Wanted to wrap name in [...], but that makes Vim think it's
+			" directory.
+			exe 'silent below ' . size . 'new ' . cmd . expand('%') . '.diff'
+			let s:diff_bufnr = bufnr('%')
+		endif
+	finally
+		" TODO: Need a workaround for fact that simply *setting* ea causes all
+		" windows to be made same size!!!! Maybe view restore?
+		" Idea: Use wincmd j to check whether diff win is directly below parent,
+		" and if so, add heights of both parent and diff win to get new parent
+		" height. Alternatively, temporarily set 'winfixheight' in all but
+		" parent.
+		if ea_save
+			" TODO: Should we attempt to protect with try/catch? If so, how?
+			let freeze_wids = s:Freeze_windows()
+			let &ea = ea_save
+			call s:Unfreeze_windows(freeze_wids)
+		endif
+	endtry
+	" Make sur the parent's viewport hasn't changed.
+	noauto wincmd p
+	call winrestview(p_wsv)
+	" Back to newly-positioned diff buf.
+	noauto wincmd p
+
+endfu
+
+fu! s:Configure_diffbuf()
+	call s:Create_autocmds_in_diffbuf()
+	call s:Create_mappings_in_diffbuf()
+	" TODO: Decide whether separate function should be used for options.
+	" Rationale: Tree display falls apart if 'wrap' on
+	setf diff
 endfu
 
 " Make sure an undo_buf exists, is visible, and is properly configured, creating
 " if necessary.
 " Assumption: In parent buffer
-fu! s:Prepare_child(splithow)
+fu! s:Prepare_treebuf(splithow)
 	" Before creating/moving to child, save parent's path to obviate need for
-	" Configure_child to switch back to parent's buffer to get it.
+	" Configure_treebuf to switch back to parent's buffer to get it.
 	let p_path = expand('%:p')
-	call s:Position_child(a:splithow)
+	call s:Position_treebuf(a:splithow)
 	" Note: We call this even when buf already existed, to ensure it's got all
 	" the mappings and autocmds we'll need. (It's unlikely, but possible, that
 	" someone deleted maps/autocmds, for instance.)
-	call s:Configure_child(p_path)
+	call s:Configure_treebuf(p_path)
+endfu
+
+" Return wnr (always truthy) or 0 if diff buf not visible in curent tab.
+fu! s:Is_diff_visible()
+	let wnr = s:diff_bufnr > 0 ? bufwinnr(s:diff_bufnr) : -1
+	return wnr > 0 ? wnr : 0
+endfu
+
+fu! s:Prepare_diffbuf()
+	call s:Position_diffbuf()
+	call s:Configure_diffbuf()
+endfu
+
+fu! s:Compare_states(seqs, cur_seq, ...)
+	let tgt_seq = a:0 ? a:1 : -1
+	" Determine which seq number to start with to minimize state switches.
+	" Logic:
+	"   If current state is one of the 2 we need, do it first.
+	"   Else if target state is one of the 2 we need, do it last.
+	let sidx = index(a:seqs, a:cur_seq)
+	if sidx < 0
+		" Current state isn't one of the 2 we need.
+		let sidx = index(a:seqs, tgt_seq)
+		if sidx >= 0
+			" Do target state last.
+			let sidx = !sidx
+		endif
+	endif
+	if sidx < 0
+		" No need to change default order.
+		let sidx = 0
+	endif
+	let fs = ['', '']
+	try
+		" TODO: Consider whether to disable folding temporarily as well.
+		let wsv = winsaveview()
+		" Note: Docs on winsaveview() suggest disabling folding temporarily to
+		" prevent folds being opened while moving around.
+		" Rationale: Fold information is not returned by winsaveview(); thus,
+		" if folding were enabled while moving around, folding could change as
+		" a side-effect of the movement.
+		let fen = &foldenable
+		set nofen
+		let i = 0
+		while i < 2 
+			let i_cmp = (i + sidx) % 2
+			silent exe 'undo ' . a:seqs[i_cmp]
+			let fs[i_cmp] = tempname()
+			" Write this undo state to temporary file.
+			exe 'w ' . fs[i_cmp]
+			let i += 1
+		endwhile
+		" We now have 2 temporary files for comparison.
+		" TODO: Eventually, support diff options, but for now just do default.
+		let res = systemlist(printf("diff %s %s", fs[0], fs[1]))
+	finally
+		" Move to the target undo state if provided, else return to current.
+		silent exe 'undo ' . (tgt_seq >= 0 ? tgt_seq : a:cur_seq)
+		" Restore folds and view setting.
+		" Note: First restore 'fen' to setting it had when view was saved.
+		let &fen = fen
+		call winrestview(wsv)
+		" Don't leave temp files lying around.
+		for f in fs
+			call delete(f)
+		endfor
+	endtry
+	" Return diff as list of lines.
+	return res
+endfu
+
+" TODO: Have this used elsewhere...
+fu! s:Put_buf_contents(lines)
+	try
+		setl modifiable
+		" Replace undo buffer's contents.
+		silent %d
+		call append(0, a:lines)
+		" Append adds a final blank line, which serves no purpose, and which we
+		" don't want to impact window sizing, so delete it.
+		$d
+		" Caveat: The preceding :$d can shift the viewport.
+		norm! gg
+	finally
+		setl nomodifiable
+	endtry
+endfu
+
+fu! s:Update_diff()
+	" Goto parent to compute the diff
+	call s:Goto_parent()
+	let t = s:undo_cache.tree.cur
+	let seq2 = t.seq
+	" TODO: Implement marking of seq.
+	let seq1 = s:mark_seq < 0
+		\ ? empty(t.parent) ? -1 : t.parent.seq
+		\ : s:mark_seq
+
+	" Perform the comparison.
+	" TODO: What to do if nothing to compare? (Currently, can happen only if
+	" seq2 is root.)
+	let lines = seq1 >= 0
+		\ ? s:Compare_states([seq1, seq2], seq1, seq2)
+		\ : []
+	call s:Goto_diffbuf()
+	call s:Put_buf_contents(lines)
 endfu
 
 fu! s:Describe_node(...)
@@ -2069,6 +2410,9 @@ fu! s:Goto_node_in_tree(seq)
 	call s:undo_cache.syn.Update(node)
 	" Output summary of current change.
 	call s:Describe_node()
+	if s:Is_diff_visible()
+		call s:Update_diff()
+	endif
 
 endfu
 
@@ -2112,10 +2456,18 @@ endfu
 " BufEnter. Hmm... What if user executes a :bd or something. Well, in that case,
 " parent's BufDelete would fire, clearing data structures.
 fu! s:Move_in_tree(dir) " entry
+	" TODO: Maybe get rid of the "specialness" test.
 	if s:undo_bufnr < 0 || s:undo_winid != win_getid()
 		" Ignore maps in non-special child window.
 		" TODO: If we stick with this approach, should probably use normal! to
 		" let the key sequence have its normal effect.
+		" TODO: Consider using feedkeys() (with no remap "n" in mode arg).
+		" Another possibility would be to disable the mapping that got us here
+		" just long enough to run feedkeys() with mapping enabled (in case user
+		" has j, k, etc. remapped). This is a lot of trouble, which could be
+		" obviated if I didn't insist on the "special" window approach... Of
+		" course, this would mean reworking syntax a bit to make it
+		" buffer-specific.
 		return
 	endif
 	if s:bufnr < 0 || s:winid < 0 || !win_id2win(s:winid)
@@ -2133,10 +2485,16 @@ fu! s:Move_in_tree(dir) " entry
 	call s:Center_tree(0, 1)
 	" Output summary of current change.
 	call s:Describe_node()
+	" Update the diff buffer if applicable.
+	" Note: If it's not visible, don't resurrect; assume user wanted it closed.
+	if s:Is_diff_visible()
+		call s:Update_diff()
+	endif
+	call s:Goto_treebuf()
 endfu
 
 fu! s:Toggle_display_mode_handler()
-	if !s:In_child()
+	if !s:In_treebuf()
 		" Ignore invocation from non-special child window.
 		return
 	endif
@@ -2147,8 +2505,8 @@ endfu
 " Invoked from child's <buffer> map.
 " Assumption: Can't get here unless we're in true child buffer (though we will
 " need to check to be sure we're in special window).
-fu! s:Refresh_child() " entry
-	if !s:In_child()
+fu! s:Refresh_treebuf() " entry
+	if !s:In_treebuf()
 		" Ignore invocation from non-special child window.
 		return
 	endif
@@ -2159,7 +2517,7 @@ fu! s:Refresh_child() " entry
 	" hidden. Could populate them only when undo buffer is opened.
 	if !s:Is_active_parent()
 		echomsg "Warning: Cannot refresh undo buffer with no associated parent."
-		call s:Orphan_child()
+		call s:Orphan_treebuf()
 		return
 	endif
 	" There's a visible and active parent. Forcibly refresh
@@ -2302,12 +2660,15 @@ fu! s:Open_undo_window(...) " entry
 	endif
 	" Make sure cache is up-to-date.
 	call s:Refresh_cache(0, 1)
-	call s:Prepare_child(splithow)
+	call s:Prepare_treebuf(splithow)
 	" Note: Syntax is currently associated with child window, which always
 	" changes, due to the way we do child positioning.
 	" Note: Call to clearmatches in Clear is harmless but pointless in this
 	" case.
 	call s:undo_cache.syn.Clear()
+	if s:Option_get('showdiff')
+		call s:Prepare_diffbuf()
+	endif
 	" Everything should be in order now with the 2 windows.
 	call s:Refresh_undo_window()
 	" Forcibly center current node in limited mode.
@@ -2315,6 +2676,41 @@ fu! s:Open_undo_window(...) " entry
 	" the tree as possible. (Note that this is especially important when we've
 	" sized the child window large enough to display the entire tree.)
 	call s:Center_tree(1, 1)
+endfu
+
+" Design Decision: Don't try to keep anything cached.
+" Rationale: Simplest/safest approach
+" TODO: Also give command and/or mapping to accomplish this.
+" Rationale: Ensures user can always get back to known state.
+fu! s:Close_undotree() " entry
+endfu
+
+let S_Freeze = function('s:Freeze_windows')
+let S_Unfreeze = function('s:Unfreeze_windows')
+
+fu! s:Toggle_diff()
+	if s:Is_diff_visible()
+		try 
+			" Make sure only the parent window's size is affected by the split.
+			let ea_save = &ea | set noea
+			" Freeze all but parent, to ensure it gets the freed up space.
+			let freeze_wids = s:Freeze_windows(s:winid)
+			call s:Goto_treebuf()
+			call s:Hide_buffer(s:diff_bufnr)
+			" TODO: Do we need to save/restore parent's view?
+			call s:Unfreeze_windows(freeze_wids)
+		finally
+			" Caveat: Setting 'ea' will resize windows if we don't prevent.
+			let freeze_wids = s:Freeze_windows()
+			let &ea = ea_save
+			call s:Unfreeze_windows(freeze_wids)
+		endtry
+	else
+		call s:Prepare_diffbuf()
+		call s:Update_diff()
+		call s:Goto_treebuf()
+	endif
+
 endfu
 
 " Called From: One of the following...
@@ -2334,19 +2730,12 @@ fu! s:Refresh_undo_window()
 	" -buffer contents could have been invalidated by user modification
 	"  (shouldn't happen - don't guard against this)
 	if s:undo_cache.dirty
-		" TODO: Is this best strategy, or do we need a more complex mechanism to
-		" manage 'modifiable'?
-		setl modifiable
-		" Replace undo buffer's contents with new tree.
-		silent %d
-		call append(0, s:undo_cache.geom.lines)
-		" Append adds a final blank line, which serves no purpose, and which we
-		" don't want to impact window sizing, so delete it.
-		$d
-		setl nomodifiable
-		" Caveat: The preceding :$d can shift the viewport.
-		norm! gg
+		call s:Put_buf_contents(s:undo_cache.geom.lines)
 		let s:undo_cache.dirty = 0
+		if s:Is_diff_visible()
+			call s:Update_diff()
+			call s:Goto_treebuf()
+		endif
 	endif
 	" Note: Even if cache wasn't refreshed, syntax could have been invalidated
 	" because \u made a different parent window special.
@@ -2489,4 +2878,4 @@ fu! s:Test_only()
 
 endfu
 
-" vim:ts=4:sw=4:tw=80
+" vim:ts=4:sw=4:tw=80:fdm=marker:fmr=fu!,endfu
